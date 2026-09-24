@@ -12,6 +12,7 @@ import { sha256 } from "../common/crypto/hash";
 import { AuthAuditService } from "./auth-audit.service";
 import { AuthRateLimiterService } from "./auth-rate-limiter.service";
 import { SessionService } from "./session.service";
+import type { SessionDeviceHeaders } from "./session-device-metadata";
 
 @Injectable()
 export class AuthService {
@@ -84,7 +85,7 @@ export class AuthService {
     walletAddress: string;
     signature: string;
     clientMetadata?: string;
-  }) {
+  }, headers?: SessionDeviceHeaders) {
     this.assertValidPublicKey(input.walletAddress);
 
     // Check rate limits before verification attempt
@@ -213,7 +214,7 @@ export class AuthService {
       walletAddress: user.walletAddress,
       walletHash: user.walletHash,
       role: user.role,
-    });
+    }, undefined, headers);
 
     // Record successful verification
     await this.auditService.recordEvent(

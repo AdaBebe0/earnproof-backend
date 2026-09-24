@@ -150,6 +150,11 @@ model AuthSession {
   userId      String
   user        User      @relation(fields: [userId], references: [id])
   createdAt   DateTime  @default(now())
+  /// Coarse, escaped label derived from an allowlisted request-header subset.
+  /// Raw user-agent and network identifiers are never persisted.
+  deviceLabel String?
+  firstSeenAt DateTime  @default(now())
+  lastSeenAt  DateTime  @default(now())
   expiresAt   DateTime
   lastUsedAt  DateTime?
   /// Set when the session is explicitly revoked (logout or rotation).
