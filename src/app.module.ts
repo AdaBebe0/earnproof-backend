@@ -13,6 +13,7 @@ import { DatabaseModule } from "./database/database.module";
 import { HealthModule } from "./health/health.module";
 import { HttpMetricsInterceptor } from "./common/interceptors/http-metrics.interceptor";
 import { ObservabilityModule } from "./common/observability/observability.module";
+import { ResilienceModule } from "./common/resilience/resilience.module";
 import { JobsModule } from "./jobs/jobs.module";
 import { IssuersModule } from "./issuers/issuers.module";
 import { OrganizationsModule } from "./organizations/organizations.module";
@@ -30,6 +31,7 @@ import { WebhooksModule } from "./webhooks/webhooks.module";
     }),
     ScheduleModule.forRoot(),
     ObservabilityModule,
+    ResilienceModule,
     DatabaseModule,
     AuditModule,
     ApiKeysModule,
