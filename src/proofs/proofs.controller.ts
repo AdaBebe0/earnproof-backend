@@ -2,6 +2,10 @@ import { Body, Controller, Get, Param, Patch, Post, UseGuards } from "@nestjs/co
 import { ApiBearerAuth, ApiTags } from "@nestjs/swagger";
 import { AuthenticatedUser } from "../auth/auth.types";
 import { CurrentUser } from "../common/decorators/current-user.decorator";
+import {
+  AuthenticatedRoute,
+  PublicRoute,
+} from "../common/decorators/authorization-policy.decorator";
 import { AuthGuard } from "../common/guards/auth.guard";
 import { CreateMinimumIncomeProofDto } from "./dto/create-minimum-income-proof.dto";
 import { ProofsService } from "./proofs.service";
@@ -14,6 +18,7 @@ export class ProofsController {
   @ApiBearerAuth()
   @UseGuards(AuthGuard)
   @Post("minimum-income")
+  @AuthenticatedRoute({ ownership: "user" })
   createMinimumIncomeProof(
     @CurrentUser() user: AuthenticatedUser,
     @Body() body: CreateMinimumIncomeProofDto,
@@ -24,11 +29,13 @@ export class ProofsController {
   @ApiBearerAuth()
   @UseGuards(AuthGuard)
   @Patch(":id/revoke")
+  @AuthenticatedRoute({ ownership: "user" })
   revokeProof(@CurrentUser() user: AuthenticatedUser, @Param("id") id: string) {
     return this.proofsService.revokeProof(user.id, id);
   }
 
   @Get(":id/verify")
+  @PublicRoute()
   verifyProof(@Param("id") id: string) {
     return this.proofsService.verifyProof(id);
   }
