@@ -6,6 +6,7 @@ import {
   Param,
   Patch,
   Post,
+  Req,
   Query,
   UseGuards,
 } from "@nestjs/common";
@@ -34,6 +35,7 @@ import { RevokeProofResponseDto } from "./dto/revoke-proof-response.dto";
 import { VerifyProofResponseDto } from "./dto/verify-proof-response.dto";
 import { VerificationStatsDto } from "./dto/verification-stats.dto";
 import { ProofsService } from "./proofs.service";
+import type { Request } from "express";
 
 @ApiTags("proofs")
 @Controller("proofs")
@@ -274,8 +276,8 @@ export class ProofsController {
   @SkipThrottle({ default: true, strict: true })
   @Throttle({ verification: {} })
   @Get(":id/verify")
-  verifyProof(@Param("id") id: string) {
-    return this.proofsService.verifyProof(id);
+  verifyProof(@Param("id") id: string, @Req() request: Request) {
+    return this.proofsService.verifyProof(id, { ip: request.ip });
   }
 
   @ApiBearerAuth()
