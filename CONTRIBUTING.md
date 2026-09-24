@@ -6,6 +6,7 @@ This repository contains the EarnProof API service for wallet authentication, St
 
 ```bash
 npm install
+git config core.hooksPath .githooks
 cp .env.example .env
 docker compose up -d
 npm run prisma:generate
@@ -14,6 +15,13 @@ npm run start:dev
 ```
 
 Default local API: `http://localhost:4000/api/v1`.
+
+`npm install` configures the tracked Git hooks automatically. The explicit Git
+command above also enables them in an existing checkout. The pre-commit hook
+runs unit tests when staged backend code, Prisma schema, or configuration
+changes. The commit-message hook accepts conventional subjects such as `feat:
+add proof search` and `fix(auth): reject expired challenges`; scopes and issue
+IDs are optional.
 
 ## Validation
 
@@ -42,4 +50,3 @@ npm run build
 - New behavior has meaningful tests or fixtures.
 - Public API responses disclose only intended proof data.
 - Documentation and README state what is implemented accurately.
-

@@ -3,4 +3,8 @@ dist
 coverage
 .env
 .env.local
+.env.test
+.env.test.local
+# Deployment environment files (see docs/deployment.md)
+*.env
 .DS_Store

@@ -9,24 +9,45 @@
     "npm": ">=10.0.0"
   },
   "scripts": {
+    "prepare": "npm run hooks:install",
+    "hooks:install": "node scripts/install-git-hooks.js",
     "build": "prisma generate && nest build",
+    "postbuild": "node --check dist/main.js",
+    "prestart": "npm run prisma:migrate:deploy",
     "start": "node dist/main.js",
     "start:nest": "nest start",
     "start:dev": "nest start --watch",
-    "lint": "eslint \"src/**/*.ts\"",
+    "lint": "eslint \"src/**/*.ts\" \"test/**/*.ts\" \"scripts/**/*.ts\"",
     "test": "jest",
     "test:watch": "jest --watch",
+    "test:integration": "jest --config jest.integration.config.js",
+    "test:integration:serial": "jest --config jest.integration.config.js --runInBand",
+    "test:performance": "jest --config jest.performance.config.js --runInBand",
+    "test:e2e": "jest --config jest.e2e.config.js",
+    "test:e2e:serial": "jest --config jest.e2e.config.js --runInBand",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
-    "prisma:studio": "prisma studio"
+    "prisma:migrate:deploy": "prisma migrate deploy",
+    "prisma:studio": "prisma studio",
+    "seed:demo": "ts-node prisma/seed-demo.ts",
+    "db:reset": "ts-node prisma/reset.ts",
+    "drill:verify": "ts-node scripts/backup/verify-backup-format.ts",
+    "webhook:conformance": "ts-node scripts/webhook-receiver/conformance.ts",
+    "credential:conformance": "ts-node scripts/credential-verifier/conformance.ts",
+    "migration:safety": "ts-node scripts/migration-safety.ts",
+    "webhook:receiver": "ts-node scripts/webhook-receiver/receiver.ts",
+    "sbom:generate": "ts-node scripts/sbom/generate.ts",
+    "sbom:check": "ts-node scripts/sbom/check.ts"
   },
   "dependencies": {
+    "@nestjs/cli": "^11.0.14",
     "@nestjs/common": "^11.1.9",
     "@nestjs/config": "^4.0.2",
     "@nestjs/core": "^11.1.9",
-    "@nestjs/cli": "^11.0.14",
     "@nestjs/platform-express": "^11.1.9",
+    "@nestjs/schedule": "^6.1.3",
     "@nestjs/swagger": "11.4.6",
+    "@nestjs/throttler": "^6.5.0",
     "@prisma/client": "^6.19.3",
     "@stellar/stellar-base": "^15.0.0",
     "@stellar/stellar-sdk": "16.2.0",
@@ -41,10 +62,12 @@
     "zod": "^4.2.1"
   },
   "devDependencies": {
+    "@apidevtools/swagger-parser": "^12.1.0",
     "@nestjs/schematics": "^11.0.9",
     "@nestjs/testing": "^11.1.9",
     "@types/jest": "^30.0.0",
     "@types/node": "^24.10.2",
+    "@types/supertest": "^7.2.1",
     "@typescript-eslint/eslint-plugin": "^8.50.0",
     "@typescript-eslint/parser": "^8.50.0",
     "eslint": "^9.39.2",
@@ -61,6 +84,7 @@
     "typescript-eslint": "^8.67.0"
   },
   "overrides": {
+    "deepmerge-ts": "8.0.2",
     "js-yaml": "5.2.3"
   }
 }

@@ -63,6 +63,50 @@ enum VerificationResult {
   UNVERIFIED_ISSUER
 }
 
+enum VerificationOutcome {
+  VALID
+  EXPIRED
+  REVOKED
+  UNKNOWN
+  INVALID_SIGNATURE
+  ISSUER_WARNING
+}
+
+enum AnchoringOperation {
+  REGISTER
+  REVOKE
+}
+
+enum AnchoringStatus {
+  PENDING
+  PROCESSING
+  CONFIRMED
+  FAILED
+}
+
+enum AuthEventType {
+  CHALLENGE_CREATED
+  CHALLENGE_VERIFIED
+  SIGNATURE_INVALID
+  CHALLENGE_EXPIRED
+  CHALLENGE_REPLAYED
+  RATE_LIMITED
+}
+
+enum ApiKeyScope {
+  // Proof verification and reading
+  PROOF_READ
+  PROOF_VERIFY
+  
+  // Payment management and reading
+  PAYMENT_READ
+  PAYMENT_WRITE
+  
+  // Organization management
+  ORG_READ
+  ORG_ADMIN
+}
+
 model User {
   id                 String          @id @default(cuid())
   walletAddress      String          @unique
@@ -77,7 +121,7 @@ model User {
   trustedSources     TrustedSource[]
   proofs             Proof[]
   createdApiKeys     ApiKey[]
-  auditLogs          AuditLog[]
+  sessions           AuthSession[]
 
   @@index([walletHash])
   @@index([status])
@@ -94,6 +138,30 @@ model WalletChallenge {
 
   @@index([walletAddress])
   @@index([expiresAt])
+}
+
+/// Persisted, revocable authentication session.
+/// Only a SHA-256 hash of the opaque bearer token is stored — the raw token is never
+/// written to the database or to any application log.
+model AuthSession {
+  id          String    @id @default(cuid())
+  /// SHA-256 hex digest of the raw opaque session token.
+  tokenHash   String    @unique
+  userId      String
+  user        User      @relation(fields: [userId], references: [id])
+  createdAt   DateTime  @default(now())
+  expiresAt   DateTime
+  lastUsedAt  DateTime?
+  /// Set when the session is explicitly revoked (logout or rotation).
+  revokedAt   DateTime?
+  /// Links to the replacement session produced during rotation.
+  rotatedToId String?   @unique
+  rotatedTo   AuthSession? @relation("SessionRotation", fields: [rotatedToId], references: [id])
+  rotatedFrom AuthSession? @relation("SessionRotation")
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@index([revokedAt])
 }
 
 model Organization {
@@ -120,6 +188,12 @@ model Issuer {
   stellarAddress  String          @unique
   status          ResourceStatus  @default(PENDING)
   metadataHash    String?
+  publicMetadata  Json?
+  contractSyncState       String          @default("PENDING")
+  contractSyncedStatus    ResourceStatus?
+  contractTransactionHash String?
+  contractSyncedAt         DateTime?
+  contractSyncError        String?
   verifiedAt      DateTime?
   suspendedAt     DateTime?
   revokedAt       DateTime?
@@ -157,7 +231,7 @@ model Payment {
   assetIssuer            String?
   amountEncrypted        String?
   occurredAt             DateTime
-  memo                   String?
+  memo                   Json?
   classification         PaymentClassification  @default(UNKNOWN)
   isEligible             Boolean                @default(false)
   createdAt              DateTime               @default(now())
@@ -207,8 +281,10 @@ model Proof {
   updatedAt               DateTime            @updatedAt
   claim                   ProofClaim?
   verificationEvents      VerificationEvent[]
+  anchoringIntents        AnchoringIntent[]
 
   @@index([userId, status])
+  @@index([userId, createdAt, id])
   @@index([proofType])
   @@index([expiresAt])
 }
@@ -257,6 +333,20 @@ model VerificationEvent {
   @@index([result])
 }
 
+model VerificationEventLog {
+  id           String              @id @default(cuid())
+  outcome      VerificationOutcome
+  proofId      String
+  metadataHash String
+  saltVersion  Int
+  createdAt    DateTime            @default(now())
+  retainUntil  DateTime
+
+  @@index([proofId, createdAt])
+  @@index([outcome])
+  @@index([retainUntil])
+}
+
 model ApiKey {
   id             String          @id @default(cuid())
   organizationId String
@@ -264,34 +354,79 @@ model ApiKey {
   createdById    String
   createdBy      User            @relation(fields: [createdById], references: [id])
   name           String
+  prefix         String          @db.VarChar(8)
   keyHash        String          @unique
+  scopeAssignments ApiKeyScopeAssignment[] @relation("apiKeyScopeAssignments")
   status         ResourceStatus  @default(ACTIVE)
   lastUsedAt     DateTime?
+  rotatedAt      DateTime?
+  revokedAt      DateTime?
   expiresAt      DateTime?
   createdAt      DateTime        @default(now())
 
   @@index([organizationId, status])
+  @@index([prefix])
+}
+
+model ApiKeyScopeAssignment {
+  id       String      @id @default(cuid())
+  apiKeyId String
+  apiKey   ApiKey      @relation("apiKeyScopeAssignments", fields: [apiKeyId], references: [id], onDelete: Cascade)
+  scope    ApiKeyScope
+
+  @@unique([apiKeyId, scope])
 }
 
 model Webhook {
-  id             String          @id @default(cuid())
-  organizationId String
-  organization   Organization    @relation(fields: [organizationId], references: [id])
-  url            String
-  secretHash     String
-  events         Json
-  status         ResourceStatus  @default(ACTIVE)
-  createdAt      DateTime        @default(now())
-  updatedAt      DateTime        @updatedAt
+  id               String            @id @default(cuid())
+  organizationId   String
+  organization     Organization      @relation(fields: [organizationId], references: [id])
+  url              String
+  secretEncrypted  String
+  events           Json
+  status           ResourceStatus    @default(ACTIVE)
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+  deliveries       WebhookDelivery[]
 
   @@index([organizationId, status])
+}
+
+enum WebhookDeliveryStatus {
+  PENDING
+  SUCCESS
+  FAILED
+}
+
+model WebhookDelivery {
+  id             String                @id @default(cuid())
+  webhookId      String
+  webhook        Webhook               @relation(fields: [webhookId], references: [id])
+  eventType      String
+  eventId        String
+  payload        Json
+  attempt        Int                   @default(1)
+  status         WebhookDeliveryStatus @default(PENDING)
+  statusCode     Int?
+  responseBody   String?
+  durationMs     Int?
+  failureReason  String?
+  replayOf       String?
+  replayedBy     String?
+  replayKey      String?               @unique
+  deliveredAt    DateTime?
+  nextRetryAt    DateTime?
+  createdAt      DateTime              @default(now())
+
+  @@index([webhookId, createdAt])
+  @@index([eventId])
+  @@index([status, nextRetryAt])
 }
 
 model AuditLog {
   id           String   @id @default(cuid())
   actorType    String
   actorId      String?
-  actor        User?    @relation(fields: [actorId], references: [id])
   action       String
   resourceType String
   resourceId   String?
@@ -300,5 +435,41 @@ model AuditLog {
 
   @@index([actorType, actorId])
   @@index([resourceType, resourceId])
+  @@index([createdAt])
+}
+
+model AnchoringIntent {
+  id              String             @id @default(cuid())
+  proofId         String
+  proof           Proof              @relation(fields: [proofId], references: [id])
+  operation       AnchoringOperation
+  status          AnchoringStatus    @default(PENDING)
+  attemptCount    Int                @default(0)
+  lastAttemptAt   DateTime?
+  nextRetryAt     DateTime?
+  transactionHash String?
+  ledger          String?
+  lastErrorSafe   String?
+  permanentError  Boolean            @default(false)
+  createdAt       DateTime           @default(now())
+  updatedAt       DateTime           @updatedAt
+
+  @@unique([proofId, operation])
+  @@index([nextRetryAt])
+  @@index([proofId])
+}
+
+model AuthAuditEvent {
+  id                 String        @id @default(cuid())
+  eventType          AuthEventType
+  walletHash         String
+  clientMetadataHash String?
+  challengeId        String?
+  success            Boolean
+  failureReason      String?
+  createdAt          DateTime      @default(now())
+
+  @@index([walletHash, createdAt])
+  @@index([eventType, createdAt])
   @@index([createdAt])
 }

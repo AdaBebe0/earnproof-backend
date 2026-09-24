@@ -17,6 +17,19 @@ export type HorizonCollection<TRecord> = {
   };
 };
 
+export type HorizonTransactionRecord = {
+  hash?: string;
+  memo_type?: string;
+  memo?: string | Uint8Array;
+};
+
+export type NormalizedMemo =
+  | { type: "none" }
+  | { type: "text"; value: string; truncated: boolean }
+  | { type: "id"; value: string }
+  | { type: "hash"; value: string }
+  | { type: "return_hash"; value: string };
+
 export type NormalizedPayment = {
   operationId: string;
   stellarTransactionHash: string;

@@ -1,0 +1,87 @@
+name: Contract Compatibility
+
+# Links public-contract changes to a compatibility note or an explicit version
+# increment, per docs/versioning.md.
+#
+# This runs on pull_request (not pull_request_target) because it needs only the
+# diff and never executes untrusted code with elevated permissions.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+jobs:
+  compatibility:
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Needed so the base branch is available to diff against.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - run: npm ci
+
+      - name: Run contract policy checks
+        run: npx jest src/common/compatibility --runInBand
+
+      - name: Require a compatibility note for public-contract changes
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          # PR bodies are untrusted input. Passed via env rather than
+          # interpolated into the script, so a crafted description cannot inject
+          # shell commands.
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+
+          # Paths that constitute the public contract surface. A change to any of
+          # these is consumed by parties who do not deploy in lockstep with us.
+          CHANGED=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" -- \
+            'src/**/dto/**' \
+            'src/credentials/**' \
+            'src/webhooks/webhook-event.types.ts' \
+            'src/stellar/**' || true)
+
+          if [ -z "$CHANGED" ]; then
+            echo "No public-contract files changed."
+            exit 0
+          fi
+
+          echo "Public-contract files changed:"
+          echo "$CHANGED"
+
+          # A compatibility note is any change to the versioning policy doc or a
+          # docs/ entry, or an explicit marker in the PR body. Requiring one of
+          # these makes the author state their intent rather than leaving a
+          # reviewer to infer whether a break was deliberate.
+          NOTES=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" -- 'docs/**' || true)
+
+          if [ -n "$NOTES" ]; then
+            echo "Compatibility documentation was updated:"
+            echo "$NOTES"
+            exit 0
+          fi
+
+          if printf '%s' "${PR_BODY:-}" | grep -qiE 'compatibility note|additive only|no public contract change'; then
+            echo "PR body carries an explicit compatibility declaration."
+            exit 0
+          fi
+
+          echo ""
+          echo "FAIL: public-contract files changed with no compatibility note."
+          echo "Per docs/versioning.md, either:"
+          echo "  - update docs/ with a compatibility note (contract, migration, support window, approver), or"
+          echo "  - state 'Compatibility note: additive only' in the PR body, or"
+          echo "  - increment the contract version explicitly."
+          exit 1

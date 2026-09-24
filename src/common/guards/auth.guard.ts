@@ -5,13 +5,18 @@ import {
   UnauthorizedException,
 } from "@nestjs/common";
 import { Request } from "express";
-import { AuthTokenService } from "../../auth/auth-token.service";
+import { PrismaService } from "../../database/prisma.service";
+import { SessionService } from "../../auth/session.service";
+import { AuthenticatedSession } from "../../auth/auth.types";
 
 @Injectable()
 export class AuthGuard implements CanActivate {
-  constructor(private readonly authTokenService: AuthTokenService) {}
+  constructor(
+    private readonly sessionService: SessionService,
+    private readonly prisma: PrismaService,
+  ) {}
 
-  canActivate(context: ExecutionContext): boolean {
+  async canActivate(context: ExecutionContext): Promise<boolean> {
     const request = context.switchToHttp().getRequest<Request>();
     const header = request.headers.authorization;
 
@@ -20,8 +25,39 @@ export class AuthGuard implements CanActivate {
     }
 
     const token = header.slice("Bearer ".length);
-    request.user = this.authTokenService.verify(token);
 
+    // Validate the session — throws on malformed / expired / revoked tokens.
+    const { sessionId, userId } = await this.sessionService.validate(token);
+
+    // Fetch the live user record so the guard can enforce account status.
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        id: true,
+        walletAddress: true,
+        walletHash: true,
+        role: true,
+        status: true,
+      },
+    });
+
+    if (!user) {
+      throw new UnauthorizedException("User not found");
+    }
+
+    if (user.status === "SUSPENDED" || user.status === "REVOKED" || user.status === "DELETED") {
+      throw new UnauthorizedException("Account is not active");
+    }
+
+    const authenticatedSession: AuthenticatedSession = {
+      sessionId,
+      id: user.id,
+      walletAddress: user.walletAddress,
+      walletHash: user.walletHash,
+      role: user.role,
+    };
+
+    request.user = authenticatedSession;
     return true;
   }
 }

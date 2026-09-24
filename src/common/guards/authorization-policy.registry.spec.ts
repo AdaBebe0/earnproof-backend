@@ -1,8 +1,15 @@
 import { Controller, Get, Post, UseGuards } from "@nestjs/common";
+import { ApiKeysController } from "../../api-keys/api-keys.controller";
+import { IntegrationAuthController } from "../../api-keys/integration-auth.controller";
 import { AuthController } from "../../auth/auth.controller";
+import { CredentialsController } from "../../credentials/credentials.controller";
 import { HealthController } from "../../health/health.controller";
+import { IssuersController } from "../../issuers/issuers.controller";
+import { OrganizationsController } from "../../organizations/organizations.controller";
 import { PaymentsController } from "../../payments/payments.controller";
 import { ProofsController } from "../../proofs/proofs.controller";
+import { TrustedSourcesController } from "../../trusted-sources/trusted-sources.controller";
+import { WebhooksController } from "../../webhooks/webhooks.controller";
 import { buildAuthorizationMatrix } from "./authorization-policy.registry";
 import {
   AuthenticatedRoute,
@@ -31,13 +38,20 @@ class IncompleteController {
 describe("authorization policy registry", () => {
   it("covers every application controller method", () => {
     const matrix = buildAuthorizationMatrix([
+      ApiKeysController,
+      IntegrationAuthController,
       AuthController,
+      CredentialsController,
       HealthController,
+      IssuersController,
+      OrganizationsController,
       PaymentsController,
       ProofsController,
+      TrustedSourcesController,
+      WebhooksController,
     ]);
 
-    expect(matrix).toHaveLength(12);
+    expect(matrix).toHaveLength(55);
     expect(matrix.every(({ policy }) => policy.access)).toBe(true);
   });
 

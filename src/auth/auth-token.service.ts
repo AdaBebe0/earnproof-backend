@@ -4,6 +4,10 @@ import { createHmac } from "crypto";
 import { AuthTokenPayload } from "./auth.types";
 import { safeEqual } from "../common/crypto/timing-safe";
 
+/**
+ * @deprecated Self-contained tokens cannot be revoked server-side. Use
+ * `SessionService` for all production authentication flows.
+ */
 @Injectable()
 export class AuthTokenService {
   private readonly secret: string;
@@ -44,6 +48,19 @@ export class AuthTokenService {
     }
 
     return payload;
+  }
+
+  /**
+   * Best-effort verification for legacy callers that still need this
+   * deprecated token format. New production code should prefer persisted
+   * sessions through `SessionService`.
+   */
+  tryVerify(token: string): AuthTokenPayload | undefined {
+    try {
+      return this.verify(token);
+    } catch {
+      return undefined;
+    }
   }
 
   private signPayload(encodedPayload: string) {

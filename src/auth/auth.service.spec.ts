@@ -1,97 +1,550 @@
+import { UnauthorizedException } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
+import { AuthEventType } from "@prisma/client";
 import { Keypair } from "@stellar/stellar-base";
 import { createHash } from "crypto";
-import { AuthTokenService } from "./auth-token.service";
 import { AuthService } from "./auth.service";
+import { SessionService } from "./session.service";
 
-describe("AuthService", () => {
-  const keypair = Keypair.random();
-  const walletAddress = keypair.publicKey();
-  const challenge = {
-    id: "challenge_1",
-    walletAddress,
-    message: "EarnProof wallet authentication",
-    expiresAt: new Date(Date.now() + 60_000),
-    usedAt: null,
-  };
+// ---------------------------------------------------------------------------
+// Shared test fixtures
+// ---------------------------------------------------------------------------
 
-  const prisma = {
+const keypair = Keypair.random();
+const walletAddress = keypair.publicKey();
+
+const challenge = {
+  id: "challenge_1",
+  walletAddress,
+  message: "EarnProof wallet authentication",
+  expiresAt: new Date(Date.now() + 60_000),
+  usedAt: null,
+};
+
+const dbUser = {
+  id: "user_1",
+  walletAddress,
+  walletHash: "sha256:hash",
+  role: "WORKER",
+};
+
+function makePrismaMock() {
+  return {
     walletChallenge: {
       create: jest.fn().mockResolvedValue(challenge),
       findFirst: jest.fn().mockResolvedValue(challenge),
+      findUnique: jest.fn().mockResolvedValue(challenge),
       update: jest.fn().mockResolvedValue({ ...challenge, usedAt: new Date() }),
+      updateMany: jest.fn().mockResolvedValue({ count: 1 }),
     },
     user: {
-      upsert: jest.fn().mockResolvedValue({
-        id: "user_1",
-        walletAddress,
-        walletHash: "sha256:hash",
-        role: "WORKER",
+      upsert: jest.fn().mockResolvedValue(dbUser),
+      findUnique: jest.fn().mockResolvedValue({
+        ...dbUser,
+        status: "ACTIVE",
+        lastLoginAt: new Date(),
       }),
-      findUnique: jest.fn(),
     },
   };
+}
 
-  const config = {
-    getOrThrow: (key: string) => {
-      const values: Record<string, string> = {
-        appUrl: "http://localhost:3000",
-        "stellar.networkPassphrase": "Test SDF Network ; September 2015",
-        sessionSecret: "test_secret_123",
-      };
-      return values[key];
-    },
-  } as ConfigService;
+function makeAuditServiceMock() {
+  return {
+    recordEvent: jest.fn().mockResolvedValue(undefined),
+  };
+}
 
-  const service = new AuthService(
-    prisma as never,
-    new AuthTokenService(config),
-    config,
-  );
+function makeRateLimiterMock() {
+  return {
+    checkChallengeCreationLimit: jest.fn().mockResolvedValue(undefined),
+    checkVerificationLimit: jest.fn().mockResolvedValue(undefined),
+  };
+}
 
-  it("creates wallet challenges", async () => {
-    await expect(service.createChallenge(walletAddress)).resolves.toMatchObject({
+const config = {
+  getOrThrow: (key: string) => {
+    const values: Record<string, string> = {
+      appUrl: "http://localhost:3000",
+      "stellar.networkPassphrase": "Test SDF Network ; September 2015",
+      sessionSecret: "test_secret_123",
+    };
+    return values[key];
+  },
+} as ConfigService;
+
+// ---------------------------------------------------------------------------
+// AuthService.createChallenge
+// ---------------------------------------------------------------------------
+
+describe("AuthService.createChallenge", () => {
+  it("returns a challenge record with id and message", async () => {
+    const prisma = makePrismaMock();
+    const sessionSvc = new SessionService(prisma as never, config);
+    const auditSvc = makeAuditServiceMock();
+    const rateLimiter = makeRateLimiterMock();
+    const svc = new AuthService(
+      prisma as never,
+      sessionSvc,
+      auditSvc as never,
+      rateLimiter as never,
+      config,
+    );
+
+    await expect(svc.createChallenge(walletAddress)).resolves.toMatchObject({
       id: "challenge_1",
-      walletAddress,
+      message: expect.any(String),
     });
   });
 
-  it("verifies SEP-53 signatures and returns bearer session", async () => {
+  it("checks rate limits before creating challenge", async () => {
+    const prisma = makePrismaMock();
+    const sessionSvc = new SessionService(prisma as never, config);
+    const auditSvc = makeAuditServiceMock();
+    const rateLimiter = makeRateLimiterMock();
+    const svc = new AuthService(
+      prisma as never,
+      sessionSvc,
+      auditSvc as never,
+      rateLimiter as never,
+      config,
+    );
+
+    await svc.createChallenge(walletAddress, "client-metadata");
+
+    expect(rateLimiter.checkChallengeCreationLimit).toHaveBeenCalledWith(
+      walletAddress,
+      "client-metadata",
+    );
+  });
+
+  it("records successful challenge creation", async () => {
+    const prisma = makePrismaMock();
+    const sessionSvc = new SessionService(prisma as never, config);
+    const auditSvc = makeAuditServiceMock();
+    const rateLimiter = makeRateLimiterMock();
+    const svc = new AuthService(
+      prisma as never,
+      sessionSvc,
+      auditSvc as never,
+      rateLimiter as never,
+      config,
+    );
+
+    await svc.createChallenge(walletAddress);
+
+    expect(auditSvc.recordEvent).toHaveBeenCalledWith(
+      AuthEventType.CHALLENGE_CREATED,
+      walletAddress,
+      {
+        challengeId: "challenge_1",
+        success: true,
+        clientMetadata: undefined,
+      },
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AuthService.verifyChallenge
+// ---------------------------------------------------------------------------
+
+describe("AuthService.verifyChallenge", () => {
+  it("creates a persisted session and returns tokenType Bearer", async () => {
+    const prisma = makePrismaMock();
+    // SessionService needs authSession.create
+    (prisma as Record<string, unknown>).authSession = {
+      create: jest.fn().mockResolvedValue({}),
+    };
+    const sessionSvc = new SessionService(prisma as never, config);
+    const auditSvc = makeAuditServiceMock();
+    const rateLimiter = makeRateLimiterMock();
+    const svc = new AuthService(
+      prisma as never,
+      sessionSvc,
+      auditSvc as never,
+      rateLimiter as never,
+      config,
+    );
+
+    const signature = keypair
+      .sign(sep53MessageHash(challenge.message))
+      .toString("base64");
+
+    const result = await svc.verifyChallenge({
+      challengeId: challenge.id,
+      walletAddress,
+      signature,
+    });
+
+    expect(result.user.id).toBe("user_1");
+    expect(result.session.tokenType).toBe("Bearer");
+    // Token must be opaque format: <id>.<64-hex-chars>
+    expect(result.session.token).toMatch(/^[A-Za-z0-9_-]+\.[a-f0-9]{64}$/);
+    // sessionId and expiresAt must be present in the response
+    expect(result.session.sessionId).toBeTruthy();
+    expect(result.session.expiresAt).toBeInstanceOf(Date);
+  });
+
+  it("checks rate limits before verification", async () => {
+    const prisma = makePrismaMock();
+    (prisma as Record<string, unknown>).authSession = {
+      create: jest.fn().mockResolvedValue({}),
+    };
+    const sessionSvc = new SessionService(prisma as never, config);
+    const auditSvc = makeAuditServiceMock();
+    const rateLimiter = makeRateLimiterMock();
+    const svc = new AuthService(
+      prisma as never,
+      sessionSvc,
+      auditSvc as never,
+      rateLimiter as never,
+      config,
+    );
+
+    const signature = keypair
+      .sign(sep53MessageHash(challenge.message))
+      .toString("base64");
+
+    await svc.verifyChallenge({
+      challengeId: challenge.id,
+      walletAddress,
+      signature,
+      clientMetadata: "client-meta",
+    });
+
+    expect(rateLimiter.checkVerificationLimit).toHaveBeenCalledWith(
+      walletAddress,
+      "client-meta",
+    );
+  });
+
+  it("records successful verification", async () => {
+    const prisma = makePrismaMock();
+    (prisma as Record<string, unknown>).authSession = {
+      create: jest.fn().mockResolvedValue({}),
+    };
+    const sessionSvc = new SessionService(prisma as never, config);
+    const auditSvc = makeAuditServiceMock();
+    const rateLimiter = makeRateLimiterMock();
+    const svc = new AuthService(
+      prisma as never,
+      sessionSvc,
+      auditSvc as never,
+      rateLimiter as never,
+      config,
+    );
+
+    const signature = keypair
+      .sign(sep53MessageHash(challenge.message))
+      .toString("base64");
+
+    await svc.verifyChallenge({
+      challengeId: challenge.id,
+      walletAddress,
+      signature,
+    });
+
+    expect(auditSvc.recordEvent).toHaveBeenCalledWith(
+      AuthEventType.CHALLENGE_VERIFIED,
+      walletAddress,
+      {
+        challengeId: challenge.id,
+        success: true,
+        clientMetadata: undefined,
+      },
+    );
+  });
+
+  it("records invalid signature event", async () => {
+    const prisma = makePrismaMock();
+    const sessionSvc = new SessionService(prisma as never, config);
+    const auditSvc = makeAuditServiceMock();
+    const rateLimiter = makeRateLimiterMock();
+    const svc = new AuthService(
+      prisma as never,
+      sessionSvc,
+      auditSvc as never,
+      rateLimiter as never,
+      config,
+    );
+
+    const signature = "invalid_signature";
+
+    await expect(
+      svc.verifyChallenge({
+        challengeId: challenge.id,
+        walletAddress,
+        signature,
+      }),
+    ).rejects.toThrow("Invalid wallet signature");
+
+    expect(auditSvc.recordEvent).toHaveBeenCalledWith(
+      AuthEventType.SIGNATURE_INVALID,
+      walletAddress,
+      {
+        challengeId: challenge.id,
+        success: false,
+        failureReason: "Invalid signature",
+        clientMetadata: undefined,
+      },
+    );
+  });
+
+  it("records challenge replay event", async () => {
+    const prisma = makePrismaMock();
+    // The guarded consume matches nothing, and the challenge turns out to
+    // already carry a usedAt: that is a replay, not an expiry.
+    // The atomic consumption update matches 0 rows (already used), and the
+    // replay-detection lookup finds the challenge with usedAt already set.
+    prisma.walletChallenge.updateMany.mockResolvedValueOnce({ count: 0 });
+    prisma.walletChallenge.findFirst.mockResolvedValueOnce({
+      ...challenge,
+      usedAt: new Date(),
+    });
+
+    const sessionSvc = new SessionService(prisma as never, config);
+    const auditSvc = makeAuditServiceMock();
+    const rateLimiter = makeRateLimiterMock();
+    const svc = new AuthService(
+      prisma as never,
+      sessionSvc,
+      auditSvc as never,
+      rateLimiter as never,
+      config,
+    );
+
     const signature = keypair
       .sign(sep53MessageHash(challenge.message))
       .toString("base64");
 
     await expect(
-      service.verifyChallenge({
+      svc.verifyChallenge({
         challengeId: challenge.id,
         walletAddress,
         signature,
       }),
-    ).resolves.toMatchObject({
-      user: {
-        id: "user_1",
+    ).rejects.toThrow("Challenge is expired or unavailable");
+
+    expect(auditSvc.recordEvent).toHaveBeenCalledWith(
+      AuthEventType.CHALLENGE_REPLAYED,
+      walletAddress,
+      {
+        challengeId: challenge.id,
+        success: false,
+        failureReason: "Challenge already used",
+        clientMetadata: undefined,
+      },
+    );
+  });
+
+  it("records challenge expired event", async () => {
+    const prisma = makePrismaMock();
+    // Nothing consumed and no used row either: expired, or never existed.
+    prisma.walletChallenge.updateMany.mockResolvedValue({ count: 0 });
+    prisma.walletChallenge.findFirst.mockResolvedValue(null);
+    // The atomic consumption update matches 0 rows (expired/missing), and
+    // the replay-detection lookup finds nothing with usedAt set either.
+    prisma.walletChallenge.updateMany.mockResolvedValueOnce({ count: 0 });
+    prisma.walletChallenge.findFirst.mockResolvedValueOnce(null);
+
+    const sessionSvc = new SessionService(prisma as never, config);
+    const auditSvc = makeAuditServiceMock();
+    const rateLimiter = makeRateLimiterMock();
+    const svc = new AuthService(
+      prisma as never,
+      sessionSvc,
+      auditSvc as never,
+      rateLimiter as never,
+      config,
+    );
+
+    const signature = keypair
+      .sign(sep53MessageHash(challenge.message))
+      .toString("base64");
+
+    await expect(
+      svc.verifyChallenge({
+        challengeId: challenge.id,
         walletAddress,
+        signature,
+      }),
+    ).rejects.toThrow("Challenge is expired or unavailable");
+
+    expect(auditSvc.recordEvent).toHaveBeenCalledWith(
+      AuthEventType.CHALLENGE_EXPIRED,
+      walletAddress,
+      {
+        challengeId: challenge.id,
+        success: false,
+        failureReason: "Challenge expired or not found",
+        clientMetadata: undefined,
       },
-      session: {
-        tokenType: "Bearer",
-      },
-    });
+    );
   });
 
   it("rejects raw-message signatures that do not follow SEP-53", async () => {
+    const prisma = makePrismaMock();
+    const sessionSvc = new SessionService(prisma as never, config);
+    const auditSvc = makeAuditServiceMock();
+    const rateLimiter = makeRateLimiterMock();
+    const svc = new AuthService(
+      prisma as never,
+      sessionSvc,
+      auditSvc as never,
+      rateLimiter as never,
+      config,
+    );
+
     const signature = keypair
       .sign(Buffer.from(challenge.message, "utf8"))
       .toString("base64");
 
     await expect(
-      service.verifyChallenge({
+      svc.verifyChallenge({
         challengeId: challenge.id,
         walletAddress,
         signature,
       }),
     ).rejects.toThrow("Invalid wallet signature");
   });
+
+  it("consumes the challenge atomically before verifying the signature", async () => {
+    const prisma = makePrismaMock();
+    (prisma as Record<string, unknown>).authSession = {
+      create: jest.fn().mockResolvedValue({}),
+    };
+    const sessionSvc = new SessionService(prisma as never, config);
+    const auditSvc = makeAuditServiceMock();
+    const rateLimiter = makeRateLimiterMock();
+    const svc = new AuthService(
+      prisma as never,
+      sessionSvc,
+      auditSvc as never,
+      rateLimiter as never,
+      config,
+    );
+
+    const signature = keypair
+      .sign(sep53MessageHash(challenge.message))
+      .toString("base64");
+
+    await svc.verifyChallenge({ challengeId: challenge.id, walletAddress, signature });
+
+    // Consumed by the guarded update itself, before the signature is checked:
+    // the where clause is what makes concurrent verifications race for one row.
+    // Consumption happens via the atomic updateMany (usedAt: null in its
+    // where clause guards against a concurrent double-consume) — there is
+    // no separate .update() call afterward.
+    expect(prisma.walletChallenge.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          id: challenge.id,
+          walletAddress,
+          usedAt: null,
+        }),
+        data: { usedAt: expect.any(Date) },
+      }),
+    );
+    expect(prisma.walletChallenge.update).not.toHaveBeenCalled();
+  });
+
+  it("throws when no matching challenge exists", async () => {
+    const prisma = makePrismaMock();
+    prisma.walletChallenge.updateMany.mockResolvedValue({ count: 0 });
+    prisma.walletChallenge.findFirst.mockResolvedValue(null);
+    prisma.walletChallenge.updateMany.mockResolvedValueOnce({ count: 0 });
+    prisma.walletChallenge.findFirst.mockResolvedValueOnce(null);
+    const sessionSvc = new SessionService(prisma as never, config);
+    const auditSvc = makeAuditServiceMock();
+    const rateLimiter = makeRateLimiterMock();
+    const svc = new AuthService(
+      prisma as never,
+      sessionSvc,
+      auditSvc as never,
+      rateLimiter as never,
+      config,
+    );
+
+    await expect(
+      svc.verifyChallenge({ challengeId: "bad", walletAddress, signature: "sig" }),
+    ).rejects.toThrow("Challenge is expired or unavailable");
+  });
 });
+
+// ---------------------------------------------------------------------------
+// AuthService.getSession
+// ---------------------------------------------------------------------------
+
+describe("AuthService.getSession", () => {
+  it("returns user data for a valid userId", async () => {
+    const prisma = makePrismaMock();
+    const sessionSvc = new SessionService(prisma as never, config);
+    const auditSvc = makeAuditServiceMock();
+    const rateLimiter = makeRateLimiterMock();
+    const svc = new AuthService(
+      prisma as never,
+      sessionSvc,
+      auditSvc as never,
+      rateLimiter as never,
+      config,
+    );
+
+    await expect(svc.getSession("user_1")).resolves.toMatchObject({
+      user: { id: "user_1", walletAddress },
+    });
+  });
+
+  it("throws UnauthorizedException when user does not exist", async () => {
+    const prisma = makePrismaMock();
+    prisma.user.findUnique.mockResolvedValue(null);
+    const sessionSvc = new SessionService(prisma as never, config);
+    const auditSvc = makeAuditServiceMock();
+    const rateLimiter = makeRateLimiterMock();
+    const svc = new AuthService(
+      prisma as never,
+      sessionSvc,
+      auditSvc as never,
+      rateLimiter as never,
+      config,
+    );
+
+    await expect(svc.getSession("missing_user")).rejects.toThrow(
+      UnauthorizedException,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AuthService.logout
+// ---------------------------------------------------------------------------
+
+describe("AuthService.logout", () => {
+  it("calls sessionService.revoke with the supplied sessionId", async () => {
+    const prisma = makePrismaMock();
+    (prisma as Record<string, unknown>).authSession = {
+      updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+    };
+    const sessionSvc = new SessionService(prisma as never, config);
+    const revokeSpy = jest.spyOn(sessionSvc, "revoke").mockResolvedValue();
+    const auditSvc = makeAuditServiceMock();
+    const rateLimiter = makeRateLimiterMock();
+    const svc = new AuthService(
+      prisma as never,
+      sessionSvc,
+      auditSvc as never,
+      rateLimiter as never,
+      config,
+    );
+
+    await svc.logout("sess_abc");
+
+    expect(revokeSpy).toHaveBeenCalledWith("sess_abc");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
 function sep53MessageHash(message: string) {
   return createHash("sha256")

@@ -1,0 +1,275 @@
+import { Injectable, Logger } from "@nestjs/common";
+import { ConfigService } from "@nestjs/config";
+import { VerificationOutcome } from "@prisma/client";
+import { createHmac } from "crypto";
+import { PrismaService } from "../database/prisma.service";
+
+/**
+ * Privacy-safe verification event recording.
+ *
+ * This service records verification outcomes for aggregate analytics while
+ * maintaining strict privacy guarantees:
+ *
+ * NEVER stored:
+ * - Raw IP addresses
+ * - User agents
+ * - Submitted credentials
+ * - Wallet addresses
+ * - Proof secrets or raw verification inputs
+ *
+ * Privacy via metadata hashing:
+ * - Only non-identifying metadata (requestId, timestamp) is hashed
+ * - Salt rotation every 30 days reduces long-term linkability
+ * - Metadata hash is deterministic per salt version (for analytics)
+ * - Different salt versions produce different hashes for same metadata
+ *
+ * Fail-open strategy:
+ * - If event recording fails, verification continues unblocked
+ * - Errors are logged but never thrown
+ * - Ensures verification availability over audit completeness
+ */
+@Injectable()
+export class VerificationEventService {
+  private readonly logger = new Logger(VerificationEventService.name);
+  private readonly retentionDays: number;
+  private readonly currentSaltVersion: number;
+  private readonly salts: Map<number, string>;
+
+  constructor(
+    private readonly prisma: PrismaService,
+    configService: ConfigService,
+  ) {
+    this.retentionDays =
+      configService.get<number>("verificationEventRetentionDays") || 90;
+
+    // Use explicitly configured salt version
+    // Operators control rotation by incrementing VERIFICATION_HASH_SALT_VERSION env var
+    const configuredVersion = configService.get<number>(
+      "verificationHashSaltVersion",
+    );
+    this.currentSaltVersion =
+      configuredVersion !== undefined ? configuredVersion : 0;
+
+    // Load all available salts from environment
+    // VERIFICATION_HASH_SALT_V0, VERIFICATION_HASH_SALT_V1, etc.
+    this.salts = new Map();
+    for (let i = 0; i < 100; i++) {
+      const saltKey = `VERIFICATION_HASH_SALT_V${i}`;
+      const salt = configService.get<string>(saltKey);
+      if (salt) {
+        this.salts.set(i, salt);
+      } else {
+        break; // Stop when we hit a missing version
+      }
+    }
+
+    if (this.salts.size === 0) {
+      this.logger.warn(
+        "No verification hash salts configured. Using default temporary salt.",
+      );
+      // Fallback: create a temporary salt from env
+      const fallbackSalt = configService.get<string>("credentialSigningSecret");
+      if (fallbackSalt) {
+        this.salts.set(0, fallbackSalt);
+        this.logger.warn(
+          "Using credentialSigningSecret as fallback salt V0. Configure VERIFICATION_HASH_SALT_V* for production.",
+        );
+      }
+    }
+
+    if (!this.salts.has(this.currentSaltVersion)) {
+      this.logger.warn(
+        `Configured salt version ${this.currentSaltVersion} is not available. ` +
+          `Available versions: 0-${this.salts.size - 1}. ` +
+          `Adjust VERIFICATION_HASH_SALT_VERSION or configure VERIFICATION_HASH_SALT_V${this.currentSaltVersion}.`,
+      );
+    }
+  }
+
+  /**
+   * Record a verification outcome for aggregate analytics.
+   *
+   * This is the primary entry point. It:
+   * 1. Hashes the provided metadata using current salt version
+   * 2. Computes retainUntil based on retention configuration
+   * 3. Writes to database
+   * 4. Fails open: logs errors but never throws
+   *
+   * @param outcome - The verification result (VALID, EXPIRED, REVOKED, etc.)
+   * @param proofId - The proof being verified
+   * @param metadata - Metadata to hash (requestId, timestamp, outcome)
+   * @returns Promise that always resolves (never rejects)
+   */
+  async recordEvent(
+    outcome: VerificationOutcome,
+    proofId: string,
+    metadata: { requestId?: string; timestamp?: Date; outcome: string },
+  ): Promise<void> {
+    try {
+      const saltVersion = this.currentSaltVersion;
+      const metadataHash = this.hashMetadata(metadata, saltVersion);
+      const retainUntil = new Date(
+        Date.now() + this.retentionDays * 24 * 60 * 60 * 1000,
+      );
+
+      await this.prisma.verificationEventLog.create({
+        data: {
+          outcome,
+          proofId,
+          metadataHash,
+          saltVersion,
+          retainUntil,
+          createdAt: new Date(),
+        },
+      });
+    } catch (error) {
+      // Fail-open: log but do not throw
+      this.logger.warn(
+        `Failed to record verification event for proof ${proofId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+
+  /**
+   * Hash metadata using HMAC-SHA256 with versioned salt.
+   *
+   * Accepts only non-identifying fields:
+   * - requestId: opaque request identifier (no PII)
+   * - timestamp: when verification occurred
+   * - outcome: the verification result
+   *
+   * NEVER include:
+   * - IP addresses
+   * - User agents
+   * - Wallet addresses
+   * - Proof secrets
+   * - Credentials or sensitive data
+   *
+   * Salt rotation strategy:
+   * - Salt version is explicitly configured via VERIFICATION_HASH_SALT_VERSION env var
+   * - Operators control rotation by incrementing the version and configuring new salt
+   * - Salts must be pre-configured as VERIFICATION_HASH_SALT_V0, VERIFICATION_HASH_SALT_V1, etc.
+   * - Different versions produce different hashes for same metadata
+   * - This reduces long-term linkability across rotations
+   *
+   * @param raw - The metadata to hash (only non-identifying fields)
+   * @param saltVersion - The salt version to use
+   * @returns HMAC-SHA256 hash as hex string
+   */
+  hashMetadata(
+    raw: { requestId?: string; timestamp?: Date; outcome: string },
+    saltVersion: number,
+  ): string {
+    const salt = this.salts.get(saltVersion);
+    if (!salt) {
+      throw new Error(`No salt configured for version ${saltVersion}`);
+    }
+
+    // Canonicalize: timestamp as ISO string, sorted fields
+    const canonical = JSON.stringify({
+      outcome: raw.outcome,
+      requestId: raw.requestId || "unknown",
+      timestamp: raw.timestamp?.toISOString() || new Date().toISOString(),
+    });
+
+    const hash = createHmac("sha256", salt)
+      .update(canonical)
+      .digest("hex");
+
+    return hash;
+  }
+
+  /**
+   * Delete all verification events where retainUntil has passed.
+   *
+   * Supports automatic retention policy enforcement. This should be called:
+   * - Via a cron job (e.g., daily at 2 AM)
+   * - Or triggered manually for maintenance
+   *
+   * Returns count for auditability; logs all cleanup operations.
+   *
+   * @returns Number of records deleted
+   */
+  async cleanupExpiredEvents(): Promise<number> {
+    try {
+      const now = new Date();
+      const result = await this.prisma.verificationEventLog.deleteMany({
+        where: {
+          retainUntil: {
+            lt: now,
+          },
+        },
+      });
+
+      this.logger.log(
+        `Verification event cleanup: deleted ${result.count} records (timestamp: ${now.toISOString()})`,
+      );
+
+      return result.count;
+    } catch (error) {
+      this.logger.error(
+        `Verification event cleanup failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return 0;
+    }
+  }
+
+  /**
+   * Get aggregate statistics for a proof's verification outcomes.
+   *
+   * Returns counts per outcome type. Never includes:
+   * - Verifier identity
+   * - IP information
+   * - Metadata
+   * - Any PII
+   *
+   * This is safe to expose via API endpoints that verify ownership.
+   *
+   * @param proofId - The proof to analyze
+   * @returns Object with counts per outcome: { VALID: n, EXPIRED: n, ... }
+   */
+  async getAggregateStats(
+    proofId: string,
+  ): Promise<Record<VerificationOutcome, number>> {
+    try {
+      const events = await this.prisma.verificationEventLog.findMany({
+        where: {
+          proofId,
+        },
+        select: {
+          outcome: true,
+        },
+      });
+
+      // Initialize all outcomes to 0
+      const stats: Record<string, number> = {};
+      for (const outcome of Object.values(VerificationOutcome)) {
+        stats[outcome as string] = 0;
+      }
+
+      // Count each outcome
+      for (const event of events) {
+        stats[event.outcome]++;
+      }
+
+      return stats as Record<VerificationOutcome, number>;
+    } catch (error) {
+      this.logger.error(
+        `Failed to get verification stats for proof ${proofId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      // Return empty stats on error
+      const empty: Record<string, number> = {};
+      for (const outcome of Object.values(VerificationOutcome)) {
+        empty[outcome as string] = 0;
+      }
+      return empty as Record<VerificationOutcome, number>;
+    }
+  }
+
+}

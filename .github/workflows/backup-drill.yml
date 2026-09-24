@@ -1,0 +1,52 @@
+name: Backup Drill
+
+# Repeatable dry-run of the synthetic backup format (docs/disaster-recovery.md).
+#
+# Scheduled as well as PR-triggered because the failure this guards against is
+# slow: the manifest format and the drill logic drift apart over months, and
+# nobody notices until a real restore is needed. A weekly run surfaces that
+# drift while it is still cheap to fix.
+#
+# This does NOT prove production backups restore — only a rehearsal against a
+# real dump does, and the runbook says so. It proves the format and the drill
+# still agree.
+
+on:
+  schedule:
+    # Mondays at 06:00 UTC.
+    - cron: "0 6 * * 1"
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - "scripts/backup/**"
+      - "src/testing/recovery/**"
+      - "docs/disaster-recovery.md"
+      - ".github/workflows/backup-drill.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  drill:
+    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run prisma:generate
+
+      - name: Verify synthetic backup format
+        run: npm run drill:verify
+
+      - name: Run recovery drill tests
+        run: npx jest src/testing/recovery --runInBand

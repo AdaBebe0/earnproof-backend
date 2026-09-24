@@ -1,55 +1,683 @@
 import { z } from "zod";
 
-const optionalString = (schema: z.ZodString) =>
-  z.preprocess((value) => (value === "" ? undefined : value), schema.optional());
+/**
+ * ──────────────────────────────────────────────────────────────────────────
+ * CONFIGURATION VALIDATION MATRIX
+ * ──────────────────────────────────────────────────────────────────────────
+ *
+ * This module validates all environment variables across multiple profiles
+ * (development, test, staging, production) with both individual constraints
+ * and cross-variable invariant checks.
+ *
+ * Variable categories:
+ * - REQUIRED: Must be present and non-empty
+ * - OPTIONAL: Safe defaults if absent
+ * - SECRET: Present, non-empty, but NEVER logged or included in error messages
+ * - URL: Valid URL format, correct protocol per profile
+ * - NETWORK: Valid host/port ranges, no unsafe binds in production profiles
+ * - NUMERIC: Valid ranges, type-correct, no NaN/negative where inappropriate
+ * - CRON: Valid cron expression parseable by NestJS @Cron()
+ *
+ * Cross-variable invariants prevent individually valid but jointly insecure
+ * combinations (e.g., debug mode + production profile, wide-open CORS + prod DB).
+ */
 
+// ── Helper: Preprocess empty strings to undefined ──
+function optionalString<T extends z.ZodTypeAny>(schema: T) {
+  return z.preprocess(
+    (value) => (value === "" ? undefined : value),
+    schema.optional(),
+  );
+}
+
+// ── Helper: SECRET variable validator (never expose value in error) ──
+const secret = (minLength: number = 1) =>
+  z
+    .string()
+    .min(minLength, { message: "SECRET_VARIABLE is missing or too short" })
+    .refine((v) => v.trim().length > 0, {
+      message: "SECRET_VARIABLE must not be empty or whitespace-only",
+    });
+
+// ── Helper: Validate cron expression format ──
+// Basic validation: must have 5 or 6 space-separated fields (quartz format)
+// Each field is numeric or wildcard, with optional ranges/lists
+const cronExpression = z
+  .string()
+  .regex(
+    /^(\*|[0-9,/-]+)\s+(\*|[0-9,/-]+)\s+(\*|[0-9,/-]+)\s+(\*|[0-9,/-]+)\s+(\*|[0-9,/-]+)(?:\s+(\*|[0-9,/-]+))?$/,
+    "CRON_VARIABLE must be a valid cron expression (5 or 6 space-separated fields)",
+  );
+
+// ── Helper: Stellar contract ID format ──
+const stellarContractId = z.string().regex(
+  /^C[A-Z2-7]{55}$/,
+  "CONTRACT_ID must be a valid Stellar contract ID (C followed by 55 alphanumeric chars)",
+);
+
+// ── Helper: Stellar public key (issuer address) format ──
+const stellarPublicKey = z.string().regex(
+  /^G[A-Z2-7]{55}$/,
+  "PUBLIC_KEY must be a valid Stellar public key (G followed by 55 alphanumeric chars)",
+);
+
+// ── Helper: Encryption key validator ──
 const encryptionKey = z.string().refine((value) => {
-  const key = /^[a-fA-F0-9]{64}$/.test(value)
-    ? Buffer.from(value, "hex")
-    : Buffer.from(value, "base64");
-  return key.length === 32;
-}, "PAYMENT_ENCRYPTION_KEY must be 32 bytes encoded as base64 or hex");
+  try {
+    const key = /^[a-fA-F0-9]{64}$/.test(value)
+      ? Buffer.from(value, "hex")
+      : Buffer.from(value, "base64");
+    return key.length === 32;
+  } catch {
+    return false;
+  }
+}, "PAYMENT_ENCRYPTION_KEY must be 32 bytes encoded as base64 or 64-char hex");
 
+// ── Helper: Positive integer (for ports, limits) ──
+const positiveInt = (fieldName: string) =>
+  z
+    .coerce.number()
+    .int(`${fieldName} must be an integer`)
+    .positive(`${fieldName} must be a positive integer`)
+    .finite(`${fieldName} must be a finite number`);
+
+// ── Helper: Non-negative integer (includes zero) ──
+const nonnegativeInt = (fieldName: string) =>
+  z
+    .coerce.number()
+    .int(`${fieldName} must be an integer`)
+    .nonnegative(`${fieldName} must be zero or positive`)
+    .finite(`${fieldName} must be a finite number`);
+
+// ── Helper: Retention duration validator (1–3650 days) ──
+const retentionDays = (fieldName: string) =>
+  z
+    .coerce.number()
+    .int(`${fieldName} must be an integer`)
+    .min(1, `${fieldName} must be at least 1 day (minimum 1)`)
+    .max(3650, `${fieldName} must be at most 3650 days (maximum 10 years)`)
+    .finite(`${fieldName} must be a finite number`);
+
+// ── Helper: Rate limit counter validator ──
+const rateLimitCounter = (fieldName: string) =>
+  z
+    .coerce.number()
+    .int(`${fieldName} must be an integer`)
+    .positive(`${fieldName} must be positive (at least 1)`)
+    .max(1000000, `${fieldName} is unreasonably large`)
+    .finite(`${fieldName} must be a finite number`);
+
+// ── Helper: Time window in milliseconds ──
+const timeWindowMs = (fieldName: string) =>
+  z
+    .coerce.number()
+    .int(`${fieldName} must be an integer`)
+    .positive(`${fieldName} must be positive`)
+    .max(86400000, `${fieldName} must not exceed 24 hours (86400000ms)`)
+    .finite(`${fieldName} must be a finite number`);
+
+// ── Helper: Health probe timeout validator ──
+const probeTimeoutMs = (fieldName: string) =>
+  z
+    .coerce.number()
+    .int(`${fieldName} must be an integer`)
+    .positive(`${fieldName} must be positive`)
+    .max(30000, `${fieldName} must not exceed 30 seconds (30000ms)`)
+    .finite(`${fieldName} must be a finite number`);
+
+/**
+ * Zod schema covering all environment variables across all profiles.
+ * Individual field validation happens here; cross-variable checks happen
+ * in validateEnv() after parsing.
+ */
 const envSchema = z.object({
+  // ──────────────────────────────────────────────────────────────────────
+  // CORE APPLICATION VARIABLES (Required)
+  // ──────────────────────────────────────────────────────────────────────
+
+  /** Application runtime environment: development, test, or production */
   NODE_ENV: z
-    .enum(["development", "test", "production"])
+    .enum(["development", "test", "staging", "production"])
     .default("development"),
-  PORT: z.coerce.number().int().positive().default(4000),
-  DATABASE_URL: z.string().min(1),
-  REDIS_URL: z.string().min(1),
-  APP_URL: z.string().url().default("http://localhost:3000"),
-  API_URL: z.string().url().default("http://localhost:4000"),
+
+  /** HTTP server port (1–65535, but typically 3000–4000) */
+  PORT: positiveInt("PORT").default(4000),
+
+  /** PostgreSQL connection string (REQUIRED: checked at startup and readiness) */
+  DATABASE_URL: z
+    .string()
+    .min(1, "DATABASE_URL must be non-empty")
+    .url("DATABASE_URL must be a valid connection URL"),
+
+  /** Redis connection string (REQUIRED: checked at startup) */
+  REDIS_URL: z
+    .string()
+    .min(1, "REDIS_URL must be non-empty")
+    .url("REDIS_URL must be a valid connection URL"),
+
+  // ──────────────────────────────────────────────────────────────────────
+  // APPLICATION URLs (Required, profile-specific)
+  // ──────────────────────────────────────────────────────────────────────
+
+  /** Frontend application URL (used for CORS origin, must be HTTPS in production) */
+  APP_URL: z.string().url("APP_URL must be a valid URL").default("http://localhost:3000"),
+
+  /** This backend API URL (used for Swagger docs, must be HTTPS in production) */
+  API_URL: z.string().url("API_URL must be a valid URL").default("http://localhost:4000"),
+
+  // ──────────────────────────────────────────────────────────────────────
+  // STELLAR NETWORK CONFIGURATION (Required)
+  // ──────────────────────────────────────────────────────────────────────
+
+  /** Stellar network identifier (currently hardcoded to testnet) */
   STELLAR_NETWORK: z.literal("testnet").default("testnet"),
-  STELLAR_HORIZON_URL: z.string().url(),
-  STELLAR_NETWORK_PASSPHRASE: z.string().min(1),
-  SESSION_SECRET: z.string().min(8),
-  CREDENTIAL_SIGNING_SECRET: z.string().min(8),
+
+  /** Stellar Horizon API endpoint (must point to matching network) */
+  STELLAR_HORIZON_URL: z
+    .string()
+    .url("STELLAR_HORIZON_URL must be a valid URL")
+    .default("https://horizon-testnet.stellar.org"),
+
+  /** Stellar network pass phrase (determines transaction signing/validation) */
+  STELLAR_NETWORK_PASSPHRASE: z
+    .string()
+    .min(1, "STELLAR_NETWORK_PASSPHRASE must be non-empty")
+    .default("Test SDF Network ; September 2015"),
+
+  // ──────────────────────────────────────────────────────────────────────
+  // SECRETS (Required, never logged or exposed in error messages)
+  // ──────────────────────────────────────────────────────────────────────
+
+  /** Session token signing secret (minimum 8 chars, non-empty) */
+  SESSION_SECRET: secret(8),
+
+  /** Credential signature verification secret (minimum 8 chars, non-empty) */
+  CREDENTIAL_SIGNING_SECRET: secret(8),
+
+  /** Payment encryption key (32 bytes as hex or base64) */
   PAYMENT_ENCRYPTION_KEY: encryptionKey,
+  PAYMENT_ENCRYPTION_KEY_VERSION: z.coerce
+    .number()
+    .int()
+    .nonnegative()
+    .optional()
+    .default(0),
+
+  // ──────────────────────────────────────────────────────────────────────
+  // AUTHENTICATION RATE LIMITING
+  // ──────────────────────────────────────────────────────────────────────
+
+  /** Max challenge creations per hashed client within window */
+  AUTH_RATE_LIMIT_MAX_CHALLENGE_CREATIONS: rateLimitCounter(
+    "AUTH_RATE_LIMIT_MAX_CHALLENGE_CREATIONS",
+  )
+    .default(10),
+
+  /** Time window for challenge creation limit (milliseconds) */
+  AUTH_RATE_LIMIT_CHALLENGE_CREATION_WINDOW_MS: timeWindowMs(
+    "AUTH_RATE_LIMIT_CHALLENGE_CREATION_WINDOW_MS",
+  )
+    .default(900000), // 15 minutes
+
+  /** Max verification attempts per hashed client within window */
+  AUTH_RATE_LIMIT_MAX_VERIFICATIONS: rateLimitCounter(
+    "AUTH_RATE_LIMIT_MAX_VERIFICATIONS",
+  )
+    .default(5),
+
+  /** Time window for verification limit (milliseconds) */
+  AUTH_RATE_LIMIT_VERIFICATION_WINDOW_MS: timeWindowMs(
+    "AUTH_RATE_LIMIT_VERIFICATION_WINDOW_MS",
+  )
+    .default(900000), // 15 minutes
+
+  // ──────────────────────────────────────────────────────────────────────
+  // AUTHENTICATION RETENTION & CLEANUP
+  // ──────────────────────────────────────────────────────────────────────
+
+  /** Retention duration for authentication challenges (days) */
+  AUTH_CHALLENGE_RETENTION_DAYS: retentionDays("AUTH_CHALLENGE_RETENTION_DAYS")
+    .default(7),
+
+  /** Retention duration for authentication audit events (days) */
+  AUTH_AUDIT_RETENTION_DAYS: retentionDays("AUTH_AUDIT_RETENTION_DAYS")
+    .default(90),
+
+  /** Cron expression for expired session cleanup (default: midnight) */
+  AUTH_SESSION_CLEANUP_CRON: cronExpression.default("0 0 * * *"),
+
+  /** Cron expression for old challenge cleanup (default: 2 AM) */
+  AUTH_CHALLENGE_CLEANUP_CRON: cronExpression.default("0 2 * * *"),
+
+  /** Cron expression for old audit event cleanup (default: 3 AM) */
+  AUTH_AUDIT_CLEANUP_CRON: cronExpression.default("0 3 * * *"),
+
+  // ──────────────────────────────────────────────────────────────────────
+  // CONTRACT ANCHORING (Optional feature, with consistency checks)
+  // ──────────────────────────────────────────────────────────────────────
+
+  /** Whether contract anchoring is enabled */
   CONTRACT_ANCHORING_ENABLED: z
     .enum(["true", "false"])
     .optional()
     .default("false"),
+
+  /** Whether contract anchoring is required for proofs */
   CONTRACT_ANCHORING_REQUIRED: z
     .enum(["true", "false"])
     .optional()
     .default("false"),
+
+  /** Path to Stellar CLI executable */
   STELLAR_CLI_PATH: optionalString(z.string().min(1)),
+
+  /** Source for Stellar CLI (e.g., "npm", "system") */
   STELLAR_CLI_SOURCE: optionalString(z.string().min(1)),
-  PROOF_REGISTRY_CONTRACT_ID: optionalString(
-    z.string().regex(/^C[A-Z2-7]{55}$/),
+
+  /** Stellar contract ID for proof registry (matches ^C[A-Z2-7]{55}$) */
+  PROOF_REGISTRY_CONTRACT_ID: optionalString(stellarContractId),
+
+  // ──────────────────────────────────────────────────────────────────────
+  // ISSUER REGISTRY (Optional feature)
+  // ──────────────────────────────────────────────────────────────────────
+
+  /** Whether issuer registry is enabled */
+  ISSUER_REGISTRY_ENABLED: z
+    .enum(["true", "false"])
+    .optional()
+    .default("false"),
+
+  /** Stellar contract ID for issuer registry */
+  ISSUER_REGISTRY_CONTRACT_ID: optionalString(stellarContractId),
+
+  // ──────────────────────────────────────────────────────────────────────
+  // EARNPROOF INTEGRATION (Optional, used when anchoring is enabled)
+  // ──────────────────────────────────────────────────────────────────────
+
+  /** EarnProof issuer Stellar public key */
+  EARNPROOF_ISSUER_ADDRESS: optionalString(stellarPublicKey),
+
+  /** EarnProof schema version (numeric, optional) */
+  EARNPROOF_SCHEMA_VERSION: z
+    .coerce.number()
+    .int("EARNPROOF_SCHEMA_VERSION must be an integer")
+    .positive("EARNPROOF_SCHEMA_VERSION must be positive")
+    .optional()
+    .default(1),
+
+  // ──────────────────────────────────────────────────────────────────────
+  // VERIFICATION EVENT PRIVACY
+  // ──────────────────────────────────────────────────────────────────────
+
+  /** Retention duration for verification events (days) */
+  VERIFICATION_EVENT_RETENTION_DAYS: retentionDays(
+    "VERIFICATION_EVENT_RETENTION_DAYS",
+  )
+    .default(90),
+
+  /** Hash salt version for verification metadata privacy */
+  VERIFICATION_HASH_SALT_VERSION: nonnegativeInt(
+    "VERIFICATION_HASH_SALT_VERSION",
+  )
+    .default(0),
+
+  // ──────────────────────────────────────────────────────────────────────
+  // DATA RETENTION (All retention durations validated at startup)
+  // ──────────────────────────────────────────────────────────────────────
+
+  /** Retention duration for wallet challenge records (days, 1–3650) */
+  RETENTION_WALLET_CHALLENGE_DAYS: retentionDays(
+    "RETENTION_WALLET_CHALLENGE_DAYS",
+  )
+    .default(7),
+
+  /** Retention duration for authentication session records (days, 1–3650) */
+  RETENTION_AUTH_SESSION_DAYS: retentionDays("RETENTION_AUTH_SESSION_DAYS")
+    .default(30),
+
+  /** Retention duration for webhook delivery records (days, 1–3650) */
+  RETENTION_WEBHOOK_DELIVERY_DAYS: retentionDays(
+    "RETENTION_WEBHOOK_DELIVERY_DAYS",
+  )
+    .default(30),
+
+  /** Retention duration for audit log records (days, 1–3650) */
+  RETENTION_AUDIT_LOG_DAYS: retentionDays("RETENTION_AUDIT_LOG_DAYS").default(
+    365,
   ),
-  EARNPROOF_ISSUER_ADDRESS: optionalString(
-    z.string().regex(/^G[A-Z2-7]{55}$/),
+
+  /** Retention duration for failed anchoring records (days, 1–3650) */
+  RETENTION_FAILED_ANCHORING_DAYS: retentionDays(
+    "RETENTION_FAILED_ANCHORING_DAYS",
+  )
+    .default(90),
+
+  /** Cron expression for retention cleanup job (default: 3 AM daily) */
+  RETENTION_CLEANUP_CRON: cronExpression.default("0 3 * * *"),
+
+  /** Enable dry-run mode to report what would be deleted without actually deleting */
+  RETENTION_DRY_RUN: z
+    .enum(["true", "false"])
+    .optional()
+    .default("false"),
+
+  // ──────────────────────────────────────────────────────────────────────
+  // HEALTH CHECKS
+  // ──────────────────────────────────────────────────────────────────────
+
+  /** Health probe timeout (milliseconds, max 30 seconds) */
+  HEALTH_PROBE_TIMEOUT_MS: probeTimeoutMs("HEALTH_PROBE_TIMEOUT_MS")
+    .default(2000),
+
+  /** Health probe result cache TTL (milliseconds) */
+  HEALTH_CACHE_TTL_MS: nonnegativeInt("HEALTH_CACHE_TTL_MS").default(5000),
+
+  // ──────────────────────────────────────────────────────────────────────
+  // TESTING (Integration test harness only, not used in production)
+  // ──────────────────────────────────────────────────────────────────────
+
+  /** PostgreSQL connection string for integration tests (must contain "test") */
+  TEST_DATABASE_URL: optionalString(
+    z.string().url("TEST_DATABASE_URL must be a valid URL"),
   ),
-  EARNPROOF_SCHEMA_VERSION: z.coerce.number().int().positive().optional(),
+
+  /** Whether to keep test databases after integration tests complete */
+  INTEGRATION_KEEP_DATABASES: optionalString(
+    z.enum(["true", "false"]),
+  ),
+
+  /** Integration test timeout in milliseconds */
+  INTEGRATION_TEST_TIMEOUT_MS: optionalString(
+    timeWindowMs("INTEGRATION_TEST_TIMEOUT_MS"),
+  ),
+
+  // ──────────────────────────────────────────────────────────────────────
+  // SEEDING
+  // ──────────────────────────────────────────────────────────────────────
+
+  /** Allow synthetic seed data (demo seed) in non-production environments */
+  ALLOW_SYNTHETIC_SEED: optionalString(z.enum(["true", "false"])),
+
+  // ──────────────────────────────────────────────────────────────────────
+  // GLOBAL API RATE LIMITING
+  // ──────────────────────────────────────────────────────────────────────
+
+  /** Default global request window in milliseconds */
+  RATE_LIMIT_DEFAULT_TTL_MS: timeWindowMs("RATE_LIMIT_DEFAULT_TTL_MS")
+    .default(60000),
+
+  /** Default global request count */
+  RATE_LIMIT_DEFAULT_LIMIT: rateLimitCounter("RATE_LIMIT_DEFAULT_LIMIT")
+    .default(100),
+
+  /** Strict request window for expensive operations in milliseconds */
+  RATE_LIMIT_STRICT_TTL_MS: timeWindowMs("RATE_LIMIT_STRICT_TTL_MS")
+    .default(60000),
+
+  /** Strict request count for expensive operations */
+  RATE_LIMIT_STRICT_LIMIT: rateLimitCounter("RATE_LIMIT_STRICT_LIMIT")
+    .default(10),
+
+  /** Public verification request window in milliseconds */
+  RATE_LIMIT_VERIFICATION_TTL_MS: timeWindowMs(
+    "RATE_LIMIT_VERIFICATION_TTL_MS",
+  )
+    .default(60000),
+
+  /** Public verification request count */
+  RATE_LIMIT_VERIFICATION_LIMIT: rateLimitCounter(
+    "RATE_LIMIT_VERIFICATION_LIMIT",
+  )
+    .default(30),
+
+  /** Multiplier applied to authenticated caller request limits */
+  RATE_LIMIT_AUTHENTICATED_MULTIPLIER: z
+    .coerce.number()
+    .positive("RATE_LIMIT_AUTHENTICATED_MULTIPLIER must be positive")
+    .finite("RATE_LIMIT_AUTHENTICATED_MULTIPLIER must be finite")
+    .default(3),
 });
+
+/**
+ * Cross-variable invariant checks.
+ * These invariants prevent combinations that are individually valid but
+ * jointly insecure or misconfigured (e.g., debug mode in production).
+ *
+ * Each invariant must:
+ * - Be profile-specific (use NODE_ENV to branch)
+ * - Include a detailed comment explaining the risk
+ * - Reference the environment variables by key name only (never expose values)
+ */
+// ── Helper: Extract hostname from a connection URL, robust to userinfo ──
+// (e.g. "postgresql://user:pass@127.0.0.1:5432/db") which a naive regex on
+// "//" up to the next ":" would mistake the username for the host.
+const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "0.0.0.0", "::1"]);
+function isLocalhostUrl(value: string): boolean {
+  try {
+    return LOCAL_HOSTS.has(new URL(value).hostname);
+  } catch {
+    return false;
+  }
+}
+
+function checkCrossVariableInvariants(data: z.infer<typeof envSchema>) {
+  const errors: string[] = [];
+
+  // ────────────────────────────────────────────────────────────────────────
+  // PRODUCTION-LIKE PROFILE INVARIANTS
+  // ────────────────────────────────────────────────────────────────────────
+
+  if (data.NODE_ENV === "production") {
+    // Invariant: HTTPS-only URLs in production
+    // Risk: Unencrypted traffic to/from production API exposes credentials,
+    // tokens, and proof data to network interception.
+    if (!data.APP_URL.startsWith("https://")) {
+      errors.push(
+        "Invalid configuration: APP_URL must use https:// in production profile",
+      );
+    }
+    if (!data.API_URL.startsWith("https://")) {
+      errors.push(
+        "Invalid configuration: API_URL must use https:// in production profile",
+      );
+    }
+
+    // Invariant: Database URL must use production or secure host
+    // Risk: Connecting to "localhost" in production means the database is
+    // not remotely accessible (good) but indicates misconfiguration; operator
+    // likely meant to set a remote host. Catch this early.
+    if (isLocalhostUrl(data.DATABASE_URL)) {
+      errors.push(
+        "Invalid configuration: DATABASE_URL appears to be localhost in production profile (likely misconfigured)",
+      );
+    }
+
+    // Invariant: Redis URL must not be localhost
+    // Risk: Same as database — remote Redis access required in production.
+    if (isLocalhostUrl(data.REDIS_URL)) {
+      errors.push(
+        "Invalid configuration: REDIS_URL appears to be localhost in production profile (likely misconfigured)",
+      );
+    }
+
+    // Invariant: Contract anchoring consistency
+    // Risk: If CONTRACT_ANCHORING_REQUIRED is true but REQUIRED fields are
+    // missing, every proof attempt fails. Catch this at startup, not at first
+    // proof attempt.
+    if (data.CONTRACT_ANCHORING_REQUIRED === "true") {
+      if (!data.PROOF_REGISTRY_CONTRACT_ID) {
+        errors.push(
+          "Invalid configuration: CONTRACT_ANCHORING_REQUIRED=true but PROOF_REGISTRY_CONTRACT_ID is missing",
+        );
+      }
+      if (!data.EARNPROOF_ISSUER_ADDRESS) {
+        errors.push(
+          "Invalid configuration: CONTRACT_ANCHORING_REQUIRED=true but EARNPROOF_ISSUER_ADDRESS is missing",
+        );
+      }
+    }
+
+    // Invariant: If issuer registry is required, contract must be set
+    // Risk: Feature cannot function without configuration.
+    if (data.ISSUER_REGISTRY_ENABLED === "true") {
+      if (!data.ISSUER_REGISTRY_CONTRACT_ID) {
+        errors.push(
+          "Invalid configuration: ISSUER_REGISTRY_ENABLED=true but ISSUER_REGISTRY_CONTRACT_ID is missing",
+        );
+      }
+    }
+  }
+
+  // ────────────────────────────────────────────────────────────────────────
+  // STAGING & PRODUCTION-LIKE PROFILE INVARIANTS
+  // ────────────────────────────────────────────────────────────────────────
+
+  if (data.NODE_ENV === "production" || data.NODE_ENV === "staging") {
+    // Invariant: Rate limit window must be < 1 hour in production-like profiles
+    // Risk: Overly long windows (e.g., 86400000ms = 24h) make rate limiting
+    // ineffective; attackers can spread abuse across the window without triggering limits.
+    const challengeWindowHours =
+      data.AUTH_RATE_LIMIT_CHALLENGE_CREATION_WINDOW_MS / (1000 * 60 * 60);
+    if (challengeWindowHours > 1) {
+      errors.push(
+        "Invalid configuration: AUTH_RATE_LIMIT_CHALLENGE_CREATION_WINDOW_MS exceeds 1 hour in production-like profile (consider tightening)",
+      );
+    }
+
+    const verificationWindowHours =
+      data.AUTH_RATE_LIMIT_VERIFICATION_WINDOW_MS / (1000 * 60 * 60);
+    if (verificationWindowHours > 1) {
+      errors.push(
+        "Invalid configuration: AUTH_RATE_LIMIT_VERIFICATION_WINDOW_MS exceeds 1 hour in production-like profile (consider tightening)",
+      );
+    }
+
+    // Invariant: Rate limit counts must be reasonable
+    // Risk: Very high limits (e.g., 1000+ attempts per window) defeat the
+    // purpose of rate limiting.
+    if (data.AUTH_RATE_LIMIT_MAX_CHALLENGE_CREATIONS > 100) {
+      errors.push(
+        "Invalid configuration: AUTH_RATE_LIMIT_MAX_CHALLENGE_CREATIONS seems unreasonably high (>100) in production-like profile",
+      );
+    }
+    if (data.AUTH_RATE_LIMIT_MAX_VERIFICATIONS > 50) {
+      errors.push(
+        "Invalid configuration: AUTH_RATE_LIMIT_MAX_VERIFICATIONS seems unreasonably high (>50) in production-like profile",
+      );
+    }
+  }
+
+  // ────────────────────────────────────────────────────────────────────────
+  // TEST PROFILE INVARIANTS
+  // ────────────────────────────────────────────────────────────────────────
+
+  if (data.NODE_ENV === "test") {
+    // Invariant: Test database must be distinct from production
+    // Risk: Running tests against a real production database can corrupt data.
+    // While the harness validates this, we check here as defense-in-depth.
+    if (data.TEST_DATABASE_URL) {
+      const urlObj = new URL(data.TEST_DATABASE_URL);
+      const dbName = urlObj.pathname.split("/").pop() || "";
+      if (!dbName.includes("test")) {
+        errors.push(
+          "Invalid configuration: TEST_DATABASE_URL database name must contain 'test' (detected: " +
+            dbName +
+            ")",
+        );
+      }
+    }
+  }
+
+  // ────────────────────────────────────────────────────────────────────────
+  // ALL PROFILES: Health probe timeout must be reasonable
+  // ────────────────────────────────────────────────────────────────────────
+
+  // Invariant: Probe timeout should not exceed container startup probe timeout
+  // Risk: If the health check hangs for longer than the orchestrator's own
+  // probe timeout, probes timeout before Kiro finishes, creating redundant
+  // failures and slower debugging.
+  if (data.HEALTH_PROBE_TIMEOUT_MS > 25000) {
+    errors.push(
+      "Invalid configuration: HEALTH_PROBE_TIMEOUT_MS should not exceed 25 seconds (most orchestrators use 30s timeout)",
+    );
+  }
+
+  // ────────────────────────────────────────────────────────────────────────
+  // Return accumulated errors
+  // ────────────────────────────────────────────────────────────────────────
+
+  if (errors.length > 0) {
+    throw new Error(`Configuration validation failed: ${errors.join("; ")}`);
+  }
+}
+
+/**
+ * Validates all environment variables against the schema and cross-variable
+ * invariants. Runs at application startup to ensure fast failure before the
+ * server begins listening.
+ *
+ * Error messages include variable keys but NEVER expose secret values.
+ *
+ * @param config Raw environment variables from process.env
+ * @returns Typed and validated configuration object
+ * @throws Error if validation fails (causes immediate process exit)
+ */
+/**
+ * Matches versioned verification hash salt keys: VERIFICATION_HASH_SALT_V0,
+ * VERIFICATION_HASH_SALT_V1, etc. These are dynamically numbered (see
+ * VerificationEventService, which loads VERIFICATION_HASH_SALT_V{n} for
+ * n = 0.. until it hits a gap) so they cannot be listed individually in the
+ * schema. Validated separately: any key matching this pattern must be a
+ * non-empty string of reasonable length if present at all.
+ */
+const VERIFICATION_HASH_SALT_KEY_PATTERN = /^VERIFICATION_HASH_SALT_V\d+$/;
+
+const versionedSalt = z
+  .string()
+  .min(16, "must be at least 16 characters (used as an HMAC salt)");
+
+/**
+ * Validates VERIFICATION_HASH_SALT_V* keys, which are not part of the fixed
+ * envSchema shape since their count/numbering is operator-controlled.
+ * Returns field-level error strings (empty array if all valid).
+ */
+function validateVersionedSalts(config: Record<string, unknown>): string[] {
+  const errors: string[] = [];
+  for (const key of Object.keys(config)) {
+    if (!VERIFICATION_HASH_SALT_KEY_PATTERN.test(key)) continue;
+    const value = config[key];
+    if (value === undefined || value === "") continue; // treat as absent
+    const result = versionedSalt.safeParse(value);
+    if (!result.success) {
+      errors.push(`${key} ${result.error.issues[0]?.message ?? "is invalid"}`);
+    }
+  }
+  return errors;
+}
 
 export function validateEnv(config: Record<string, unknown>) {
   const parsed = envSchema.safeParse(config);
 
   if (!parsed.success) {
-    throw new Error(`Invalid environment: ${parsed.error.message}`);
+    // Format each issue as a single readable line naming the offending
+    // variable, so error messages stay grep-able and match-able (zod v4's
+    // raw error.message is multi-line JSON, which is hard to read and hard
+    // to test against with a single regex).
+    const details = parsed.error.issues
+      .map((issue) => `${issue.path.join(".") || "(root)"}: ${issue.message}`)
+      .join("; ");
+    throw new Error(`Invalid environment: ${details}`);
   }
+
+  const saltErrors = validateVersionedSalts(config);
+  if (saltErrors.length > 0) {
+    throw new Error(
+      `Invalid environment:\n${saltErrors.map((e) => `  - ${e}`).join("\n")}`,
+    );
+  }
+
+  // Check cross-variable invariants after individual field validation
+  checkCrossVariableInvariants(parsed.data);
 
   return parsed.data;
 }

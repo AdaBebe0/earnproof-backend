@@ -3,6 +3,7 @@ import { ConfigService } from "@nestjs/config";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import { sha256 } from "../common/crypto/hash";
+import { redact } from "../common/observability/redaction";
 
 const execFileAsync = promisify(execFile);
 
@@ -105,9 +106,9 @@ export class ContractAnchoringService {
         transactionHash: this.lastOutputLine(stdout),
       };
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Unknown error";
+      const message = safeCliError(error);
       if (this.required) {
-        throw error;
+        throw new Error(message);
       }
 
       this.logger.warn(`Contract anchoring failed: ${message}`);
@@ -153,9 +154,9 @@ export class ContractAnchoringService {
         valid: this.parseBoolean(valid),
       };
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Unknown error";
+      const message = safeCliError(error);
       if (this.required) {
-        throw error;
+        throw new Error(message);
       }
 
       this.logger.warn(`Contract status check failed: ${message}`);
@@ -182,9 +183,9 @@ export class ContractAnchoringService {
         transactionHash: this.lastOutputLine(stdout),
       };
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Unknown error";
+      const message = safeCliError(error);
       if (this.required) {
-        throw error;
+        throw new Error(message);
       }
 
       this.logger.warn(`Contract mutation failed: ${message}`);
@@ -257,4 +258,9 @@ export class ContractAnchoringService {
   private parseBoolean(value: string) {
     return value.trim().toLowerCase() === "true";
   }
+}
+
+/** Node includes execFile argv in failures, including the signing source. */
+function safeCliError(error: unknown): string {
+  return redact(error instanceof Error ? error.message : "Unknown error");
 }

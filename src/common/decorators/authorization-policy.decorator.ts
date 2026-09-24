@@ -57,11 +57,15 @@ export function getAuthorizationPolicy(
   target: Type<unknown> | object,
   propertyKey?: string | symbol,
 ): AuthorizationPolicy | undefined {
-  return propertyKey === undefined
-    ? Reflect.getMetadata(AUTHORIZATION_POLICY_METADATA, target)
-    : Reflect.getMetadata(
-        AUTHORIZATION_POLICY_METADATA,
-        target,
-        propertyKey,
-      );
+  if (propertyKey === undefined) {
+    return Reflect.getMetadata(AUTHORIZATION_POLICY_METADATA, target);
+  }
+
+  return (
+    Reflect.getMetadata(AUTHORIZATION_POLICY_METADATA, target, propertyKey) ??
+    Reflect.getMetadata(
+      AUTHORIZATION_POLICY_METADATA,
+      (target as { constructor: Type<unknown> }).constructor,
+    )
+  );
 }

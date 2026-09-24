@@ -1,21 +1,28 @@
 import { Injectable, NotFoundException } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
-import { PaymentClassification, ResourceStatus } from "@prisma/client";
-import { encryptProtectedAmount } from "../common/crypto/protected-amount";
+import {
+  Payment,
+  PaymentClassification,
+  Prisma,
+  ResourceStatus,
+} from "@prisma/client";
+import { PaymentEncryptionKeyringService } from "../common/crypto/payment-encryption-keyring.service";
 import { PrismaService } from "../database/prisma.service";
 import { StellarService } from "../stellar/stellar.service";
+import { normalizeMemo } from "../stellar/memo-normalizer";
+import { NormalizedMemo } from "../stellar/stellar.types";
 
 @Injectable()
 export class PaymentsService {
-  private readonly paymentEncryptionKey: string;
+  private readonly paymentEncryptionKeyring: PaymentEncryptionKeyringService;
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly stellarService: StellarService,
     configService: ConfigService,
   ) {
-    this.paymentEncryptionKey = configService.getOrThrow<string>(
-      "paymentEncryptionKey",
+    this.paymentEncryptionKeyring = new PaymentEncryptionKeyringService(
+      configService,
     );
   }
 
@@ -40,6 +47,27 @@ export class PaymentsService {
     let created = 0;
     let updated = 0;
     let skipped = 0;
+    let enrichmentErrors = 0;
+    const memoCache = new Map<string, NormalizedMemo>();
+
+    // Batch the "does this payment already exist" check into a single query
+    // ahead of the loop, instead of one findUnique per incoming payment.
+    // incomingPayments comes from Stellar Horizon and can run into the
+    // hundreds for an active wallet; a query per row turned a sync into N+1
+    // round trips to the database on top of the (already-batched) N calls to
+    // Horizon for memo enrichment.
+    const existingOperationIds = new Set(
+      (
+        await this.prisma.payment.findMany({
+          where: {
+            operationId: {
+              in: incomingPayments.map((payment) => payment.operationId),
+            },
+          },
+          select: { operationId: true },
+        })
+      ).map((row) => row.operationId),
+    );
 
     for (const payment of incomingPayments) {
       const isEligible = supportedAssetKeys.has(
@@ -50,14 +78,24 @@ export class PaymentsService {
         skipped += 1;
       }
 
-      const existing = await this.prisma.payment.findUnique({
-        where: {
-          operationId: payment.operationId,
-        },
-        select: {
-          id: true,
-        },
-      });
+      let memoContext = memoCache.get(payment.stellarTransactionHash);
+      if (!memoContext) {
+        try {
+          const transaction = await this.stellarService.fetchTransaction(
+            payment.stellarTransactionHash,
+          );
+          if (!transaction) {
+            enrichmentErrors += 1;
+          }
+          memoContext = normalizeMemo(transaction);
+        } catch {
+          enrichmentErrors += 1;
+          memoContext = { type: "none" };
+        }
+        memoCache.set(payment.stellarTransactionHash, memoContext);
+      }
+
+      const existing = existingOperationIds.has(payment.operationId);
 
       await this.prisma.payment.upsert({
         where: {
@@ -66,6 +104,7 @@ export class PaymentsService {
         update: {
           isEligible,
           occurredAt: payment.occurredAt,
+          memo: memoContext as Prisma.InputJsonValue,
         },
         create: {
           userId: user.id,
@@ -77,6 +116,7 @@ export class PaymentsService {
           assetIssuer: payment.assetIssuer,
           amountEncrypted: this.protectAmount(payment.amount),
           occurredAt: payment.occurredAt,
+          memo: memoContext as Prisma.InputJsonValue,
           classification: PaymentClassification.UNKNOWN,
           isEligible,
         },
@@ -94,14 +134,15 @@ export class PaymentsService {
       created,
       updated,
       skipped,
+      enrichmentErrors,
     };
   }
 
-  listPayments(
+  async listPayments(
     userId: string,
     filters: { classification?: PaymentClassification; assetCode?: string },
   ) {
-    return this.prisma.payment.findMany({
+    const payments = await this.prisma.payment.findMany({
       where: {
         userId,
         classification: filters.classification,
@@ -112,6 +153,8 @@ export class PaymentsService {
       },
       take: 100,
     });
+
+    return payments.map((payment) => this.toPaymentDto(payment));
   }
 
   async getPayment(userId: string, paymentId: string) {
@@ -126,7 +169,7 @@ export class PaymentsService {
       throw new NotFoundException("Payment not found");
     }
 
-    return payment;
+    return this.toPaymentDto(payment);
   }
 
   async updateClassification(
@@ -178,7 +221,7 @@ export class PaymentsService {
       },
     });
 
-    return updated;
+    return this.toPaymentDto(updated);
   }
 
   private assetKey(code: string, issuer: string | null) {
@@ -186,6 +229,52 @@ export class PaymentsService {
   }
 
   private protectAmount(amount: string) {
-    return encryptProtectedAmount(amount, this.paymentEncryptionKey);
+    return this.paymentEncryptionKeyring.encrypt(amount);
+  }
+
+  private toPaymentDto(payment: Payment) {
+    return {
+      id: payment.id,
+      operationId: payment.operationId,
+      stellarTransactionHash: payment.stellarTransactionHash,
+      sourceAddress: payment.sourceAddress,
+      destinationAddress: payment.destinationAddress,
+      assetCode: payment.assetCode,
+      assetIssuer: payment.assetIssuer,
+      occurredAt: payment.occurredAt,
+      classification: payment.classification,
+      isEligible: payment.isEligible,
+      createdAt: payment.createdAt,
+      updatedAt: payment.updatedAt,
+      memoContext: this.readMemoContext(payment.memo),
+    };
+  }
+
+  private readMemoContext(memo: Prisma.JsonValue | null): NormalizedMemo {
+    if (!memo || typeof memo !== "object" || Array.isArray(memo)) {
+      return { type: "none" };
+    }
+
+    const stored = memo as Record<string, Prisma.JsonValue>;
+    if (stored.type === "none") {
+      return { type: "none" };
+    }
+
+    if (typeof stored.type !== "string" || typeof stored.value !== "string") {
+      return { type: "none" };
+    }
+
+    if (stored.type === "text") {
+      return {
+        type: "text",
+        value: Array.from(stored.value).slice(0, 500).join(""),
+        truncated: stored.truncated === true,
+      };
+    }
+
+    return normalizeMemo({
+      memo_type: stored.type === "return_hash" ? "return" : stored.type,
+      memo: stored.value,
+    });
   }
 }

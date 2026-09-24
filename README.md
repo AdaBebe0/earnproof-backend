@@ -36,6 +36,7 @@ Implemented:
 - Initial database migration
 - Seed script for native XLM testnet asset
 - Jest tests for auth, token handling, health, Stellar payment mapping, payment sync/classification, and proof issuance/verification states
+- PostgreSQL integration test harness that applies every migration to an empty database
 
 Core entities currently modeled:
 
@@ -93,8 +94,36 @@ prisma/
   seed.ts
   migrations/
 test/
+  integration/
+    harness/
 docs/
 ```
+
+## Architecture
+
+[`docs/architecture.md`](docs/architecture.md) is the maintained map of the
+backend: what each module owns, which dependencies it must not take, how the
+critical flows run, and which domain invariants hold. Every invariant links to
+the code that enforces it and the test that fails if it stops — the handbook is
+checked against the codebase by [`src/docs-links.spec.ts`](src/docs-links.spec.ts),
+so a module added without documentation, or a link to a moved file, fails the
+build.
+
+[`docs/adr/`](docs/adr/) records the decisions that shaped it, including when a
+new ADR is required.
+
+[`docs/webhooks.md`](docs/webhooks.md) is the integrator-facing guide to
+verifying signed webhook deliveries, backed by frozen conformance vectors and a
+runnable reference receiver (`npm run webhook:conformance`).
+
+[`docs/api-keys-guide.md`](docs/api-keys-guide.md) is the integrator-facing guide
+to machine-to-machine authentication: creating a key, the two headers it is
+presented with, what each scope grants, rotating without dropping traffic,
+revocation, rate limiting, and how to store a secret that is only ever shown
+once.
+
+Start there before adding a module, moving a table, or introducing an
+unauthenticated endpoint.
 
 ## Local Setup
 
@@ -124,6 +153,37 @@ Swagger docs:
 ```text
 http://localhost:4000/docs
 ```
+
+## Container Deployment
+
+A production image is defined by [`Dockerfile`](Dockerfile): a multi-stage build
+that compiles the application with the full toolchain, installs runtime
+dependencies separately with `npm ci --omit=dev`, and ships only `dist/`, the
+pruned `node_modules`, and the Prisma schema. It runs as the non-root `node`
+user and declares a health check against `/api/v1/health`.
+
+```bash
+docker build -t earnproof-api:local .
+
+docker run --rm -p 4000:4000 --env-file production.env earnproof-api:local
+
+curl http://localhost:4000/api/v1/health
+```
+
+`production.env` above is an uncommitted file holding the five required secrets
+and connection strings; `-e` flags work equally well.
+
+[`docs/deployment.md`](docs/deployment.md) documents every environment variable
+and its default, how to run the image against the Compose services, how to apply
+migrations from the same artefact, which probe an orchestrator should use, and
+the security properties of the image.
+
+Hosted Node services that start with `npm run start` apply pending Prisma
+migrations through the npm `prestart` lifecycle before accepting traffic.
+Container deployments continue to use a separate pre-deploy migration job.
+
+Note that `docker compose up -d` starts PostgreSQL and Redis for local
+development only. It does not build or run the API.
 
 ## Environment Variables
 
@@ -169,6 +229,56 @@ Prisma validation:
 $env:DATABASE_URL='postgresql://earnproof:earnproof@localhost:5432/earnproof'
 npx prisma validate
 ```
+
+## Integration Tests
+
+`npm run test` runs against a mocked Prisma client. The integration suite runs
+against a real PostgreSQL server: it applies every migration in
+`prisma/migrations` to an empty database and then covers proof
+creation/revocation, webhook retry persistence, authentication sessions, payment
+uniqueness, transaction commit and rollback, constraint violations, and
+concurrent writes.
+
+```bash
+npm run test:integration
+```
+
+It needs PostgreSQL 17 and a role that can create databases. Docker is not
+required.
+
+```sql
+-- once, as a superuser
+CREATE ROLE earnproof WITH LOGIN PASSWORD 'earnproof' CREATEDB;
+```
+
+```bash
+TEST_DATABASE_URL=postgresql://earnproof:earnproof@localhost:5432/earnproof_test
+```
+
+PowerShell:
+
+```powershell
+$env:TEST_DATABASE_URL='postgresql://earnproof:earnproof@localhost:5432/earnproof_test'
+npm run test:integration
+```
+
+The named database is a naming base, not a target: the harness creates
+`earnproof_test_template` and one `earnproof_test_w<worker>` per Jest worker, and
+drops them again on teardown. `TEST_DATABASE_URL` is kept separate from
+`DATABASE_URL`, and refused unless the name contains `test`, so a development
+database can never be the target.
+
+[`docs/request-limits.md`](docs/request-limits.md) documents the largest request
+the API accepts at each boundary -- transport, structure, and domain -- and why
+each limit is set where it is.
+[`docs/development.md`](docs/development.md) documents the local database
+tooling: seeding a synthetic scenario, resetting a disposable database, and the
+guards that refuse to do either against anything else.
+
+[`docs/integration-testing.md`](docs/integration-testing.md) documents the
+isolation model, the startup and teardown deadlines, and the redaction that
+keeps connection strings, wallet addresses, protected amounts, and signing
+material out of test failures.
 
 ## Privacy and Security Requirements
 

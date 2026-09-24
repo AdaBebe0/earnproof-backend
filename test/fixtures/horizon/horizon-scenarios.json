@@ -1,0 +1,2084 @@
+{
+  "$comment": "Frozen, synthetic Horizon fixtures for the fault and pagination suite. No production wallet, transaction, or payment data appears here: every address, hash, and amount is generated from a fixed seed and is recognisably synthetic. See docs/testing-horizon.md before changing anything in this file.",
+  "fixtureVersion": 1,
+  "generatedFrom": "deterministic seed; contains no recorded production traffic",
+  "horizonUrl": "https://horizon.synthetic.invalid",
+  "account": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+  "counterparty": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+  "assetIssuer": "GSYNTHETIC0ISSUER000000000000000000000000000000000000000",
+  "epoch": "2026-01-01T00:00:00.000Z",
+  "scenarios": {
+    "empty-page": {
+      "description": "An account with no payment history. One empty page, no next link.",
+      "steps": [
+        {
+          "expectCursor": null,
+          "response": {
+            "status": 200,
+            "body": {
+              "_embedded": {
+                "records": []
+              },
+              "_links": {
+                "self": {
+                  "href": "https://horizon.synthetic.invalid/self"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "empty-embedded-absent": {
+      "description": "A 200 whose body omits _embedded entirely. Treated as an empty feed, not as corruption — Horizon answers this way for an unused account.",
+      "steps": [
+        {
+          "expectCursor": null,
+          "response": {
+            "status": 200,
+            "body": {
+              "_links": {
+                "self": {
+                  "href": "https://horizon.synthetic.invalid/self"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "single-page": {
+      "description": "Three records, no next link. The feed ends on the first page.",
+      "steps": [
+        {
+          "expectCursor": null,
+          "response": {
+            "status": 200,
+            "body": {
+              "_embedded": {
+                "records": [
+                  {
+                    "id": "synthetic-op-000000",
+                    "paging_token": "91000000",
+                    "type": "payment",
+                    "transaction_hash": "synthetic24e52bdcddaa0932f775b7d085b0edfdf4b255a35982898de5cb86f",
+                    "created_at": "2026-01-01T00:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "native",
+                    "amount": "100.0000000"
+                  },
+                  {
+                    "id": "synthetic-op-000001",
+                    "paging_token": "91000001",
+                    "type": "payment",
+                    "transaction_hash": "synthetic39cd037e59d9d9ec529588e7eaa711b1d2aafbf38dad86142b76a92",
+                    "created_at": "2025-12-31T23:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "credit_alphanum4",
+                    "asset_code": "USDC",
+                    "asset_issuer": "GSYNTHETIC0ISSUER000000000000000000000000000000000000000",
+                    "amount": "101.0100000"
+                  },
+                  {
+                    "id": "synthetic-op-000002",
+                    "paging_token": "91000002",
+                    "type": "payment",
+                    "transaction_hash": "syntheticeb44d29563de47d42ca5bbdff3a246f41dfe85bbe74def3727723ec",
+                    "created_at": "2025-12-31T22:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "credit_alphanum4",
+                    "asset_code": "USDC",
+                    "asset_issuer": "GSYNTHETIC0ISSUER000000000000000000000000000000000000000",
+                    "amount": "102.0200000"
+                  }
+                ]
+              },
+              "_links": {
+                "self": {
+                  "href": "https://horizon.synthetic.invalid/self"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "multi-page": {
+      "description": "Three full pages walked by cursor, then a terminal page with no next link. Each step asserts the cursor the client sent.",
+      "steps": [
+        {
+          "expectCursor": null,
+          "response": {
+            "status": 200,
+            "body": {
+              "_embedded": {
+                "records": [
+                  {
+                    "id": "synthetic-op-000000",
+                    "paging_token": "91000000",
+                    "type": "payment",
+                    "transaction_hash": "synthetic24e52bdcddaa0932f775b7d085b0edfdf4b255a35982898de5cb86f",
+                    "created_at": "2026-01-01T00:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "native",
+                    "amount": "100.0000000"
+                  },
+                  {
+                    "id": "synthetic-op-000001",
+                    "paging_token": "91000001",
+                    "type": "payment",
+                    "transaction_hash": "synthetic39cd037e59d9d9ec529588e7eaa711b1d2aafbf38dad86142b76a92",
+                    "created_at": "2025-12-31T23:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "credit_alphanum4",
+                    "asset_code": "USDC",
+                    "asset_issuer": "GSYNTHETIC0ISSUER000000000000000000000000000000000000000",
+                    "amount": "101.0100000"
+                  },
+                  {
+                    "id": "synthetic-op-000002",
+                    "paging_token": "91000002",
+                    "type": "payment",
+                    "transaction_hash": "syntheticeb44d29563de47d42ca5bbdff3a246f41dfe85bbe74def3727723ec",
+                    "created_at": "2025-12-31T22:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "credit_alphanum4",
+                    "asset_code": "USDC",
+                    "asset_issuer": "GSYNTHETIC0ISSUER000000000000000000000000000000000000000",
+                    "amount": "102.0200000"
+                  }
+                ]
+              },
+              "_links": {
+                "self": {
+                  "href": "https://horizon.synthetic.invalid/self"
+                },
+                "next": {
+                  "href": "https://horizon.synthetic.invalid/accounts/GSYNTHETIC0RECEIVER0000000000000000000000000000000000000/payments?cursor=91000002&limit=3&order=desc"
+                }
+              }
+            }
+          }
+        },
+        {
+          "expectCursor": "91000002",
+          "response": {
+            "status": 200,
+            "body": {
+              "_embedded": {
+                "records": [
+                  {
+                    "id": "synthetic-op-000003",
+                    "paging_token": "91000003",
+                    "type": "payment",
+                    "transaction_hash": "synthetic32c879bae7858a92d099d490690410bbc460a632997740c183eca2f",
+                    "created_at": "2025-12-31T21:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "native",
+                    "amount": "103.0300000"
+                  },
+                  {
+                    "id": "synthetic-op-000004",
+                    "paging_token": "91000004",
+                    "type": "payment",
+                    "transaction_hash": "synthetic0abbec1649bd4cb4752a9cf8aea0670e7dfb843a96d491f482be3a9",
+                    "created_at": "2025-12-31T20:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "credit_alphanum4",
+                    "asset_code": "USDC",
+                    "asset_issuer": "GSYNTHETIC0ISSUER000000000000000000000000000000000000000",
+                    "amount": "104.0400000"
+                  },
+                  {
+                    "id": "synthetic-op-000005",
+                    "paging_token": "91000005",
+                    "type": "payment",
+                    "transaction_hash": "syntheticbba91c62990828e8fe1487c423f7909d7515fb66af9f8d6b869a407",
+                    "created_at": "2025-12-31T19:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "credit_alphanum4",
+                    "asset_code": "USDC",
+                    "asset_issuer": "GSYNTHETIC0ISSUER000000000000000000000000000000000000000",
+                    "amount": "105.0500000"
+                  }
+                ]
+              },
+              "_links": {
+                "self": {
+                  "href": "https://horizon.synthetic.invalid/self"
+                },
+                "next": {
+                  "href": "https://horizon.synthetic.invalid/accounts/GSYNTHETIC0RECEIVER0000000000000000000000000000000000000/payments?cursor=91000005&limit=3&order=desc"
+                }
+              }
+            }
+          }
+        },
+        {
+          "expectCursor": "91000005",
+          "response": {
+            "status": 200,
+            "body": {
+              "_embedded": {
+                "records": [
+                  {
+                    "id": "synthetic-op-000006",
+                    "paging_token": "91000006",
+                    "type": "payment",
+                    "transaction_hash": "synthetic6b4c4e20680b0f988995e32c8f5f0dfc7c4b34dbcabc44c9f85badd",
+                    "created_at": "2025-12-31T18:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "native",
+                    "amount": "106.0600000"
+                  },
+                  {
+                    "id": "synthetic-op-000007",
+                    "paging_token": "91000007",
+                    "type": "payment",
+                    "transaction_hash": "syntheticcb4bcd63c0f08b3305efa7e593e0af4befad600068b94ed03696a1d",
+                    "created_at": "2025-12-31T17:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "credit_alphanum4",
+                    "asset_code": "USDC",
+                    "asset_issuer": "GSYNTHETIC0ISSUER000000000000000000000000000000000000000",
+                    "amount": "107.0700000"
+                  },
+                  {
+                    "id": "synthetic-op-000008",
+                    "paging_token": "91000008",
+                    "type": "payment",
+                    "transaction_hash": "synthetic8ed56e350d3084031f254039392aaa69480a2773de0bc6dc23b08fb",
+                    "created_at": "2025-12-31T16:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "credit_alphanum4",
+                    "asset_code": "USDC",
+                    "asset_issuer": "GSYNTHETIC0ISSUER000000000000000000000000000000000000000",
+                    "amount": "108.0800000"
+                  }
+                ]
+              },
+              "_links": {
+                "self": {
+                  "href": "https://horizon.synthetic.invalid/self"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "repeated-cursor": {
+      "description": "Horizon hands back a next cursor it has already issued. Following it would loop forever, so the walk stops and reports repeated_cursor.",
+      "steps": [
+        {
+          "expectCursor": null,
+          "response": {
+            "status": 200,
+            "body": {
+              "_embedded": {
+                "records": [
+                  {
+                    "id": "synthetic-op-000000",
+                    "paging_token": "91000000",
+                    "type": "payment",
+                    "transaction_hash": "synthetic24e52bdcddaa0932f775b7d085b0edfdf4b255a35982898de5cb86f",
+                    "created_at": "2026-01-01T00:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "native",
+                    "amount": "100.0000000"
+                  },
+                  {
+                    "id": "synthetic-op-000001",
+                    "paging_token": "91000001",
+                    "type": "payment",
+                    "transaction_hash": "synthetic39cd037e59d9d9ec529588e7eaa711b1d2aafbf38dad86142b76a92",
+                    "created_at": "2025-12-31T23:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "credit_alphanum4",
+                    "asset_code": "USDC",
+                    "asset_issuer": "GSYNTHETIC0ISSUER000000000000000000000000000000000000000",
+                    "amount": "101.0100000"
+                  }
+                ]
+              },
+              "_links": {
+                "self": {
+                  "href": "https://horizon.synthetic.invalid/self"
+                },
+                "next": {
+                  "href": "https://horizon.synthetic.invalid/accounts/GSYNTHETIC0RECEIVER0000000000000000000000000000000000000/payments?cursor=91000001&limit=3&order=desc"
+                }
+              }
+            }
+          }
+        },
+        {
+          "expectCursor": "91000001",
+          "response": {
+            "status": 200,
+            "body": {
+              "_embedded": {
+                "records": [
+                  {
+                    "id": "synthetic-op-000002",
+                    "paging_token": "91000002",
+                    "type": "payment",
+                    "transaction_hash": "syntheticeb44d29563de47d42ca5bbdff3a246f41dfe85bbe74def3727723ec",
+                    "created_at": "2025-12-31T22:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "credit_alphanum4",
+                    "asset_code": "USDC",
+                    "asset_issuer": "GSYNTHETIC0ISSUER000000000000000000000000000000000000000",
+                    "amount": "102.0200000"
+                  },
+                  {
+                    "id": "synthetic-op-000003",
+                    "paging_token": "91000003",
+                    "type": "payment",
+                    "transaction_hash": "synthetic32c879bae7858a92d099d490690410bbc460a632997740c183eca2f",
+                    "created_at": "2025-12-31T21:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "native",
+                    "amount": "103.0300000"
+                  }
+                ]
+              },
+              "_links": {
+                "self": {
+                  "href": "https://horizon.synthetic.invalid/self"
+                },
+                "next": {
+                  "href": "https://horizon.synthetic.invalid/accounts/GSYNTHETIC0RECEIVER0000000000000000000000000000000000000/payments?cursor=91000001&limit=3&order=desc"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "self-referential-cursor": {
+      "description": "The next cursor equals the cursor just used. The degenerate form of a loop.",
+      "steps": [
+        {
+          "expectCursor": null,
+          "response": {
+            "status": 200,
+            "body": {
+              "_embedded": {
+                "records": [
+                  {
+                    "id": "synthetic-op-000000",
+                    "paging_token": "91000000",
+                    "type": "payment",
+                    "transaction_hash": "synthetic24e52bdcddaa0932f775b7d085b0edfdf4b255a35982898de5cb86f",
+                    "created_at": "2026-01-01T00:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "native",
+                    "amount": "100.0000000"
+                  },
+                  {
+                    "id": "synthetic-op-000001",
+                    "paging_token": "91000001",
+                    "type": "payment",
+                    "transaction_hash": "synthetic39cd037e59d9d9ec529588e7eaa711b1d2aafbf38dad86142b76a92",
+                    "created_at": "2025-12-31T23:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "credit_alphanum4",
+                    "asset_code": "USDC",
+                    "asset_issuer": "GSYNTHETIC0ISSUER000000000000000000000000000000000000000",
+                    "amount": "101.0100000"
+                  }
+                ]
+              },
+              "_links": {
+                "self": {
+                  "href": "https://horizon.synthetic.invalid/self"
+                },
+                "next": {
+                  "href": "https://horizon.synthetic.invalid/accounts/GSYNTHETIC0RECEIVER0000000000000000000000000000000000000/payments?cursor=91000001&limit=3&order=desc"
+                }
+              }
+            }
+          }
+        },
+        {
+          "expectCursor": "91000001",
+          "response": {
+            "status": 200,
+            "body": {
+              "_embedded": {
+                "records": [
+                  {
+                    "id": "synthetic-op-000002",
+                    "paging_token": "91000002",
+                    "type": "payment",
+                    "transaction_hash": "syntheticeb44d29563de47d42ca5bbdff3a246f41dfe85bbe74def3727723ec",
+                    "created_at": "2025-12-31T22:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "credit_alphanum4",
+                    "asset_code": "USDC",
+                    "asset_issuer": "GSYNTHETIC0ISSUER000000000000000000000000000000000000000",
+                    "amount": "102.0200000"
+                  }
+                ]
+              },
+              "_links": {
+                "self": {
+                  "href": "https://horizon.synthetic.invalid/self"
+                },
+                "next": {
+                  "href": "https://horizon.synthetic.invalid/accounts/GSYNTHETIC0RECEIVER0000000000000000000000000000000000000/payments?cursor=91000001&limit=3&order=desc"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "overlapping-pages": {
+      "description": "Page two repeats two records from page one, as a ledger reorganisation or a lagging read replica would. The overlap must be deduplicated by operation id, not counted twice.",
+      "steps": [
+        {
+          "expectCursor": null,
+          "response": {
+            "status": 200,
+            "body": {
+              "_embedded": {
+                "records": [
+                  {
+                    "id": "synthetic-op-000000",
+                    "paging_token": "91000000",
+                    "type": "payment",
+                    "transaction_hash": "synthetic24e52bdcddaa0932f775b7d085b0edfdf4b255a35982898de5cb86f",
+                    "created_at": "2026-01-01T00:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "native",
+                    "amount": "100.0000000"
+                  },
+                  {
+                    "id": "synthetic-op-000001",
+                    "paging_token": "91000001",
+                    "type": "payment",
+                    "transaction_hash": "synthetic39cd037e59d9d9ec529588e7eaa711b1d2aafbf38dad86142b76a92",
+                    "created_at": "2025-12-31T23:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "credit_alphanum4",
+                    "asset_code": "USDC",
+                    "asset_issuer": "GSYNTHETIC0ISSUER000000000000000000000000000000000000000",
+                    "amount": "101.0100000"
+                  },
+                  {
+                    "id": "synthetic-op-000002",
+                    "paging_token": "91000002",
+                    "type": "payment",
+                    "transaction_hash": "syntheticeb44d29563de47d42ca5bbdff3a246f41dfe85bbe74def3727723ec",
+                    "created_at": "2025-12-31T22:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "credit_alphanum4",
+                    "asset_code": "USDC",
+                    "asset_issuer": "GSYNTHETIC0ISSUER000000000000000000000000000000000000000",
+                    "amount": "102.0200000"
+                  }
+                ]
+              },
+              "_links": {
+                "self": {
+                  "href": "https://horizon.synthetic.invalid/self"
+                },
+                "next": {
+                  "href": "https://horizon.synthetic.invalid/accounts/GSYNTHETIC0RECEIVER0000000000000000000000000000000000000/payments?cursor=91000002&limit=3&order=desc"
+                }
+              }
+            }
+          }
+        },
+        {
+          "expectCursor": "91000002",
+          "response": {
+            "status": 200,
+            "body": {
+              "_embedded": {
+                "records": [
+                  {
+                    "id": "synthetic-op-000001",
+                    "paging_token": "91000001",
+                    "type": "payment",
+                    "transaction_hash": "synthetic39cd037e59d9d9ec529588e7eaa711b1d2aafbf38dad86142b76a92",
+                    "created_at": "2025-12-31T23:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "credit_alphanum4",
+                    "asset_code": "USDC",
+                    "asset_issuer": "GSYNTHETIC0ISSUER000000000000000000000000000000000000000",
+                    "amount": "101.0100000"
+                  },
+                  {
+                    "id": "synthetic-op-000002",
+                    "paging_token": "91000002",
+                    "type": "payment",
+                    "transaction_hash": "syntheticeb44d29563de47d42ca5bbdff3a246f41dfe85bbe74def3727723ec",
+                    "created_at": "2025-12-31T22:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "credit_alphanum4",
+                    "asset_code": "USDC",
+                    "asset_issuer": "GSYNTHETIC0ISSUER000000000000000000000000000000000000000",
+                    "amount": "102.0200000"
+                  },
+                  {
+                    "id": "synthetic-op-000003",
+                    "paging_token": "91000003",
+                    "type": "payment",
+                    "transaction_hash": "synthetic32c879bae7858a92d099d490690410bbc460a632997740c183eca2f",
+                    "created_at": "2025-12-31T21:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "native",
+                    "amount": "103.0300000"
+                  }
+                ]
+              },
+              "_links": {
+                "self": {
+                  "href": "https://horizon.synthetic.invalid/self"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "fully-replayed-page": {
+      "description": "Page two is byte-identical to page one but advances the cursor. Every record is a duplicate and nothing new is accumulated.",
+      "steps": [
+        {
+          "expectCursor": null,
+          "response": {
+            "status": 200,
+            "body": {
+              "_embedded": {
+                "records": [
+                  {
+                    "id": "synthetic-op-000000",
+                    "paging_token": "91000000",
+                    "type": "payment",
+                    "transaction_hash": "synthetic24e52bdcddaa0932f775b7d085b0edfdf4b255a35982898de5cb86f",
+                    "created_at": "2026-01-01T00:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "native",
+                    "amount": "100.0000000"
+                  },
+                  {
+                    "id": "synthetic-op-000001",
+                    "paging_token": "91000001",
+                    "type": "payment",
+                    "transaction_hash": "synthetic39cd037e59d9d9ec529588e7eaa711b1d2aafbf38dad86142b76a92",
+                    "created_at": "2025-12-31T23:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "credit_alphanum4",
+                    "asset_code": "USDC",
+                    "asset_issuer": "GSYNTHETIC0ISSUER000000000000000000000000000000000000000",
+                    "amount": "101.0100000"
+                  }
+                ]
+              },
+              "_links": {
+                "self": {
+                  "href": "https://horizon.synthetic.invalid/self"
+                },
+                "next": {
+                  "href": "https://horizon.synthetic.invalid/accounts/GSYNTHETIC0RECEIVER0000000000000000000000000000000000000/payments?cursor=91000001&limit=3&order=desc"
+                }
+              }
+            }
+          }
+        },
+        {
+          "expectCursor": "91000001",
+          "response": {
+            "status": 200,
+            "body": {
+              "_embedded": {
+                "records": [
+                  {
+                    "id": "synthetic-op-000000",
+                    "paging_token": "91000000",
+                    "type": "payment",
+                    "transaction_hash": "synthetic24e52bdcddaa0932f775b7d085b0edfdf4b255a35982898de5cb86f",
+                    "created_at": "2026-01-01T00:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "native",
+                    "amount": "100.0000000"
+                  },
+                  {
+                    "id": "synthetic-op-000001",
+                    "paging_token": "91000001",
+                    "type": "payment",
+                    "transaction_hash": "synthetic39cd037e59d9d9ec529588e7eaa711b1d2aafbf38dad86142b76a92",
+                    "created_at": "2025-12-31T23:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "credit_alphanum4",
+                    "asset_code": "USDC",
+                    "asset_issuer": "GSYNTHETIC0ISSUER000000000000000000000000000000000000000",
+                    "amount": "101.0100000"
+                  }
+                ]
+              },
+              "_links": {
+                "self": {
+                  "href": "https://horizon.synthetic.invalid/self"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "rate-limited-then-ok": {
+      "description": "429 with Retry-After, then success. Transient: the retry must honour the header rather than the client's own backoff.",
+      "steps": [
+        {
+          "expectCursor": null,
+          "response": {
+            "status": 429,
+            "body": {
+              "title": "synthetic error"
+            },
+            "headers": {
+              "retry-after": "2"
+            }
+          }
+        },
+        {
+          "expectCursor": null,
+          "response": {
+            "status": 200,
+            "body": {
+              "_embedded": {
+                "records": [
+                  {
+                    "id": "synthetic-op-000000",
+                    "paging_token": "91000000",
+                    "type": "payment",
+                    "transaction_hash": "synthetic24e52bdcddaa0932f775b7d085b0edfdf4b255a35982898de5cb86f",
+                    "created_at": "2026-01-01T00:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "native",
+                    "amount": "100.0000000"
+                  },
+                  {
+                    "id": "synthetic-op-000001",
+                    "paging_token": "91000001",
+                    "type": "payment",
+                    "transaction_hash": "synthetic39cd037e59d9d9ec529588e7eaa711b1d2aafbf38dad86142b76a92",
+                    "created_at": "2025-12-31T23:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "credit_alphanum4",
+                    "asset_code": "USDC",
+                    "asset_issuer": "GSYNTHETIC0ISSUER000000000000000000000000000000000000000",
+                    "amount": "101.0100000"
+                  }
+                ]
+              },
+              "_links": {
+                "self": {
+                  "href": "https://horizon.synthetic.invalid/self"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "rate-limited-exhausted": {
+      "description": "429 on every attempt. The retry budget runs out and the fault surfaces.",
+      "steps": [
+        {
+          "expectCursor": null,
+          "response": {
+            "status": 429,
+            "body": {
+              "title": "synthetic error"
+            },
+            "headers": {
+              "retry-after": "1"
+            }
+          }
+        },
+        {
+          "expectCursor": null,
+          "response": {
+            "status": 429,
+            "body": {
+              "title": "synthetic error"
+            },
+            "headers": {
+              "retry-after": "1"
+            }
+          }
+        },
+        {
+          "expectCursor": null,
+          "response": {
+            "status": 429,
+            "body": {
+              "title": "synthetic error"
+            },
+            "headers": {
+              "retry-after": "1"
+            }
+          }
+        }
+      ]
+    },
+    "rate-limited-absurd-retry-after": {
+      "description": "429 asking for a 3600-second wait. Honouring it verbatim would hang the caller far past any request deadline, so the delay is capped.",
+      "steps": [
+        {
+          "expectCursor": null,
+          "response": {
+            "status": 429,
+            "body": {
+              "title": "synthetic error"
+            },
+            "headers": {
+              "retry-after": "3600"
+            }
+          }
+        },
+        {
+          "expectCursor": null,
+          "response": {
+            "status": 200,
+            "body": {
+              "_embedded": {
+                "records": [
+                  {
+                    "id": "synthetic-op-000000",
+                    "paging_token": "91000000",
+                    "type": "payment",
+                    "transaction_hash": "synthetic24e52bdcddaa0932f775b7d085b0edfdf4b255a35982898de5cb86f",
+                    "created_at": "2026-01-01T00:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "native",
+                    "amount": "100.0000000"
+                  }
+                ]
+              },
+              "_links": {
+                "self": {
+                  "href": "https://horizon.synthetic.invalid/self"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "timeout-then-ok": {
+      "description": "The first attempt times out; the retry succeeds.",
+      "steps": [
+        {
+          "expectCursor": null,
+          "throw": "timeout"
+        },
+        {
+          "expectCursor": null,
+          "response": {
+            "status": 200,
+            "body": {
+              "_embedded": {
+                "records": [
+                  {
+                    "id": "synthetic-op-000000",
+                    "paging_token": "91000000",
+                    "type": "payment",
+                    "transaction_hash": "synthetic24e52bdcddaa0932f775b7d085b0edfdf4b255a35982898de5cb86f",
+                    "created_at": "2026-01-01T00:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "native",
+                    "amount": "100.0000000"
+                  }
+                ]
+              },
+              "_links": {
+                "self": {
+                  "href": "https://horizon.synthetic.invalid/self"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "timeout-exhausted": {
+      "description": "Every attempt times out. Transient, but the budget is finite.",
+      "steps": [
+        {
+          "expectCursor": null,
+          "throw": "timeout"
+        },
+        {
+          "expectCursor": null,
+          "throw": "timeout"
+        },
+        {
+          "expectCursor": null,
+          "throw": "timeout"
+        }
+      ]
+    },
+    "server-error-then-ok": {
+      "description": "503 then success — the ordinary Horizon blip.",
+      "steps": [
+        {
+          "expectCursor": null,
+          "response": {
+            "status": 503,
+            "body": {
+              "title": "synthetic error"
+            },
+            "headers": {}
+          }
+        },
+        {
+          "expectCursor": null,
+          "response": {
+            "status": 200,
+            "body": {
+              "_embedded": {
+                "records": [
+                  {
+                    "id": "synthetic-op-000000",
+                    "paging_token": "91000000",
+                    "type": "payment",
+                    "transaction_hash": "synthetic24e52bdcddaa0932f775b7d085b0edfdf4b255a35982898de5cb86f",
+                    "created_at": "2026-01-01T00:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "native",
+                    "amount": "100.0000000"
+                  },
+                  {
+                    "id": "synthetic-op-000001",
+                    "paging_token": "91000001",
+                    "type": "payment",
+                    "transaction_hash": "synthetic39cd037e59d9d9ec529588e7eaa711b1d2aafbf38dad86142b76a92",
+                    "created_at": "2025-12-31T23:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "credit_alphanum4",
+                    "asset_code": "USDC",
+                    "asset_issuer": "GSYNTHETIC0ISSUER000000000000000000000000000000000000000",
+                    "amount": "101.0100000"
+                  }
+                ]
+              },
+              "_links": {
+                "self": {
+                  "href": "https://horizon.synthetic.invalid/self"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "server-error-mid-walk": {
+      "description": "Page one succeeds, page two fails twice then succeeds. The retry budget is per page, so page two still gets its full allowance.",
+      "steps": [
+        {
+          "expectCursor": null,
+          "response": {
+            "status": 200,
+            "body": {
+              "_embedded": {
+                "records": [
+                  {
+                    "id": "synthetic-op-000000",
+                    "paging_token": "91000000",
+                    "type": "payment",
+                    "transaction_hash": "synthetic24e52bdcddaa0932f775b7d085b0edfdf4b255a35982898de5cb86f",
+                    "created_at": "2026-01-01T00:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "native",
+                    "amount": "100.0000000"
+                  },
+                  {
+                    "id": "synthetic-op-000001",
+                    "paging_token": "91000001",
+                    "type": "payment",
+                    "transaction_hash": "synthetic39cd037e59d9d9ec529588e7eaa711b1d2aafbf38dad86142b76a92",
+                    "created_at": "2025-12-31T23:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "credit_alphanum4",
+                    "asset_code": "USDC",
+                    "asset_issuer": "GSYNTHETIC0ISSUER000000000000000000000000000000000000000",
+                    "amount": "101.0100000"
+                  }
+                ]
+              },
+              "_links": {
+                "self": {
+                  "href": "https://horizon.synthetic.invalid/self"
+                },
+                "next": {
+                  "href": "https://horizon.synthetic.invalid/accounts/GSYNTHETIC0RECEIVER0000000000000000000000000000000000000/payments?cursor=91000001&limit=3&order=desc"
+                }
+              }
+            }
+          }
+        },
+        {
+          "expectCursor": "91000001",
+          "response": {
+            "status": 500,
+            "body": {
+              "title": "synthetic error"
+            },
+            "headers": {}
+          }
+        },
+        {
+          "expectCursor": "91000001",
+          "response": {
+            "status": 500,
+            "body": {
+              "title": "synthetic error"
+            },
+            "headers": {}
+          }
+        },
+        {
+          "expectCursor": "91000001",
+          "response": {
+            "status": 200,
+            "body": {
+              "_embedded": {
+                "records": [
+                  {
+                    "id": "synthetic-op-000002",
+                    "paging_token": "91000002",
+                    "type": "payment",
+                    "transaction_hash": "syntheticeb44d29563de47d42ca5bbdff3a246f41dfe85bbe74def3727723ec",
+                    "created_at": "2025-12-31T22:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "credit_alphanum4",
+                    "asset_code": "USDC",
+                    "asset_issuer": "GSYNTHETIC0ISSUER000000000000000000000000000000000000000",
+                    "amount": "102.0200000"
+                  },
+                  {
+                    "id": "synthetic-op-000003",
+                    "paging_token": "91000003",
+                    "type": "payment",
+                    "transaction_hash": "synthetic32c879bae7858a92d099d490690410bbc460a632997740c183eca2f",
+                    "created_at": "2025-12-31T21:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "native",
+                    "amount": "103.0300000"
+                  }
+                ]
+              },
+              "_links": {
+                "self": {
+                  "href": "https://horizon.synthetic.invalid/self"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "network-error-then-ok": {
+      "description": "The connection fails outright, then recovers.",
+      "steps": [
+        {
+          "expectCursor": null,
+          "throw": "network"
+        },
+        {
+          "expectCursor": null,
+          "response": {
+            "status": 200,
+            "body": {
+              "_embedded": {
+                "records": [
+                  {
+                    "id": "synthetic-op-000000",
+                    "paging_token": "91000000",
+                    "type": "payment",
+                    "transaction_hash": "synthetic24e52bdcddaa0932f775b7d085b0edfdf4b255a35982898de5cb86f",
+                    "created_at": "2026-01-01T00:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "native",
+                    "amount": "100.0000000"
+                  }
+                ]
+              },
+              "_links": {
+                "self": {
+                  "href": "https://horizon.synthetic.invalid/self"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "fails-on-second-page": {
+      "description": "Page one succeeds, page two exhausts its retries. Used to prove the first page's cursor is still usable to resume from.",
+      "steps": [
+        {
+          "expectCursor": null,
+          "response": {
+            "status": 200,
+            "body": {
+              "_embedded": {
+                "records": [
+                  {
+                    "id": "synthetic-op-000000",
+                    "paging_token": "91000000",
+                    "type": "payment",
+                    "transaction_hash": "synthetic24e52bdcddaa0932f775b7d085b0edfdf4b255a35982898de5cb86f",
+                    "created_at": "2026-01-01T00:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "native",
+                    "amount": "100.0000000"
+                  },
+                  {
+                    "id": "synthetic-op-000001",
+                    "paging_token": "91000001",
+                    "type": "payment",
+                    "transaction_hash": "synthetic39cd037e59d9d9ec529588e7eaa711b1d2aafbf38dad86142b76a92",
+                    "created_at": "2025-12-31T23:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "credit_alphanum4",
+                    "asset_code": "USDC",
+                    "asset_issuer": "GSYNTHETIC0ISSUER000000000000000000000000000000000000000",
+                    "amount": "101.0100000"
+                  }
+                ]
+              },
+              "_links": {
+                "self": {
+                  "href": "https://horizon.synthetic.invalid/self"
+                },
+                "next": {
+                  "href": "https://horizon.synthetic.invalid/accounts/GSYNTHETIC0RECEIVER0000000000000000000000000000000000000/payments?cursor=91000001&limit=3&order=desc"
+                }
+              }
+            }
+          }
+        },
+        {
+          "expectCursor": "91000001",
+          "response": {
+            "status": 503,
+            "body": {
+              "title": "synthetic error"
+            },
+            "headers": {}
+          }
+        },
+        {
+          "expectCursor": "91000001",
+          "response": {
+            "status": 503,
+            "body": {
+              "title": "synthetic error"
+            },
+            "headers": {}
+          }
+        },
+        {
+          "expectCursor": "91000001",
+          "response": {
+            "status": 503,
+            "body": {
+              "title": "synthetic error"
+            },
+            "headers": {}
+          }
+        }
+      ]
+    },
+    "resume-from-cursor": {
+      "description": "A read that starts from a supplied cursor. The first request must already carry it.",
+      "steps": [
+        {
+          "expectCursor": "91000001",
+          "response": {
+            "status": 200,
+            "body": {
+              "_embedded": {
+                "records": [
+                  {
+                    "id": "synthetic-op-000002",
+                    "paging_token": "91000002",
+                    "type": "payment",
+                    "transaction_hash": "syntheticeb44d29563de47d42ca5bbdff3a246f41dfe85bbe74def3727723ec",
+                    "created_at": "2025-12-31T22:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "credit_alphanum4",
+                    "asset_code": "USDC",
+                    "asset_issuer": "GSYNTHETIC0ISSUER000000000000000000000000000000000000000",
+                    "amount": "102.0200000"
+                  },
+                  {
+                    "id": "synthetic-op-000003",
+                    "paging_token": "91000003",
+                    "type": "payment",
+                    "transaction_hash": "synthetic32c879bae7858a92d099d490690410bbc460a632997740c183eca2f",
+                    "created_at": "2025-12-31T21:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "native",
+                    "amount": "103.0300000"
+                  }
+                ]
+              },
+              "_links": {
+                "self": {
+                  "href": "https://horizon.synthetic.invalid/self"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "expired-cursor": {
+      "description": "Horizon rejects the cursor with 400. Permanent for that cursor: retrying it cannot work, so it must not consume the retry budget.",
+      "steps": [
+        {
+          "expectCursor": "91000001",
+          "response": {
+            "status": 400,
+            "body": {
+              "title": "synthetic error"
+            },
+            "headers": {}
+          }
+        }
+      ]
+    },
+    "gone-cursor": {
+      "description": "410 for a cursor aged out of Horizon's retention. Also permanent.",
+      "steps": [
+        {
+          "expectCursor": "91000001",
+          "response": {
+            "status": 410,
+            "body": {
+              "title": "synthetic error"
+            },
+            "headers": {}
+          }
+        }
+      ]
+    },
+    "account-not-found": {
+      "description": "404 for an unknown account. Permanent; never retried.",
+      "steps": [
+        {
+          "expectCursor": null,
+          "response": {
+            "status": 404,
+            "body": {
+              "title": "synthetic error"
+            },
+            "headers": {}
+          }
+        }
+      ]
+    },
+    "malformed-page-body": {
+      "description": "A 200 whose body is a JSON array rather than a Horizon collection. Permanent for the page — a retry returns the same nonsense.",
+      "steps": [
+        {
+          "expectCursor": null,
+          "response": {
+            "status": 200,
+            "body": [
+              1,
+              2,
+              3
+            ]
+          }
+        }
+      ]
+    },
+    "unparseable-body": {
+      "description": "A 200 with a body that is not JSON at all.",
+      "steps": [
+        {
+          "expectCursor": null,
+          "response": {
+            "status": 200
+          }
+        }
+      ]
+    },
+    "malformed-records": {
+      "description": "One page mixing valid records with permanently invalid ones: a missing id, a missing amount, a non-numeric amount, an unparseable date, a null entry, and a non-native asset with no code. Each is skipped and counted; none aborts the page and none is retried.",
+      "steps": [
+        {
+          "expectCursor": null,
+          "response": {
+            "status": 200,
+            "body": {
+              "_embedded": {
+                "records": [
+                  {
+                    "id": "synthetic-op-000000",
+                    "paging_token": "91000000",
+                    "type": "payment",
+                    "transaction_hash": "synthetic24e52bdcddaa0932f775b7d085b0edfdf4b255a35982898de5cb86f",
+                    "created_at": "2026-01-01T00:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "native",
+                    "amount": "100.0000000"
+                  },
+                  {
+                    "paging_token": "91000001",
+                    "type": "payment",
+                    "transaction_hash": "synthetic39cd037e59d9d9ec529588e7eaa711b1d2aafbf38dad86142b76a92",
+                    "created_at": "2025-12-31T23:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "credit_alphanum4",
+                    "asset_code": "USDC",
+                    "asset_issuer": "GSYNTHETIC0ISSUER000000000000000000000000000000000000000",
+                    "amount": "101.0100000"
+                  },
+                  {
+                    "id": "synthetic-op-000002",
+                    "paging_token": "91000002",
+                    "type": "payment",
+                    "transaction_hash": "syntheticeb44d29563de47d42ca5bbdff3a246f41dfe85bbe74def3727723ec",
+                    "created_at": "2025-12-31T22:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "credit_alphanum4",
+                    "asset_code": "USDC",
+                    "asset_issuer": "GSYNTHETIC0ISSUER000000000000000000000000000000000000000"
+                  },
+                  {
+                    "id": "synthetic-op-000003",
+                    "paging_token": "91000003",
+                    "type": "payment",
+                    "transaction_hash": "synthetic32c879bae7858a92d099d490690410bbc460a632997740c183eca2f",
+                    "created_at": "2025-12-31T21:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "native",
+                    "amount": "not-a-number"
+                  },
+                  {
+                    "id": "synthetic-op-000004",
+                    "paging_token": "91000004",
+                    "type": "payment",
+                    "transaction_hash": "synthetic0abbec1649bd4cb4752a9cf8aea0670e7dfb843a96d491f482be3a9",
+                    "created_at": "not-a-date",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "credit_alphanum4",
+                    "asset_code": "USDC",
+                    "asset_issuer": "GSYNTHETIC0ISSUER000000000000000000000000000000000000000",
+                    "amount": "104.0400000"
+                  },
+                  null,
+                  {
+                    "id": "synthetic-op-000005",
+                    "paging_token": "91000005",
+                    "type": "payment",
+                    "transaction_hash": "syntheticbba91c62990828e8fe1487c423f7909d7515fb66af9f8d6b869a407",
+                    "created_at": "2025-12-31T19:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "credit_alphanum4",
+                    "asset_issuer": "GSYNTHETIC0ISSUER000000000000000000000000000000000000000",
+                    "amount": "105.0500000"
+                  },
+                  {
+                    "id": "synthetic-op-000006",
+                    "paging_token": "91000006",
+                    "type": "payment",
+                    "transaction_hash": "synthetic6b4c4e20680b0f988995e32c8f5f0dfc7c4b34dbcabc44c9f85badd",
+                    "created_at": "2025-12-31T18:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "native",
+                    "amount": "106.0600000"
+                  }
+                ]
+              },
+              "_links": {
+                "self": {
+                  "href": "https://horizon.synthetic.invalid/self"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "non-payment-records": {
+      "description": "Well-formed records that are not incoming payments: an outgoing payment, a create_account operation, and a payment addressed to a different account. Ordinary, not faults — they are filtered without being counted as malformed.",
+      "steps": [
+        {
+          "expectCursor": null,
+          "response": {
+            "status": 200,
+            "body": {
+              "_embedded": {
+                "records": [
+                  {
+                    "id": "synthetic-op-000000",
+                    "paging_token": "91000000",
+                    "type": "payment",
+                    "transaction_hash": "synthetic24e52bdcddaa0932f775b7d085b0edfdf4b255a35982898de5cb86f",
+                    "created_at": "2026-01-01T00:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "native",
+                    "amount": "100.0000000"
+                  },
+                  {
+                    "id": "synthetic-op-000001",
+                    "paging_token": "91000001",
+                    "type": "payment",
+                    "transaction_hash": "synthetic39cd037e59d9d9ec529588e7eaa711b1d2aafbf38dad86142b76a92",
+                    "created_at": "2025-12-31T23:00:00.000Z",
+                    "from": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "asset_type": "credit_alphanum4",
+                    "asset_code": "USDC",
+                    "asset_issuer": "GSYNTHETIC0ISSUER000000000000000000000000000000000000000",
+                    "amount": "101.0100000"
+                  },
+                  {
+                    "id": "synthetic-op-000002",
+                    "paging_token": "91000002",
+                    "type": "create_account",
+                    "transaction_hash": "syntheticeb44d29563de47d42ca5bbdff3a246f41dfe85bbe74def3727723ec",
+                    "created_at": "2025-12-31T22:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "credit_alphanum4",
+                    "asset_code": "USDC",
+                    "asset_issuer": "GSYNTHETIC0ISSUER000000000000000000000000000000000000000",
+                    "amount": "102.0200000"
+                  },
+                  {
+                    "id": "synthetic-op-000003",
+                    "paging_token": "91000003",
+                    "type": "payment",
+                    "transaction_hash": "synthetic32c879bae7858a92d099d490690410bbc460a632997740c183eca2f",
+                    "created_at": "2025-12-31T21:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "asset_type": "native",
+                    "amount": "103.0300000"
+                  }
+                ]
+              },
+              "_links": {
+                "self": {
+                  "href": "https://horizon.synthetic.invalid/self"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "endless-pages": {
+      "description": "Horizon never stops offering a next cursor. Only the page bound ends the walk. Twelve pages are scripted so a ten-page bound is reached with room to spare.",
+      "steps": [
+        {
+          "expectCursor": null,
+          "response": {
+            "status": 200,
+            "body": {
+              "_embedded": {
+                "records": [
+                  {
+                    "id": "synthetic-op-000000",
+                    "paging_token": "91000000",
+                    "type": "payment",
+                    "transaction_hash": "synthetic24e52bdcddaa0932f775b7d085b0edfdf4b255a35982898de5cb86f",
+                    "created_at": "2026-01-01T00:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "native",
+                    "amount": "100.0000000"
+                  },
+                  {
+                    "id": "synthetic-op-000001",
+                    "paging_token": "91000001",
+                    "type": "payment",
+                    "transaction_hash": "synthetic39cd037e59d9d9ec529588e7eaa711b1d2aafbf38dad86142b76a92",
+                    "created_at": "2025-12-31T23:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "credit_alphanum4",
+                    "asset_code": "USDC",
+                    "asset_issuer": "GSYNTHETIC0ISSUER000000000000000000000000000000000000000",
+                    "amount": "101.0100000"
+                  }
+                ]
+              },
+              "_links": {
+                "self": {
+                  "href": "https://horizon.synthetic.invalid/self"
+                },
+                "next": {
+                  "href": "https://horizon.synthetic.invalid/accounts/GSYNTHETIC0RECEIVER0000000000000000000000000000000000000/payments?cursor=91000001&limit=3&order=desc"
+                }
+              }
+            }
+          }
+        },
+        {
+          "expectCursor": "91000001",
+          "response": {
+            "status": 200,
+            "body": {
+              "_embedded": {
+                "records": [
+                  {
+                    "id": "synthetic-op-000002",
+                    "paging_token": "91000002",
+                    "type": "payment",
+                    "transaction_hash": "syntheticeb44d29563de47d42ca5bbdff3a246f41dfe85bbe74def3727723ec",
+                    "created_at": "2025-12-31T22:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "credit_alphanum4",
+                    "asset_code": "USDC",
+                    "asset_issuer": "GSYNTHETIC0ISSUER000000000000000000000000000000000000000",
+                    "amount": "102.0200000"
+                  },
+                  {
+                    "id": "synthetic-op-000003",
+                    "paging_token": "91000003",
+                    "type": "payment",
+                    "transaction_hash": "synthetic32c879bae7858a92d099d490690410bbc460a632997740c183eca2f",
+                    "created_at": "2025-12-31T21:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "native",
+                    "amount": "103.0300000"
+                  }
+                ]
+              },
+              "_links": {
+                "self": {
+                  "href": "https://horizon.synthetic.invalid/self"
+                },
+                "next": {
+                  "href": "https://horizon.synthetic.invalid/accounts/GSYNTHETIC0RECEIVER0000000000000000000000000000000000000/payments?cursor=91000003&limit=3&order=desc"
+                }
+              }
+            }
+          }
+        },
+        {
+          "expectCursor": "91000003",
+          "response": {
+            "status": 200,
+            "body": {
+              "_embedded": {
+                "records": [
+                  {
+                    "id": "synthetic-op-000004",
+                    "paging_token": "91000004",
+                    "type": "payment",
+                    "transaction_hash": "synthetic0abbec1649bd4cb4752a9cf8aea0670e7dfb843a96d491f482be3a9",
+                    "created_at": "2025-12-31T20:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "credit_alphanum4",
+                    "asset_code": "USDC",
+                    "asset_issuer": "GSYNTHETIC0ISSUER000000000000000000000000000000000000000",
+                    "amount": "104.0400000"
+                  },
+                  {
+                    "id": "synthetic-op-000005",
+                    "paging_token": "91000005",
+                    "type": "payment",
+                    "transaction_hash": "syntheticbba91c62990828e8fe1487c423f7909d7515fb66af9f8d6b869a407",
+                    "created_at": "2025-12-31T19:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "credit_alphanum4",
+                    "asset_code": "USDC",
+                    "asset_issuer": "GSYNTHETIC0ISSUER000000000000000000000000000000000000000",
+                    "amount": "105.0500000"
+                  }
+                ]
+              },
+              "_links": {
+                "self": {
+                  "href": "https://horizon.synthetic.invalid/self"
+                },
+                "next": {
+                  "href": "https://horizon.synthetic.invalid/accounts/GSYNTHETIC0RECEIVER0000000000000000000000000000000000000/payments?cursor=91000005&limit=3&order=desc"
+                }
+              }
+            }
+          }
+        },
+        {
+          "expectCursor": "91000005",
+          "response": {
+            "status": 200,
+            "body": {
+              "_embedded": {
+                "records": [
+                  {
+                    "id": "synthetic-op-000006",
+                    "paging_token": "91000006",
+                    "type": "payment",
+                    "transaction_hash": "synthetic6b4c4e20680b0f988995e32c8f5f0dfc7c4b34dbcabc44c9f85badd",
+                    "created_at": "2025-12-31T18:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "native",
+                    "amount": "106.0600000"
+                  },
+                  {
+                    "id": "synthetic-op-000007",
+                    "paging_token": "91000007",
+                    "type": "payment",
+                    "transaction_hash": "syntheticcb4bcd63c0f08b3305efa7e593e0af4befad600068b94ed03696a1d",
+                    "created_at": "2025-12-31T17:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "credit_alphanum4",
+                    "asset_code": "USDC",
+                    "asset_issuer": "GSYNTHETIC0ISSUER000000000000000000000000000000000000000",
+                    "amount": "107.0700000"
+                  }
+                ]
+              },
+              "_links": {
+                "self": {
+                  "href": "https://horizon.synthetic.invalid/self"
+                },
+                "next": {
+                  "href": "https://horizon.synthetic.invalid/accounts/GSYNTHETIC0RECEIVER0000000000000000000000000000000000000/payments?cursor=91000007&limit=3&order=desc"
+                }
+              }
+            }
+          }
+        },
+        {
+          "expectCursor": "91000007",
+          "response": {
+            "status": 200,
+            "body": {
+              "_embedded": {
+                "records": [
+                  {
+                    "id": "synthetic-op-000008",
+                    "paging_token": "91000008",
+                    "type": "payment",
+                    "transaction_hash": "synthetic8ed56e350d3084031f254039392aaa69480a2773de0bc6dc23b08fb",
+                    "created_at": "2025-12-31T16:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "credit_alphanum4",
+                    "asset_code": "USDC",
+                    "asset_issuer": "GSYNTHETIC0ISSUER000000000000000000000000000000000000000",
+                    "amount": "108.0800000"
+                  },
+                  {
+                    "id": "synthetic-op-000009",
+                    "paging_token": "91000009",
+                    "type": "payment",
+                    "transaction_hash": "synthetic0d988b0947cc51bfdf1becfb967925dce8cc127c912279e0bf0a73c",
+                    "created_at": "2025-12-31T15:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "native",
+                    "amount": "109.0900000"
+                  }
+                ]
+              },
+              "_links": {
+                "self": {
+                  "href": "https://horizon.synthetic.invalid/self"
+                },
+                "next": {
+                  "href": "https://horizon.synthetic.invalid/accounts/GSYNTHETIC0RECEIVER0000000000000000000000000000000000000/payments?cursor=91000009&limit=3&order=desc"
+                }
+              }
+            }
+          }
+        },
+        {
+          "expectCursor": "91000009",
+          "response": {
+            "status": 200,
+            "body": {
+              "_embedded": {
+                "records": [
+                  {
+                    "id": "synthetic-op-000010",
+                    "paging_token": "91000010",
+                    "type": "payment",
+                    "transaction_hash": "synthetice9c72657e86e449fdb33c65912db14519f4059c3a89bf21cb7e6ab1",
+                    "created_at": "2025-12-31T14:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "credit_alphanum4",
+                    "asset_code": "USDC",
+                    "asset_issuer": "GSYNTHETIC0ISSUER000000000000000000000000000000000000000",
+                    "amount": "110.1000000"
+                  },
+                  {
+                    "id": "synthetic-op-000011",
+                    "paging_token": "91000011",
+                    "type": "payment",
+                    "transaction_hash": "synthetic310fd61849504022a99e077e0c452cb687564d85112687d55cb03fa",
+                    "created_at": "2025-12-31T13:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "credit_alphanum4",
+                    "asset_code": "USDC",
+                    "asset_issuer": "GSYNTHETIC0ISSUER000000000000000000000000000000000000000",
+                    "amount": "111.1100000"
+                  }
+                ]
+              },
+              "_links": {
+                "self": {
+                  "href": "https://horizon.synthetic.invalid/self"
+                },
+                "next": {
+                  "href": "https://horizon.synthetic.invalid/accounts/GSYNTHETIC0RECEIVER0000000000000000000000000000000000000/payments?cursor=91000011&limit=3&order=desc"
+                }
+              }
+            }
+          }
+        },
+        {
+          "expectCursor": "91000011",
+          "response": {
+            "status": 200,
+            "body": {
+              "_embedded": {
+                "records": [
+                  {
+                    "id": "synthetic-op-000012",
+                    "paging_token": "91000012",
+                    "type": "payment",
+                    "transaction_hash": "syntheticb888d670640211545b4c06519dbca33cdf9b7439b4993e420e1d109",
+                    "created_at": "2025-12-31T12:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "native",
+                    "amount": "112.1200000"
+                  },
+                  {
+                    "id": "synthetic-op-000013",
+                    "paging_token": "91000013",
+                    "type": "payment",
+                    "transaction_hash": "syntheticea8829c60c08d256d2d4b7d5b619d7a6b1b8364bd845074b2af326b",
+                    "created_at": "2025-12-31T11:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "credit_alphanum4",
+                    "asset_code": "USDC",
+                    "asset_issuer": "GSYNTHETIC0ISSUER000000000000000000000000000000000000000",
+                    "amount": "113.1300000"
+                  }
+                ]
+              },
+              "_links": {
+                "self": {
+                  "href": "https://horizon.synthetic.invalid/self"
+                },
+                "next": {
+                  "href": "https://horizon.synthetic.invalid/accounts/GSYNTHETIC0RECEIVER0000000000000000000000000000000000000/payments?cursor=91000013&limit=3&order=desc"
+                }
+              }
+            }
+          }
+        },
+        {
+          "expectCursor": "91000013",
+          "response": {
+            "status": 200,
+            "body": {
+              "_embedded": {
+                "records": [
+                  {
+                    "id": "synthetic-op-000014",
+                    "paging_token": "91000014",
+                    "type": "payment",
+                    "transaction_hash": "synthetic866b4bd1d60fd60a2b410f5090a3c68c558b70c608a6e4b27f8c2bc",
+                    "created_at": "2025-12-31T10:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "credit_alphanum4",
+                    "asset_code": "USDC",
+                    "asset_issuer": "GSYNTHETIC0ISSUER000000000000000000000000000000000000000",
+                    "amount": "114.1400000"
+                  },
+                  {
+                    "id": "synthetic-op-000015",
+                    "paging_token": "91000015",
+                    "type": "payment",
+                    "transaction_hash": "synthetic3b816058fb199e53130a68f08b4396d43514f63fbe22a6c1083d0d2",
+                    "created_at": "2025-12-31T09:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "native",
+                    "amount": "115.1500000"
+                  }
+                ]
+              },
+              "_links": {
+                "self": {
+                  "href": "https://horizon.synthetic.invalid/self"
+                },
+                "next": {
+                  "href": "https://horizon.synthetic.invalid/accounts/GSYNTHETIC0RECEIVER0000000000000000000000000000000000000/payments?cursor=91000015&limit=3&order=desc"
+                }
+              }
+            }
+          }
+        },
+        {
+          "expectCursor": "91000015",
+          "response": {
+            "status": 200,
+            "body": {
+              "_embedded": {
+                "records": [
+                  {
+                    "id": "synthetic-op-000016",
+                    "paging_token": "91000016",
+                    "type": "payment",
+                    "transaction_hash": "synthetic44204d1c454fe884281dead95dbc01c2a97c89c7a7c2a888b5bf85f",
+                    "created_at": "2025-12-31T08:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "credit_alphanum4",
+                    "asset_code": "USDC",
+                    "asset_issuer": "GSYNTHETIC0ISSUER000000000000000000000000000000000000000",
+                    "amount": "116.1600000"
+                  },
+                  {
+                    "id": "synthetic-op-000017",
+                    "paging_token": "91000017",
+                    "type": "payment",
+                    "transaction_hash": "syntheticbdc29f68765da52373f29a34c1d7aadbbd90180bab37d61bf8f9549",
+                    "created_at": "2025-12-31T07:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "credit_alphanum4",
+                    "asset_code": "USDC",
+                    "asset_issuer": "GSYNTHETIC0ISSUER000000000000000000000000000000000000000",
+                    "amount": "117.1700000"
+                  }
+                ]
+              },
+              "_links": {
+                "self": {
+                  "href": "https://horizon.synthetic.invalid/self"
+                },
+                "next": {
+                  "href": "https://horizon.synthetic.invalid/accounts/GSYNTHETIC0RECEIVER0000000000000000000000000000000000000/payments?cursor=91000017&limit=3&order=desc"
+                }
+              }
+            }
+          }
+        },
+        {
+          "expectCursor": "91000017",
+          "response": {
+            "status": 200,
+            "body": {
+              "_embedded": {
+                "records": [
+                  {
+                    "id": "synthetic-op-000018",
+                    "paging_token": "91000018",
+                    "type": "payment",
+                    "transaction_hash": "synthetic5745dbb05e1420ff464c6a05a044eb16f7f0386aef79af3f01ef356",
+                    "created_at": "2025-12-31T06:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "native",
+                    "amount": "118.1800000"
+                  },
+                  {
+                    "id": "synthetic-op-000019",
+                    "paging_token": "91000019",
+                    "type": "payment",
+                    "transaction_hash": "synthetic04497eb6232c1882f4b195e2627105e42c3eec80fb6729e80801667",
+                    "created_at": "2025-12-31T05:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "credit_alphanum4",
+                    "asset_code": "USDC",
+                    "asset_issuer": "GSYNTHETIC0ISSUER000000000000000000000000000000000000000",
+                    "amount": "119.1900000"
+                  }
+                ]
+              },
+              "_links": {
+                "self": {
+                  "href": "https://horizon.synthetic.invalid/self"
+                },
+                "next": {
+                  "href": "https://horizon.synthetic.invalid/accounts/GSYNTHETIC0RECEIVER0000000000000000000000000000000000000/payments?cursor=91000019&limit=3&order=desc"
+                }
+              }
+            }
+          }
+        },
+        {
+          "expectCursor": "91000019",
+          "response": {
+            "status": 200,
+            "body": {
+              "_embedded": {
+                "records": [
+                  {
+                    "id": "synthetic-op-000020",
+                    "paging_token": "91000020",
+                    "type": "payment",
+                    "transaction_hash": "synthetic2d692139acdeac37aae09a2bcf3eb850b2fc5d9838c91bf0684ffb6",
+                    "created_at": "2025-12-31T04:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "credit_alphanum4",
+                    "asset_code": "USDC",
+                    "asset_issuer": "GSYNTHETIC0ISSUER000000000000000000000000000000000000000",
+                    "amount": "120.2000000"
+                  },
+                  {
+                    "id": "synthetic-op-000021",
+                    "paging_token": "91000021",
+                    "type": "payment",
+                    "transaction_hash": "synthetic3486e964e847be14c4b191efcebb74a56db546cba0ca60f2c008a40",
+                    "created_at": "2025-12-31T03:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "native",
+                    "amount": "121.2100000"
+                  }
+                ]
+              },
+              "_links": {
+                "self": {
+                  "href": "https://horizon.synthetic.invalid/self"
+                },
+                "next": {
+                  "href": "https://horizon.synthetic.invalid/accounts/GSYNTHETIC0RECEIVER0000000000000000000000000000000000000/payments?cursor=91000021&limit=3&order=desc"
+                }
+              }
+            }
+          }
+        },
+        {
+          "expectCursor": "91000021",
+          "response": {
+            "status": 200,
+            "body": {
+              "_embedded": {
+                "records": [
+                  {
+                    "id": "synthetic-op-000022",
+                    "paging_token": "91000022",
+                    "type": "payment",
+                    "transaction_hash": "synthetic4fe146aeb1288f8d5fbc5c8d8cae4be92adc35335e0f2ffacf3a122",
+                    "created_at": "2025-12-31T02:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "credit_alphanum4",
+                    "asset_code": "USDC",
+                    "asset_issuer": "GSYNTHETIC0ISSUER000000000000000000000000000000000000000",
+                    "amount": "122.2200000"
+                  },
+                  {
+                    "id": "synthetic-op-000023",
+                    "paging_token": "91000023",
+                    "type": "payment",
+                    "transaction_hash": "syntheticc9828ba95b297611beeed835c1283f92126fbaaf0a648e36eb72d75",
+                    "created_at": "2025-12-31T01:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "credit_alphanum4",
+                    "asset_code": "USDC",
+                    "asset_issuer": "GSYNTHETIC0ISSUER000000000000000000000000000000000000000",
+                    "amount": "123.2300000"
+                  }
+                ]
+              },
+              "_links": {
+                "self": {
+                  "href": "https://horizon.synthetic.invalid/self"
+                },
+                "next": {
+                  "href": "https://horizon.synthetic.invalid/accounts/GSYNTHETIC0RECEIVER0000000000000000000000000000000000000/payments?cursor=91000023&limit=3&order=desc"
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "time-bounded": {
+      "description": "Records straddle a time boundary. Pages are newest-first, so once a record precedes the boundary nothing later can be in range and the walk stops.",
+      "steps": [
+        {
+          "expectCursor": null,
+          "response": {
+            "status": 200,
+            "body": {
+              "_embedded": {
+                "records": [
+                  {
+                    "id": "synthetic-op-000000",
+                    "paging_token": "91000000",
+                    "type": "payment",
+                    "transaction_hash": "synthetic24e52bdcddaa0932f775b7d085b0edfdf4b255a35982898de5cb86f",
+                    "created_at": "2026-01-01T00:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "native",
+                    "amount": "100.0000000"
+                  },
+                  {
+                    "id": "synthetic-op-000001",
+                    "paging_token": "91000001",
+                    "type": "payment",
+                    "transaction_hash": "synthetic39cd037e59d9d9ec529588e7eaa711b1d2aafbf38dad86142b76a92",
+                    "created_at": "2025-12-31T23:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "credit_alphanum4",
+                    "asset_code": "USDC",
+                    "asset_issuer": "GSYNTHETIC0ISSUER000000000000000000000000000000000000000",
+                    "amount": "101.0100000"
+                  }
+                ]
+              },
+              "_links": {
+                "self": {
+                  "href": "https://horizon.synthetic.invalid/self"
+                },
+                "next": {
+                  "href": "https://horizon.synthetic.invalid/accounts/GSYNTHETIC0RECEIVER0000000000000000000000000000000000000/payments?cursor=91000001&limit=3&order=desc"
+                }
+              }
+            }
+          }
+        },
+        {
+          "expectCursor": "91000001",
+          "response": {
+            "status": 200,
+            "body": {
+              "_embedded": {
+                "records": [
+                  {
+                    "id": "synthetic-op-000002",
+                    "paging_token": "91000002",
+                    "type": "payment",
+                    "transaction_hash": "syntheticeb44d29563de47d42ca5bbdff3a246f41dfe85bbe74def3727723ec",
+                    "created_at": "2025-12-31T22:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "credit_alphanum4",
+                    "asset_code": "USDC",
+                    "asset_issuer": "GSYNTHETIC0ISSUER000000000000000000000000000000000000000",
+                    "amount": "102.0200000"
+                  },
+                  {
+                    "id": "synthetic-op-000003",
+                    "paging_token": "91000003",
+                    "type": "payment",
+                    "transaction_hash": "synthetic32c879bae7858a92d099d490690410bbc460a632997740c183eca2f",
+                    "created_at": "2025-12-31T21:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "native",
+                    "amount": "103.0300000"
+                  },
+                  {
+                    "id": "synthetic-op-000004",
+                    "paging_token": "91000004",
+                    "type": "payment",
+                    "transaction_hash": "synthetic0abbec1649bd4cb4752a9cf8aea0670e7dfb843a96d491f482be3a9",
+                    "created_at": "2025-12-31T20:00:00.000Z",
+                    "from": "GSYNTHETIC0SENDER000000000000000000000000000000000000000",
+                    "to": "GSYNTHETIC0RECEIVER0000000000000000000000000000000000000",
+                    "asset_type": "credit_alphanum4",
+                    "asset_code": "USDC",
+                    "asset_issuer": "GSYNTHETIC0ISSUER000000000000000000000000000000000000000",
+                    "amount": "104.0400000"
+                  }
+                ]
+              },
+              "_links": {
+                "self": {
+                  "href": "https://horizon.synthetic.invalid/self"
+                },
+                "next": {
+                  "href": "https://horizon.synthetic.invalid/accounts/GSYNTHETIC0RECEIVER0000000000000000000000000000000000000/payments?cursor=91000004&limit=3&order=desc"
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}
