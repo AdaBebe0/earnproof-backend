@@ -33,6 +33,13 @@ export const configuration = () => ({
   },
   sessionSecret: process.env.SESSION_SECRET,
   credentialSigningSecret: process.env.CREDENTIAL_SIGNING_SECRET,
+  credentialSigningSecretPrevious: process.env.CREDENTIAL_SIGNING_SECRET_PREVIOUS,
+  credentialSigningKeyId:
+    process.env.CREDENTIAL_SIGNING_KEY_ID ?? "credential-key-0",
+  credentialSigningPreviousKeyId: process.env.CREDENTIAL_SIGNING_PREVIOUS_KEY_ID,
+  credentialSigningKeyOverlapDays: Number(
+    process.env.CREDENTIAL_SIGNING_KEY_OVERLAP_DAYS ?? 30,
+  ),
   paymentEncryptionKey: process.env.PAYMENT_ENCRYPTION_KEY,
   paymentEncryptionKeyVersions: loadPaymentEncryptionKeyVersions(),
   paymentEncryptionKeyVersion: Number(

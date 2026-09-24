@@ -27,7 +27,8 @@ Implemented:
 - Minimum-income proof creation at `/api/v1/proofs/minimum-income`
 - Public proof verification at `/api/v1/proofs/:id/verify`
 - Authenticated proof revocation at `/api/v1/proofs/:id/revoke`
-- Deterministic credential canonicalization, hashing, and HMAC signing
+- Deterministic credential canonicalization, hashing, Ed25519 signing, and legacy HMAC verification
+- Public credential verification-key discovery with overlap-key rotation support
 - AES-256-GCM protection for indexed payment amounts
 - Optional Stellar CLI proof commitment anchoring, revocation, and public status checks for deployed proof registry contracts
 - PostgreSQL and Redis Docker Compose services
