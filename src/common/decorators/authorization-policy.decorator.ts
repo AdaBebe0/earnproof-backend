@@ -61,8 +61,14 @@ export function getAuthorizationPolicy(
     return Reflect.getMetadata(AUTHORIZATION_POLICY_METADATA, target);
   }
 
+  const handler = (target as Record<string | symbol, unknown>)[propertyKey];
+
   return (
     Reflect.getMetadata(AUTHORIZATION_POLICY_METADATA, target, propertyKey) ??
+    Reflect.getMetadata(
+      AUTHORIZATION_POLICY_METADATA,
+      handler as object,
+    ) ??
     Reflect.getMetadata(
       AUTHORIZATION_POLICY_METADATA,
       (target as { constructor: Type<unknown> }).constructor,

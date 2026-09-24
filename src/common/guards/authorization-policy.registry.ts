@@ -24,8 +24,12 @@ export function buildAuthorizationMatrix(
     return Object.getOwnPropertyNames(prototype)
       .filter((method) => method !== "constructor")
       .flatMap((method) => {
-        const routePath = Reflect.getMetadata(PATH_METADATA, prototype, method);
-        const requestMethod = Reflect.getMetadata(METHOD_METADATA, prototype, method);
+        const handler = prototype[method] as unknown;
+        const routePath = Reflect.getMetadata(PATH_METADATA, handler as object);
+        const requestMethod = Reflect.getMetadata(
+          METHOD_METADATA,
+          handler as object,
+        );
 
         if (routePath === undefined || requestMethod === undefined) {
           return [];
@@ -65,7 +69,7 @@ export class AuthorizationPolicyRegistry {
     const registeredControllers = new Set<Type<unknown>>();
 
     for (const wrapper of controllers) {
-      if (wrapper.metatype) {
+      if (isControllerType(wrapper.metatype)) {
         registeredControllers.add(wrapper.metatype);
       }
     }
@@ -74,7 +78,7 @@ export class AuthorizationPolicyRegistry {
     // applications where DiscoveryService may not expose all wrappers yet.
     for (const moduleRef of this.modulesContainer.values()) {
       for (const wrapper of moduleRef.controllers.values()) {
-        if (wrapper.metatype) {
+        if (isControllerType(wrapper.metatype)) {
           registeredControllers.add(wrapper.metatype);
         }
       }
@@ -82,6 +86,10 @@ export class AuthorizationPolicyRegistry {
 
     return [...registeredControllers];
   }
+}
+
+function isControllerType(value: unknown): value is Type<unknown> {
+  return typeof value === "function";
 }
 
 function normalizePath(path: string | string[]): string {
