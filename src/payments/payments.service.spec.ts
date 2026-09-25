@@ -1,4 +1,5 @@
 import { PaymentClassification, ResourceStatus } from "@prisma/client";
+import { PaymentEncryptionKeyringService } from "../common/crypto/payment-encryption-keyring.service";
 import { PaymentsService } from "./payments.service";
 
 describe("PaymentsService", () => {
@@ -301,6 +302,115 @@ describe("PaymentsService", () => {
       data: {
         classification: PaymentClassification.INCOME,
       },
+    });
+  });
+
+  describe("address encryption at rest", () => {
+    const encryptionConfig = {
+      get: (key: string) =>
+        key === "paymentEncryptionKey" ? "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=" : undefined,
+    };
+    const cipher = new PaymentEncryptionKeyringService(encryptionConfig as never).addressCipher();
+    const SENDER = "GSYNTHETICSENDERADDRESS";
+    const RECEIVER = "GSYNTHETICRECEIVERADDRESS";
+
+    it("writes ciphertext and a lookup token, never plaintext", async () => {
+      const prisma = {
+        supportedAsset: { findMany: jest.fn().mockResolvedValue([]) },
+        payment: {
+          findMany: jest.fn().mockResolvedValue([]),
+          upsert: jest.fn().mockResolvedValue({ id: "payment_1" }),
+        },
+      };
+      const service = new PaymentsService(
+        prisma as never,
+        {
+          fetchIncomingPayments: jest.fn().mockResolvedValue([
+            {
+              operationId: "op_1",
+              stellarTransactionHash: "tx_1",
+              sourceAddress: SENDER,
+              destinationAddress: RECEIVER,
+              assetCode: "XLM",
+              assetIssuer: null,
+              amount: "10",
+              occurredAt: new Date("2026-07-13T00:00:00Z"),
+            },
+          ]),
+          fetchTransaction: jest.fn().mockResolvedValue(null),
+        } as never,
+        encryptionConfig as never,
+      );
+
+      await service.syncPayments({ id: "user_1", walletAddress: RECEIVER });
+
+      const [{ create, update }] = prisma.payment.upsert.mock.calls[0];
+      for (const written of [create, update]) {
+        expect(written).toMatchObject({ sourceAddress: null, destinationAddress: null });
+        expect(written.sourceAddressEncrypted).toMatch(/^aenc:v0:/);
+        expect(written.destinationAddressEncrypted).toMatch(/^aenc:v0:/);
+        expect(cipher.sourceLookupTokens(SENDER)).toContain(written.sourceAddressLookup);
+        expect(JSON.stringify(written)).not.toContain(SENDER);
+        expect(JSON.stringify(written)).not.toContain(RECEIVER);
+      }
+    });
+
+    function stored(overrides: Record<string, unknown>) {
+      return {
+        id: "payment_1",
+        userId: "user_1",
+        operationId: "op_1",
+        stellarTransactionHash: "tx_1",
+        sourceAddress: null,
+        destinationAddress: null,
+        sourceAddressEncrypted: null,
+        destinationAddressEncrypted: null,
+        sourceAddressLookup: null,
+        assetCode: "XLM",
+        assetIssuer: null,
+        amountEncrypted: null,
+        occurredAt: new Date("2026-07-13T00:00:00Z"),
+        memo: null,
+        classification: PaymentClassification.INCOME,
+        isEligible: true,
+        createdAt: new Date("2026-07-13T00:00:00Z"),
+        updatedAt: new Date("2026-07-13T00:00:00Z"),
+        ...overrides,
+      };
+    }
+
+    async function read(row: Record<string, unknown>) {
+      const service = new PaymentsService(
+        { payment: { findFirst: jest.fn().mockResolvedValue(row) } } as never,
+        {} as never,
+        encryptionConfig as never,
+      );
+      return service.getPayment("user_1", "payment_1");
+    }
+
+    it("decrypts addresses for the owner", async () => {
+      const columns = cipher.protect(SENDER, RECEIVER);
+      await expect(read(stored({ ...columns }))).resolves.toMatchObject({
+        sourceAddress: SENDER,
+        destinationAddress: RECEIVER,
+      });
+    });
+
+    it("still reads a legacy plaintext row during the migration window", async () => {
+      await expect(read(stored({ sourceAddress: SENDER, destinationAddress: RECEIVER }))).resolves.toMatchObject({
+        sourceAddress: SENDER,
+        destinationAddress: RECEIVER,
+      });
+    });
+
+    it("shows null for a corrupt ciphertext instead of failing or leaking it", async () => {
+      const dto = await read(
+        stored({ sourceAddressEncrypted: "aenc:v0:AAAA:BBBB:CCCC", destinationAddressEncrypted: "garbage" }),
+      );
+      expect(dto).toMatchObject({ sourceAddress: null, destinationAddress: null });
+      expect(JSON.stringify(dto)).not.toContain("AAAA");
+      expect(dto).not.toHaveProperty("sourceAddressEncrypted");
+      expect(dto).not.toHaveProperty("sourceAddressLookup");
     });
   });
 });

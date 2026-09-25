@@ -97,6 +97,15 @@ export class PaymentsService {
 
       const existing = existingOperationIds.has(payment.operationId);
 
+      // Addresses are written only as ciphertext plus a sender lookup token.
+      // An operation's addresses never change, so re-protecting them on
+      // update also migrates a legacy plaintext row the first time it is
+      // re-synced.
+      const protectedAddresses = this.addressCipher.protect(
+        payment.sourceAddress,
+        payment.destinationAddress,
+      );
+
       await this.prisma.payment.upsert({
         where: {
           operationId: payment.operationId,
@@ -105,13 +114,13 @@ export class PaymentsService {
           isEligible,
           occurredAt: payment.occurredAt,
           memo: memoContext as Prisma.InputJsonValue,
+          ...protectedAddresses,
         },
         create: {
           userId: user.id,
           operationId: payment.operationId,
           stellarTransactionHash: payment.stellarTransactionHash,
-          sourceAddress: payment.sourceAddress,
-          destinationAddress: payment.destinationAddress,
+          ...protectedAddresses,
           assetCode: payment.assetCode,
           assetIssuer: payment.assetIssuer,
           amountEncrypted: this.protectAmount(payment.amount),
@@ -224,6 +233,10 @@ export class PaymentsService {
     return this.toPaymentDto(updated);
   }
 
+  private get addressCipher() {
+    return this.paymentEncryptionKeyring.addressCipher();
+  }
+
   private assetKey(code: string, issuer: string | null) {
     return `${code}:${issuer ?? "native"}`;
   }
@@ -237,8 +250,19 @@ export class PaymentsService {
       id: payment.id,
       operationId: payment.operationId,
       stellarTransactionHash: payment.stellarTransactionHash,
-      sourceAddress: payment.sourceAddress,
-      destinationAddress: payment.destinationAddress,
+      // Owner-only DTO. A row whose ciphertext cannot be read shows null
+      // rather than failing the whole listing or exposing the stored value.
+      sourceAddress: this.addressCipher.tryReveal(
+        { encrypted: payment.sourceAddressEncrypted, plaintext: payment.sourceAddress },
+        "source",
+      ),
+      destinationAddress: this.addressCipher.tryReveal(
+        {
+          encrypted: payment.destinationAddressEncrypted,
+          plaintext: payment.destinationAddress,
+        },
+        "destination",
+      ),
       assetCode: payment.assetCode,
       assetIssuer: payment.assetIssuer,
       occurredAt: payment.occurredAt,

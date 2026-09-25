@@ -156,6 +156,7 @@ export class ProofsService {
       select: {
         operationId: true,
         sourceAddress: true,
+        sourceAddressEncrypted: true,
         assetCode: true,
         assetIssuer: true,
         amountEncrypted: true,
@@ -186,6 +187,10 @@ export class ProofsService {
 
     const senderHidden = input.discloseSender !== true;
     const amountHidden = input.discloseAmount !== true;
+    // Decrypted only when the owner asked to disclose the sender.
+    const sourceAddress = senderHidden
+      ? undefined
+      : this.revealPaymentSender(payment);
     const amount = amountHidden
       ? undefined
       : this.revealPaymentAmount(payment.amountEncrypted);
@@ -205,7 +210,7 @@ export class ProofsService {
       paymentReferenceHash,
       senderHidden,
       amountHidden,
-      sourceAddress: senderHidden ? undefined : payment.sourceAddress,
+      sourceAddress,
       amount,
       issuedAt: now,
       expiresAt,
@@ -242,9 +247,7 @@ export class ProofsService {
                 amountHidden,
                 paymentReferenceHash,
                 occurredAt: payment.occurredAt.toISOString(),
-                ...(senderHidden
-                  ? undefined
-                  : { sourceAddress: payment.sourceAddress }),
+                ...(senderHidden ? undefined : { sourceAddress }),
               },
             },
           },
@@ -1226,6 +1229,24 @@ export class ProofsService {
       throw new UnprocessableEntityException({
         code: ApiErrorCode.PAYMENT_NOT_ELIGIBLE,
         message: "Payment amount is unavailable for disclosure",
+      });
+    }
+  }
+
+  private revealPaymentSender(payment: {
+    sourceAddress: string | null;
+    sourceAddressEncrypted: string | null;
+  }) {
+    try {
+      return this.paymentEncryptionKeyring.addressCipher().reveal(
+        { encrypted: payment.sourceAddressEncrypted, plaintext: payment.sourceAddress },
+        "source",
+      );
+    } catch {
+      // Never echo the stored value or the failure detail.
+      throw new UnprocessableEntityException({
+        code: ApiErrorCode.PAYMENT_NOT_ELIGIBLE,
+        message: "Payment sender is unavailable for disclosure",
       });
     }
   }
