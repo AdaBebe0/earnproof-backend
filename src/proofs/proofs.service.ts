@@ -29,7 +29,20 @@ import { ApiErrorCode } from "../common/dto/api-error.dto";
 import { PrismaService } from "../database/prisma.service";
 import { AttestationsService } from "../attestations/attestations.service";
 import { WebhookDeliveryService } from "../webhooks/webhook-delivery.service";
+import {
+  AggregateEarningsCalculator,
+} from "./aggregate-earnings.calculator";
+import {
+  AGGREGATE_EARNINGS_POLICY_VERSION,
+  AggregationPolicyError,
+  DEFAULT_ROUNDING_INCREMENT,
+  ROUNDING_INCREMENTS,
+  RoundingIncrement,
+  SOURCE_SCOPES,
+  SourceScope,
+} from "./aggregate-earnings.policy";
 import { ContractAnchoringService } from "./contract-anchoring.service";
+import { CreateAggregateEarningsProofDto } from "./dto/create-aggregate-earnings-proof.dto";
 import { CreateMinimumIncomeProofDto } from "./dto/create-minimum-income-proof.dto";
 import { CreatePaymentReceiptProofDto } from "./dto/create-payment-receipt-proof.dto";
 import {
@@ -41,6 +54,7 @@ import { ListProofsDto } from "./dto/list-proofs.dto";
 const SCHEMA_VERSION = "earnproof.minimum-income.v1";
 const PAYMENT_RECEIPT_SCHEMA_VERSION = "earnproof.payment-receipt.v1";
 const RECURRING_INCOME_SCHEMA_VERSION = "earnproof.recurring-income.v1";
+const AGGREGATE_EARNINGS_SCHEMA_VERSION = "earnproof.aggregate-earnings.v1";
 const DEFAULT_EXPIRY_DAYS = 30;
 
 type MinimumIncomeCredential = {
@@ -111,10 +125,40 @@ type RecurringIncomeCredential = {
   expiresAt: string;
 };
 
+type AggregateEarningsCredential = {
+  id: string;
+  type: "EarnProofAggregateEarningsCredential";
+  schemaVersion: "earnproof.aggregate-earnings.v1";
+  issuer: "earnproof-backend";
+  subject: { walletHash: string };
+  claim: {
+    operator: "sum";
+    /** Floored to `rounding.increment`; never the exact total. */
+    aggregateAmount: string;
+    rounding: { mode: "floor"; increment: RoundingIncrement };
+    assetCode: string;
+    assetIssuer: string | null;
+    periodStart: string;
+    periodEnd: string;
+    periodBoundary: "start-inclusive-end-exclusive";
+    sourceScope: SourceScope;
+    qualifyingPaymentCount: number;
+    policyVersion: string;
+  };
+  privacy: {
+    exactIncomeHidden: true;
+    sourceTransactionsHidden: true;
+    sourceIdentitiesHidden: true;
+  };
+  issuedAt: string;
+  expiresAt: string;
+};
+
 type EarnProofCredential =
   | MinimumIncomeCredential
   | PaymentReceiptCredential
-  | RecurringIncomeCredential;
+  | RecurringIncomeCredential
+  | AggregateEarningsCredential;
 
 @Injectable()
 export class ProofsService {
@@ -123,6 +167,7 @@ export class ProofsService {
   private readonly stellarNetwork: string;
   private readonly anchoringEnabled: boolean;
   private readonly anchoringRequired: boolean;
+  private readonly aggregateEarnings: AggregateEarningsCalculator;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -145,6 +190,11 @@ export class ProofsService {
       configService.get<boolean>("contractAnchoring.enabled") ?? false;
     this.anchoringRequired =
       configService.get<boolean>("contractAnchoring.required") ?? false;
+    this.aggregateEarnings = new AggregateEarningsCalculator(
+      prisma,
+      (amountEncrypted) => this.paymentEncryptionKeyring.decrypt(amountEncrypted),
+      this.signingSecret,
+    );
   }
 
   async createPaymentReceiptProof(
@@ -692,6 +742,147 @@ export class ProofsService {
     };
   }
 
+  /**
+   * Issues an aggregate-earnings proof through the shared proof pipeline.
+   *
+   * The aggregate is computed server-side from the caller's own eligible
+   * income under the versioned policy in aggregate-earnings.policy.ts. Only
+   * the floored aggregate, the payment count and the policy parameters are
+   * committed; component payments, exact amounts and source identities are
+   * not disclosed.
+   */
+  async createAggregateEarningsProof(
+    user: AuthenticatedUser,
+    input: CreateAggregateEarningsProofDto,
+  ) {
+    const sourceScope = input.sourceScope ?? "income";
+    if (input.issuerIds && sourceScope !== "verified_issuers") {
+      throw new BadRequestException({
+        code: ApiErrorCode.INVALID_INPUT,
+        message: "issuerIds is only allowed with sourceScope verified_issuers",
+      });
+    }
+    const roundingIncrement = input.roundingIncrement ?? DEFAULT_ROUNDING_INCREMENT;
+
+    const now = new Date();
+    let computation;
+    try {
+      computation = await this.aggregateEarnings.compute(
+        user.id,
+        {
+          assets: input.assets.map((asset) => ({
+            code: asset.code,
+            issuer: asset.issuer ?? null,
+          })),
+          periodStart: input.periodStart,
+          periodEnd: input.periodEnd,
+          sourceScope,
+          issuerIds: input.issuerIds,
+          roundingIncrement,
+        },
+        now,
+      );
+    } catch (error) {
+      throw this.aggregationException(error);
+    }
+
+    const expiresAt = new Date(
+      now.getTime() +
+        (input.expiresInDays ?? DEFAULT_EXPIRY_DAYS) * 24 * 60 * 60 * 1000,
+    );
+    const proofId = randomUUID();
+    const credentialInput = {
+      walletHash: user.walletHash,
+      aggregateAmount: computation.disclosedAmount,
+      roundingIncrement,
+      assetCode: computation.asset.code,
+      assetIssuer: computation.asset.issuer,
+      periodStart: computation.period.start,
+      periodEnd: computation.period.end,
+      sourceScope,
+      qualifyingPaymentCount: computation.paymentCount,
+      policyVersion: computation.policyVersion,
+    };
+    const draftCredential = this.buildAggregateEarningsCredential({
+      ...credentialInput,
+      id: proofId,
+      issuedAt: now,
+      expiresAt,
+    });
+    const credentialHash = `sha256:${sha256(canonicalize(draftCredential))}`;
+    const commitment = `sha256:${sha256(credentialHash)}`;
+
+    const proof = await this.prisma.$transaction(async (tx) => {
+      const created = await tx.proof.create({
+        data: {
+          id: proofId,
+          userId: user.id,
+          proofType: ProofType.AGGREGATE_EARNINGS,
+          schemaVersion: AGGREGATE_EARNINGS_SCHEMA_VERSION,
+          status: ProofStatus.ACTIVE,
+          network: this.stellarNetwork,
+          assetCode: computation.asset.code,
+          assetIssuer: computation.asset.issuer,
+          periodStart: computation.period.start,
+          periodEnd: computation.period.end,
+          expiresAt,
+          createdAt: now,
+          credentialHash,
+          commitment,
+          claim: {
+            create: {
+              operator: "sum",
+              // The disclosed (floored) aggregate, which the credential
+              // already makes public; the exact total is never stored.
+              thresholdEncrypted: this.protectAmount(computation.disclosedAmount),
+              result: true,
+              disclosurePolicy: {
+                exactIncomeHidden: true,
+                sourceTransactionsHidden: true,
+                sourceIdentitiesHidden: true,
+                qualifyingPaymentCount: computation.paymentCount,
+                policyVersion: computation.policyVersion,
+                roundingIncrement,
+                sourceScope,
+                inputsDigest: computation.inputsDigest,
+              },
+            },
+          },
+        },
+        include: { claim: true },
+      });
+
+      if (this.anchoringEnabled) {
+        await tx.anchoringIntent.create({
+          data: {
+            proofId: created.id,
+            operation: AnchoringOperation.REGISTER,
+            status: AnchoringStatus.PENDING,
+          },
+        });
+      }
+      return created;
+    });
+
+    const credential = this.buildAggregateEarningsCredential({
+      ...credentialInput,
+      id: proof.id,
+      issuedAt: proof.createdAt,
+      expiresAt: proof.expiresAt,
+    });
+
+    this.emitProofCreated(user.id, proof);
+    return {
+      proofId: proof.id,
+      status: proof.status,
+      verificationUrl: `/api/v1/proofs/${proof.id}/verify`,
+      credential: this.signCredential(credential),
+      anchoring: this.anchoringEnabled
+        ? { anchored: false as const, reason: "pending" as const }
+        : { anchored: false as const, reason: "disabled" as const },
+    };
+  }
+
   async revokeProof(userId: string, proofId: string) {
     const proof = await this.prisma.proof.findUnique({
       where: {
@@ -798,7 +989,12 @@ export class ProofsService {
     const policy = this.jsonPolicy(proof.claim.disclosurePolicy);
     const cadence = this.revealCadence(proof.claim.frequency);
     const credential =
-      proof.proofType === ProofType.RECURRING_INCOME
+      proof.proofType === ProofType.AGGREGATE_EARNINGS
+        ? this.rebuildAggregateEarningsCredential({
+            ...proof,
+            claim: proof.claim!,
+          })
+        : proof.proofType === ProofType.RECURRING_INCOME
         ? this.buildRecurringIncomeCredential({
             id: proof.id,
             walletHash: proof.user.walletHash,
@@ -1004,6 +1200,135 @@ export class ProofsService {
       issuedAt: input.issuedAt.toISOString(),
       expiresAt: input.expiresAt.toISOString(),
     };
+  }
+
+  private buildAggregateEarningsCredential(input: {
+    id: string;
+    walletHash: string;
+    aggregateAmount: string;
+    roundingIncrement: RoundingIncrement;
+    assetCode: string;
+    assetIssuer: string | null;
+    periodStart: Date;
+    periodEnd: Date;
+    sourceScope: SourceScope;
+    qualifyingPaymentCount: number;
+    policyVersion: string;
+    issuedAt: Date;
+    expiresAt: Date;
+  }): AggregateEarningsCredential {
+    return {
+      id: input.id,
+      type: "EarnProofAggregateEarningsCredential",
+      schemaVersion: AGGREGATE_EARNINGS_SCHEMA_VERSION,
+      issuer: "earnproof-backend",
+      subject: { walletHash: input.walletHash },
+      claim: {
+        operator: "sum",
+        aggregateAmount: input.aggregateAmount,
+        rounding: { mode: "floor", increment: input.roundingIncrement },
+        assetCode: input.assetCode,
+        assetIssuer: input.assetIssuer,
+        periodStart: input.periodStart.toISOString(),
+        periodEnd: input.periodEnd.toISOString(),
+        periodBoundary: "start-inclusive-end-exclusive",
+        sourceScope: input.sourceScope,
+        qualifyingPaymentCount: input.qualifyingPaymentCount,
+        policyVersion: input.policyVersion,
+      },
+      privacy: {
+        exactIncomeHidden: true,
+        sourceTransactionsHidden: true,
+        sourceIdentitiesHidden: true,
+      },
+      issuedAt: input.issuedAt.toISOString(),
+      expiresAt: input.expiresAt.toISOString(),
+    };
+  }
+
+  /**
+   * Rebuilds an aggregate credential from stored state for verification.
+   * Unrecognised stored parameters fall back to values that cannot reproduce
+   * the committed hash, so tampering surfaces as INVALID_SIGNATURE.
+   */
+  private rebuildAggregateEarningsCredential(proof: {
+    id: string;
+    assetCode: string;
+    assetIssuer: string | null;
+    createdAt: Date;
+    expiresAt: Date;
+    periodStart: Date | null;
+    periodEnd: Date | null;
+    user: { walletHash: string };
+    claim: {
+      thresholdEncrypted: string | null;
+      disclosurePolicy: Prisma.JsonValue;
+    };
+  }) {
+    const policy = this.jsonPolicy(proof.claim.disclosurePolicy);
+    const rounding = policy["roundingIncrement"];
+    const scope = policy["sourceScope"];
+    return this.buildAggregateEarningsCredential({
+      id: proof.id,
+      walletHash: proof.user.walletHash,
+      aggregateAmount: this.revealThreshold(proof.claim.thresholdEncrypted),
+      roundingIncrement: (ROUNDING_INCREMENTS as readonly unknown[]).includes(rounding)
+        ? (rounding as RoundingIncrement)
+        : ("invalid" as RoundingIncrement),
+      assetCode: proof.assetCode,
+      assetIssuer: proof.assetIssuer,
+      periodStart: proof.periodStart ?? proof.createdAt,
+      periodEnd: proof.periodEnd ?? proof.createdAt,
+      sourceScope: (SOURCE_SCOPES as readonly unknown[]).includes(scope)
+        ? (scope as SourceScope)
+        : ("invalid" as SourceScope),
+      qualifyingPaymentCount:
+        typeof policy["qualifyingPaymentCount"] === "number"
+          ? policy["qualifyingPaymentCount"]
+          : 0,
+      policyVersion:
+        typeof policy["policyVersion"] === "string"
+          ? policy["policyVersion"]
+          : AGGREGATE_EARNINGS_POLICY_VERSION,
+      issuedAt: proof.createdAt,
+      expiresAt: proof.expiresAt,
+    });
+  }
+
+  /** Maps a policy refusal to a stable, data-free API error. */
+  private aggregationException(error: unknown) {
+    if (!(error instanceof AggregationPolicyError)) return error;
+    switch (error.reason) {
+      case "invalid_period":
+      case "future_period":
+      case "period_too_long":
+      case "invalid_source":
+        return new BadRequestException({
+          code: ApiErrorCode.INVALID_INPUT,
+          message: error.message,
+        });
+      case "cross_asset_unsupported":
+        return new UnprocessableEntityException({
+          code: ApiErrorCode.AGGREGATION_CROSS_ASSET_UNSUPPORTED,
+          message: error.message,
+        });
+      case "limit_exceeded":
+        return new UnprocessableEntityException({
+          code: ApiErrorCode.AGGREGATION_LIMIT_EXCEEDED,
+          message: error.message,
+        });
+      case "amount_unavailable":
+        return new UnprocessableEntityException({
+          code: ApiErrorCode.PAYMENT_NOT_ELIGIBLE,
+          message: error.message,
+        });
+      case "insufficient_payments":
+      case "below_rounding_increment":
+        return new UnprocessableEntityException({
+          code: ApiErrorCode.AGGREGATION_INSUFFICIENT_PAYMENTS,
+          message: error.message,
+        });
+    }
   }
 
   private buildPaymentReceiptCredential(input: {
