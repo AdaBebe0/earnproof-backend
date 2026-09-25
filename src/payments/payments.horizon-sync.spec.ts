@@ -6,6 +6,7 @@ import {
   ScriptedHorizonTransport,
   loadHorizonFixtures,
 } from "../testing/horizon/scripted-horizon-transport";
+import { PaymentFinalityService } from "./payment-finality.service";
 import { PaymentsService } from "./payments.service";
 
 /**
@@ -41,6 +42,13 @@ function prismaDouble(existingOperationIds: string[] = []) {
 
   return {
     upserts,
+    // No wallet has a checkpoint yet, so every sync here is an initial one.
+    // The fixtures' synthetic paging tokens encode no real ledger, so no
+    // checkpoint is established and Horizon is never asked for a ledger.
+    paymentSyncCheckpoint: {
+      findUnique: jest.fn().mockResolvedValue(null),
+      create: jest.fn(),
+    },
     supportedAsset: {
       findMany: jest.fn().mockResolvedValue([
         { code: "XLM", issuer: null, network: "stellar-testnet" },
@@ -60,6 +68,7 @@ function prismaDouble(existingOperationIds: string[] = []) {
               .map((operationId) => ({ operationId })),
           ),
       ),
+      count: jest.fn().mockResolvedValue(0),
       upsert: jest.fn((args: { where: { operationId: string }; create: { memo: unknown } }) => {
         upserts.push({
           operationId: args.where.operationId,
@@ -97,6 +106,19 @@ function buildStack(scenarioId: string, memo: unknown = { memo_type: "text", mem
   return { transport, stellar, transactionFetch };
 }
 
+/** The real sync and finality services over a Prisma double. */
+function syncService(prisma: ReturnType<typeof prismaDouble>, stellar: StellarService) {
+  return new PaymentsService(
+    prisma as never,
+    stellar,
+    config,
+    // Finality settings are optional; an empty config selects their defaults.
+    new PaymentFinalityService(prisma as never, stellar, {
+      get: () => undefined,
+    } as unknown as ConfigService),
+  );
+}
+
 const originalFetch = global.fetch;
 afterEach(() => {
   global.fetch = originalFetch;
@@ -111,7 +133,7 @@ describe("payment uniqueness across overlapping pages", () => {
   it("writes each operation once when Horizon replays records", async () => {
     const { stellar } = buildStack("overlapping-pages");
     const prisma = prismaDouble();
-    const service = new PaymentsService(prisma as never, stellar, config);
+    const service = syncService(prisma, stellar);
 
     const result = await service.syncPayments({ id: "user_1", walletAddress: ACCOUNT });
 
@@ -126,7 +148,7 @@ describe("payment uniqueness across overlapping pages", () => {
   it("writes nothing new when a whole page is replayed", async () => {
     const { stellar } = buildStack("fully-replayed-page");
     const prisma = prismaDouble();
-    const service = new PaymentsService(prisma as never, stellar, config);
+    const service = syncService(prisma, stellar);
 
     const result = await service.syncPayments({ id: "user_1", walletAddress: ACCOUNT });
 
@@ -140,7 +162,7 @@ describe("payment uniqueness across overlapping pages", () => {
     const { stellar } = buildStack("single-page");
     const known = ["synthetic-op-000000", "synthetic-op-000001", "synthetic-op-000002"];
     const prisma = prismaDouble(known);
-    const service = new PaymentsService(prisma as never, stellar, config);
+    const service = syncService(prisma, stellar);
 
     const result = await service.syncPayments({ id: "user_1", walletAddress: ACCOUNT });
 
@@ -153,7 +175,7 @@ describe("payment uniqueness across overlapping pages", () => {
     prisma.supportedAsset.findMany.mockResolvedValue([
       { code: "XLM", issuer: null, network: "stellar-testnet" },
     ]);
-    const service = new PaymentsService(prisma as never, stellar, config);
+    const service = syncService(prisma, stellar);
 
     const result = await service.syncPayments({ id: "user_1", walletAddress: ACCOUNT });
 
@@ -172,7 +194,7 @@ describe("memo consistency", () => {
   it("applies the same normalized memo to every payment in a transaction", async () => {
     const { stellar } = buildStack("single-page");
     const prisma = prismaDouble();
-    const service = new PaymentsService(prisma as never, stellar, config);
+    const service = syncService(prisma, stellar);
 
     await service.syncPayments({ id: "user_1", walletAddress: ACCOUNT });
 
@@ -191,7 +213,7 @@ describe("memo consistency", () => {
     // record count.
     const { stellar, transactionFetch } = buildStack("overlapping-pages");
     const prisma = prismaDouble();
-    const service = new PaymentsService(prisma as never, stellar, config);
+    const service = syncService(prisma, stellar);
 
     await service.syncPayments({ id: "user_1", walletAddress: ACCOUNT });
 
@@ -203,7 +225,7 @@ describe("memo consistency", () => {
     // state rather than from the record would differ here.
     const { stellar } = buildStack("server-error-mid-walk");
     const prisma = prismaDouble();
-    const service = new PaymentsService(prisma as never, stellar, config);
+    const service = syncService(prisma, stellar);
 
     await service.syncPayments({ id: "user_1", walletAddress: ACCOUNT });
 
@@ -214,7 +236,7 @@ describe("memo consistency", () => {
   it("records an absent memo as type none rather than omitting the field", async () => {
     const { stellar } = buildStack("single-page", { memo_type: "none" });
     const prisma = prismaDouble();
-    const service = new PaymentsService(prisma as never, stellar, config);
+    const service = syncService(prisma, stellar);
 
     await service.syncPayments({ id: "user_1", walletAddress: ACCOUNT });
 
@@ -228,7 +250,7 @@ describe("memo consistency", () => {
     global.fetch = jest.fn().mockRejectedValue(new TypeError("fetch failed")) as never;
 
     const prisma = prismaDouble();
-    const service = new PaymentsService(prisma as never, stellar, config);
+    const service = syncService(prisma, stellar);
 
     const result = await service.syncPayments({ id: "user_1", walletAddress: ACCOUNT });
 
@@ -248,7 +270,7 @@ describe("faults reaching the sync", () => {
   it("recovers from a transient Horizon failure without the caller noticing", async () => {
     const { stellar } = buildStack("server-error-then-ok");
     const prisma = prismaDouble();
-    const service = new PaymentsService(prisma as never, stellar, config);
+    const service = syncService(prisma, stellar);
 
     const result = await service.syncPayments({ id: "user_1", walletAddress: ACCOUNT });
 
@@ -258,7 +280,7 @@ describe("faults reaching the sync", () => {
   it("surfaces an exhausted retry budget as a dependency error", async () => {
     const { stellar } = buildStack("rate-limited-exhausted");
     const prisma = prismaDouble();
-    const service = new PaymentsService(prisma as never, stellar, config);
+    const service = syncService(prisma, stellar);
 
     await expect(
       service.syncPayments({ id: "user_1", walletAddress: ACCOUNT }),
@@ -271,7 +293,7 @@ describe("faults reaching the sync", () => {
   it("syncs the valid records from a page that also contained invalid ones", async () => {
     const { stellar } = buildStack("malformed-records");
     const prisma = prismaDouble();
-    const service = new PaymentsService(prisma as never, stellar, config);
+    const service = syncService(prisma, stellar);
 
     const result = await service.syncPayments({ id: "user_1", walletAddress: ACCOUNT });
 
@@ -284,7 +306,7 @@ describe("faults reaching the sync", () => {
   it("does not write payments addressed to another account", async () => {
     const { stellar } = buildStack("non-payment-records");
     const prisma = prismaDouble();
-    const service = new PaymentsService(prisma as never, stellar, config);
+    const service = syncService(prisma, stellar);
 
     const result = await service.syncPayments({ id: "user_1", walletAddress: ACCOUNT });
 

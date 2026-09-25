@@ -72,6 +72,11 @@ enum VerificationOutcome {
   ISSUER_WARNING
 }
 
+enum PaymentSyncCheckpointStatus {
+  VERIFIED
+  DIVERGED
+}
+
 enum AnchoringOperation {
   REGISTER
   REVOKE
@@ -118,6 +123,7 @@ model User {
   lastLoginAt        DateTime?
   organizations      Organization[]
   payments           Payment[]
+  paymentSyncCheckpoint PaymentSyncCheckpoint?
   trustedSources     TrustedSource[]
   proofs             Proof[]
   createdApiKeys     ApiKey[]
@@ -236,13 +242,48 @@ model Payment {
   memo                   Json?
   classification         PaymentClassification  @default(UNKNOWN)
   isEligible             Boolean                @default(false)
+  /// Horizon paging token (operation TOID). Null for rows synced before ledger finality tracking.
+  pagingToken            String?
+  /// Ledger the operation closed in, derived from the paging token.
+  ledgerSequence         Int?
+  /// Set while the payment's ledger view is unreconciled. Proof issuance refuses held payments.
+  finalityHoldAt         DateTime?
+  /// Machine-readable divergence reason for the hold. Never contains payment data.
+  finalityHoldReason     String?
   createdAt              DateTime               @default(now())
   updatedAt              DateTime               @updatedAt
 
   @@index([userId, occurredAt])
+  @@index([userId, ledgerSequence])
   @@index([sourceAddress])
   @@index([assetCode, assetIssuer])
   @@index([classification])
+}
+
+/// Last verified position in a wallet's Horizon payments feed.
+/// Records the ledger sequence and hash the checkpoint was taken at, so a later
+/// sync can prove Horizon still agrees before it trusts anything past it.
+model PaymentSyncCheckpoint {
+  id               String                      @id @default(cuid())
+  userId           String                      @unique
+  user             User                        @relation(fields: [userId], references: [id])
+  pagingToken      String
+  operationId      String
+  transactionHash  String
+  ledgerSequence   Int
+  ledgerHash       String
+  status           PaymentSyncCheckpointStatus @default(VERIFIED)
+  divergenceReason String?
+  divergedAt       DateTime?
+  /// Where a bounded reconciliation read stopped; the next sync continues from here.
+  reconciliationCursor String?
+  verifiedAt       DateTime
+  /// Optimistic concurrency guard: every transition must match the version it read.
+  version          Int                         @default(0)
+  createdAt        DateTime                    @default(now())
+  updatedAt        DateTime                    @updatedAt
+
+  @@index([status])
 }
 
 model TrustedSource {
