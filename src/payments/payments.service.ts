@@ -11,6 +11,7 @@ import { PrismaService } from "../database/prisma.service";
 import { StellarService } from "../stellar/stellar.service";
 import { normalizeMemo } from "../stellar/memo-normalizer";
 import { NormalizedMemo } from "../stellar/stellar.types";
+import { PaymentEligibilityService } from "./payment-eligibility.service";
 
 @Injectable()
 export class PaymentsService {
@@ -20,6 +21,7 @@ export class PaymentsService {
     private readonly prisma: PrismaService,
     private readonly stellarService: StellarService,
     configService: ConfigService,
+    private readonly eligibility: PaymentEligibilityService,
   ) {
     this.paymentEncryptionKeyring = new PaymentEncryptionKeyringService(
       configService,
@@ -49,6 +51,7 @@ export class PaymentsService {
     let skipped = 0;
     let enrichmentErrors = 0;
     const memoCache = new Map<string, NormalizedMemo>();
+    const syncedPaymentIds: string[] = [];
 
     // Batch the "does this payment already exist" check into a single query
     // ahead of the loop, instead of one findUnique per incoming payment.
@@ -97,7 +100,7 @@ export class PaymentsService {
 
       const existing = existingOperationIds.has(payment.operationId);
 
-      await this.prisma.payment.upsert({
+      const saved = await this.prisma.payment.upsert({
         where: {
           operationId: payment.operationId,
         },
@@ -122,12 +125,18 @@ export class PaymentsService {
         },
       });
 
+      if (saved?.id) syncedPaymentIds.push(saved.id);
+
       if (existing) {
         updated += 1;
       } else {
         created += 1;
       }
     }
+
+    // Record why each synced payment is (in)eligible. Unchanged inputs write
+    // nothing, so a routine re-sync does not grow the decision history.
+    await this.eligibility.evaluatePayments(user.id, syncedPaymentIds, "sync");
 
     return {
       totalFetched: incomingPayments.length,
@@ -221,7 +230,17 @@ export class PaymentsService {
       },
     });
 
+    await this.eligibility.evaluatePayments(
+      user.id,
+      [payment.id],
+      "classification_changed",
+    );
+
     return this.toPaymentDto(updated);
+  }
+
+  explainEligibility(userId: string, paymentId: string) {
+    return this.eligibility.explain(userId, paymentId);
   }
 
   private assetKey(code: string, issuer: string | null) {

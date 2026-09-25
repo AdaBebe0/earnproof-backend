@@ -48,6 +48,7 @@ describe("PaymentsService", () => {
       prisma as never,
       stellar as never,
       config as never,
+      { evaluatePayments: jest.fn().mockResolvedValue(0) } as never,
     );
 
     await expect(
@@ -108,6 +109,7 @@ describe("PaymentsService", () => {
       prisma as never,
       stellar as never,
       config as never,
+      { evaluatePayments: jest.fn().mockResolvedValue(0) } as never,
     );
 
     const result = await service.syncPayments({
@@ -154,6 +156,7 @@ describe("PaymentsService", () => {
       prisma as never,
       stellar as never,
       config as never,
+      { evaluatePayments: jest.fn().mockResolvedValue(0) } as never,
     );
 
     await expect(
@@ -189,6 +192,7 @@ describe("PaymentsService", () => {
       prisma as never,
       {} as never,
       config as never,
+      { evaluatePayments: jest.fn().mockResolvedValue(0) } as never,
     );
 
     await expect(
@@ -246,6 +250,7 @@ describe("PaymentsService", () => {
       prisma as never,
       {} as never,
       config as never,
+      { evaluatePayments: jest.fn().mockResolvedValue(0) } as never,
     );
 
     const [listed] = await service.listPayments("user_1", {});
@@ -284,6 +289,7 @@ describe("PaymentsService", () => {
       prisma as never,
       {} as never,
       config as never,
+      { evaluatePayments: jest.fn().mockResolvedValue(0) } as never,
     );
 
     const updated = await service.updateClassification(
@@ -301,6 +307,87 @@ describe("PaymentsService", () => {
       data: {
         classification: PaymentClassification.INCOME,
       },
+    });
+  });
+
+  describe("eligibility decisions", () => {
+    const incoming = {
+      operationId: "op_1",
+      stellarTransactionHash: "tx_1",
+      sourceAddress: "GA",
+      destinationAddress: "GB",
+      assetCode: "XLM",
+      assetIssuer: null,
+      amount: "10",
+      occurredAt: new Date("2026-07-13T00:00:00Z"),
+    };
+
+    it("records a decision for every synced payment", async () => {
+      const prisma = {
+        supportedAsset: { findMany: jest.fn().mockResolvedValue([]) },
+        payment: {
+          findMany: jest.fn().mockResolvedValue([]),
+          upsert: jest
+            .fn()
+            .mockResolvedValueOnce({ id: "payment_1" })
+            .mockResolvedValueOnce({ id: "payment_2" }),
+        },
+      };
+      const eligibility = { evaluatePayments: jest.fn().mockResolvedValue(2) };
+      const service = new PaymentsService(
+        prisma as never,
+        {
+          fetchIncomingPayments: jest
+            .fn()
+            .mockResolvedValue([incoming, { ...incoming, operationId: "op_2" }]),
+          fetchTransaction: jest.fn().mockResolvedValue(null),
+        } as never,
+        config as never,
+        eligibility as never,
+      );
+
+      await service.syncPayments({ id: "user_1", walletAddress: "GB" });
+
+      expect(eligibility.evaluatePayments).toHaveBeenCalledWith(
+        "user_1",
+        ["payment_1", "payment_2"],
+        "sync",
+      );
+    });
+
+    it("re-evaluates a payment after its classification changes", async () => {
+      const prisma = {
+        payment: {
+          findFirst: jest.fn().mockResolvedValue({
+            id: "payment_1",
+            classification: PaymentClassification.UNKNOWN,
+            assetCode: "XLM",
+            assetIssuer: null,
+            isEligible: true,
+          }),
+          update: jest.fn().mockResolvedValue({ id: "payment_1" }),
+        },
+        auditLog: { create: jest.fn().mockResolvedValue({}) },
+      };
+      const eligibility = { evaluatePayments: jest.fn().mockResolvedValue(1) };
+      const service = new PaymentsService(prisma as never, {} as never, config as never, eligibility as never);
+
+      await service.updateClassification({ id: "user_1" }, "payment_1", PaymentClassification.EXCLUDED);
+
+      expect(eligibility.evaluatePayments).toHaveBeenCalledWith(
+        "user_1",
+        ["payment_1"],
+        "classification_changed",
+      );
+    });
+
+    it("delegates the explanation with the caller as owner", async () => {
+      const eligibility = { explain: jest.fn().mockResolvedValue({ paymentId: "payment_1" }) };
+      const service = new PaymentsService({} as never, {} as never, config as never, eligibility as never);
+
+      await service.explainEligibility("user_1", "payment_1");
+
+      expect(eligibility.explain).toHaveBeenCalledWith("user_1", "payment_1");
     });
   });
 });

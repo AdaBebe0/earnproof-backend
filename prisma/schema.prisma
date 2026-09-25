@@ -238,11 +238,43 @@ model Payment {
   isEligible             Boolean                @default(false)
   createdAt              DateTime               @default(now())
   updatedAt              DateTime               @updatedAt
+  eligibilityDecisions   PaymentEligibilityDecision[]
 
   @@index([userId, occurredAt])
   @@index([sourceAddress])
   @@index([assetCode, assetIssuer])
   @@index([classification])
+}
+
+/// One evaluation of a payment's eligibility under a versioned policy.
+/// Exactly one decision per payment is active; superseded decisions are kept
+/// for audit. Stores derived factors and reason codes only: never a memo,
+/// an amount, or a counterparty address.
+model PaymentEligibilityDecision {
+  id            String    @id @default(cuid())
+  paymentId     String
+  payment       Payment   @relation(fields: [paymentId], references: [id])
+  /// Denormalised owner, so owner-scoped reads never need a join.
+  userId        String
+  policyVersion String
+  eligible      Boolean
+  factors       Json
+  reasonCodes   String[]
+  /// sha256 of (policyVersion, factors). Equal hashes mean an identical decision.
+  inputsHash    String
+  trigger       String
+  evaluatedAt   DateTime
+  supersededAt  DateTime?
+  /// TRUE for the active decision, NULL once superseded. The unique index on
+  /// (paymentId, isActive) lets PostgreSQL itself refuse a second active
+  /// decision, because NULLs never collide.
+  isActive      Boolean?
+  createdAt     DateTime  @default(now())
+
+  @@unique([paymentId, isActive])
+  @@index([paymentId, evaluatedAt])
+  @@index([userId, isActive])
+  @@index([policyVersion, isActive])
 }
 
 model TrustedSource {

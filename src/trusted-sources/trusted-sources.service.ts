@@ -8,13 +8,17 @@ import { StrKey } from "@stellar/stellar-base";
 import { AuthenticatedUser } from "../auth/auth.types";
 import { sha256 } from "../common/crypto/hash";
 import { PrismaService } from "../database/prisma.service";
+import { PaymentEligibilityService } from "../payments/payment-eligibility.service";
 import { CreateTrustedSourceDto } from "./dto/create-trusted-source.dto";
 import { ListTrustedSourcesDto } from "./dto/list-trusted-sources.dto";
 import { UpdateTrustedSourceDto } from "./dto/update-trusted-source.dto";
 
 @Injectable()
 export class TrustedSourcesService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly eligibility: PaymentEligibilityService,
+  ) {}
 
   /**
    * Normalizes a source address (e.g., Stellar address).
@@ -128,6 +132,9 @@ export class TrustedSourcesService {
         },
       },
     });
+
+    // Payments from this sender are now from a trusted source.
+    await this.eligibility.reevaluateSource(user.id, normalizedAddress);
 
     return this.formatTrustedSource(trustedSource);
   }
@@ -308,6 +315,11 @@ export class TrustedSourcesService {
       },
     });
 
+    // An issuer link change can change SOURCE_ISSUER_VERIFIED.
+    if ((existing.issuerId || null) !== (updated.issuerId || null)) {
+      await this.eligibility.reevaluateSource(user.id, updated.sourceAddress);
+    }
+
     return this.formatTrustedSource(updated);
   }
 
@@ -373,6 +385,8 @@ export class TrustedSourcesService {
         },
       },
     });
+
+    await this.eligibility.reevaluateSource(user.id, trustedSource.sourceAddress);
 
     return {
       id: deleted.id,

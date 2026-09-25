@@ -510,6 +510,7 @@ const scenarios: Scenario[] = [
         prisma as never,
         {} as never,
         configDouble({ paymentEncryptionKey: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=" }),
+        { evaluatePayments: jest.fn().mockResolvedValue(0) } as never,
       ).updateClassification({ id: USER_ID }, "payment_1", "INCOME" as never);
     },
   },
@@ -538,7 +539,7 @@ const scenarios: Scenario[] = [
         auditLog: sink.auditLog,
       };
 
-      return new TrustedSourcesService(prisma as never).createTrustedSource(
+      return new TrustedSourcesService(prisma as never, { reevaluateSource: jest.fn().mockResolvedValue(0) } as never).createTrustedSource(
         ADMIN,
         { sourceAddress: PAYER_ADDRESS, displayName: "Employer" } as never,
       );
@@ -573,7 +574,7 @@ const scenarios: Scenario[] = [
         auditLog: sink.auditLog,
       };
 
-      return new TrustedSourcesService(prisma as never).updateTrustedSource(
+      return new TrustedSourcesService(prisma as never, { reevaluateSource: jest.fn().mockResolvedValue(0) } as never).updateTrustedSource(
         ADMIN,
         "trusted_1",
         { displayName: "Main employer" } as never,
@@ -599,7 +600,7 @@ const scenarios: Scenario[] = [
         auditLog: sink.auditLog,
       };
 
-      return new TrustedSourcesService(prisma as never).deleteTrustedSource(
+      return new TrustedSourcesService(prisma as never, { reevaluateSource: jest.fn().mockResolvedValue(0) } as never).deleteTrustedSource(
         ADMIN,
         "trusted_1",
       );
