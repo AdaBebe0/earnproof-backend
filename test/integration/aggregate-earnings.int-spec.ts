@@ -78,6 +78,8 @@ describe("aggregate-earnings period boundaries", () => {
   it("lets consecutive periods partition payments without double counting", async () => {
     const user = await seedUser(db.prisma, "agg-partition");
     const mid = new Date("2026-03-16T00:00:00.000Z");
+    // Each half needs at least two payments to be a valid aggregate.
+    await income("agg-p-0", user.id, "16", new Date(START.getTime() + 1_000));
     await income("agg-p-1", user.id, "1", START);
     await income("agg-p-2", user.id, "2", mid);
     await income("agg-p-3", user.id, "4", new Date(mid.getTime() + 1));
