@@ -30,6 +30,13 @@ import { OrganizationResponseDto } from "./dto/organization-response.dto";
 import { UpdateOrganizationDto } from "./dto/update-organization.dto";
 import { Request } from "express";
 import { OrganizationsService } from "./organizations.service";
+import { OrganizationMembersService } from "./organization-members.service";
+import { AssignOrganizationMemberDto } from "./dto/assign-organization-member.dto";
+import { OrganizationMemberResponseDto } from "./dto/organization-member-response.dto";
+import { UpdateOrganizationMemberRoleDto } from "./dto/update-organization-member-role.dto";
+import { ListOrganizationMembersDto } from "./dto/list-organization-members.dto";
+import { OrganizationMemberGuard } from "./guards/organization-member.guard";
+import { RequiredOrganizationRole } from "./decorators/required-organization-role.decorator";
 import { RecentAuthGuard, RequireRecentAuth } from "../common/guards/recent-auth.guard";
 import { RecentAuthService, DESTRUCTIVE_ACTIONS } from "../auth/recent-auth.service";
 
@@ -39,6 +46,7 @@ import { RecentAuthService, DESTRUCTIVE_ACTIONS } from "../auth/recent-auth.serv
 export class OrganizationsController {
   constructor(
     private readonly organizationsService: OrganizationsService,
+    private readonly membersService: OrganizationMembersService,
     private readonly recentAuthService: RecentAuthService,
   ) {}
 
@@ -163,6 +171,141 @@ export class OrganizationsController {
     );
   }
 
+  // ==================== MEMBERSHIP ENDPOINTS ====================
+
+  @Post(":id/members")
+  @UseGuards(AuthGuard, OrganizationMemberGuard)
+  @RequiredOrganizationRole("ADMIN")
+  @ApiOperation({
+    summary: "Assign a member to organization",
+    description: "Assign a user to the organization with a specific role. Only organization admins or owners can assign members.",
+  })
+  @ApiResponse({
+    status: 201,
+    description: "Member assigned successfully",
+    type: OrganizationMemberResponseDto,
+  })
+  @ApiResponse({
+    status: 409,
+    description: "User is already a member of this organization",
+  })
+  @ApiResponse({
+    status: 404,
+    description: "Organization or user not found",
+  })
+  @ApiResponse({
+    status: 403,
+    description: "Unauthorized - admin or owner role required",
+  })
+  @ApiResponse({
+    status: 401,
+    description: "Session token is missing, malformed, invalid, or expired",
+    type: ApiErrorDto,
+  })
+  assignMember(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("id") organizationId: string,
+    @Body() input: AssignOrganizationMemberDto,
+  ) {
+    return this.membersService.assignMember(user, organizationId, input);
+  }
+
+  @Get(":id/members")
+  @UseGuards(AuthGuard, OrganizationMemberGuard)
+  @ApiOperation({
+    summary: "List organization members",
+    description: "List members of an organization. All members can view the member list.",
+  })
+  @ApiResponse({
+    status: 200,
+    description: "Members retrieved successfully",
+  })
+  @ApiResponse({
+    status: 404,
+    description: "Organization not found or user is not a member",
+  })
+  @ApiResponse({
+    status: 401,
+    description: "Session token is missing, malformed, invalid, or expired",
+    type: ApiErrorDto,
+  })
+  listMembers(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("id") organizationId: string,
+    @Query() query: ListOrganizationMembersDto,
+  ) {
+    return this.membersService.listMembers(user, organizationId, query);
+  }
+
+  @Patch(":id/members/:memberId/role")
+  @UseGuards(AuthGuard, OrganizationMemberGuard)
+  @RequiredOrganizationRole("OWNER")
+  @ApiOperation({
+    summary: "Update member role",
+    description: "Update a member's role in the organization. Only organization owners can change roles.",
+  })
+  @ApiResponse({
+    status: 200,
+    description: "Member role updated successfully",
+    type: OrganizationMemberResponseDto,
+  })
+  @ApiResponse({
+    status: 404,
+    description: "Organization or member not found",
+  })
+  @ApiResponse({
+    status: 403,
+    description: "Unauthorized - owner role required, or cannot demote final owner",
+  })
+  @ApiResponse({
+    status: 401,
+    description: "Session token is missing, malformed, invalid, or expired",
+    type: ApiErrorDto,
+  })
+  updateMemberRole(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("id") organizationId: string,
+    @Param("memberId") memberId: string,
+    @Body() input: UpdateOrganizationMemberRoleDto,
+  ) {
+    return this.membersService.updateMemberRole(
+      user,
+      organizationId,
+      memberId,
+      input,
+    );
+  }
+
+  @Delete(":id/members/:memberId")
+  @UseGuards(AuthGuard, OrganizationMemberGuard)
+  @RequiredOrganizationRole("OWNER")
+  @ApiOperation({
+    summary: "Remove member from organization",
+    description: "Remove a user from the organization. Only organization owners can remove members.",
+  })
+  @ApiResponse({
+    status: 204,
+    description: "Member removed successfully",
+  })
+  @ApiResponse({
+    status: 404,
+    description: "Organization or member not found",
+  })
+  @ApiResponse({
+    status: 403,
+    description: "Unauthorized - owner role required, or cannot remove final owner",
+  })
+  @ApiResponse({
+    status: 401,
+    description: "Session token is missing, malformed, invalid, or expired",
+    type: ApiErrorDto,
+  })
+  removeMember(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("id") organizationId: string,
+    @Param("memberId") memberId: string,
+  ) {
+    return this.membersService.removeMember(user, organizationId, memberId);
   @Delete(":id")
   @HttpCode(HttpStatus.NO_CONTENT)
   @UseGuards(AuthGuard, RoleGuard, RecentAuthGuard)

@@ -107,6 +107,11 @@ enum ApiKeyScope {
   ORG_ADMIN
 }
 
+enum OrganizationMemberRole {
+  OWNER
+  ADMIN
+  MEMBER
+  VIEWER
 enum IdempotencyStatus {
   PENDING
   COMPLETED
@@ -128,6 +133,7 @@ model User {
   proofs             Proof[]
   createdApiKeys     ApiKey[]
   sessions           AuthSession[]
+  organizationMemberships OrganizationMember[]
 
   @@index([walletHash])
   @@index([status])
@@ -152,24 +158,29 @@ model WalletChallenge {
 /// Only a SHA-256 hash of the opaque bearer token is stored â€” the raw token is never
 /// written to the database or to any application log.
 model AuthSession {
-  id          String    @id @default(cuid())
+  id                 String    @id @default(cuid())
   /// SHA-256 hex digest of the raw opaque session token.
-  tokenHash   String    @unique
-  userId      String
-  user        User      @relation(fields: [userId], references: [id])
-  createdAt   DateTime  @default(now())
-  expiresAt   DateTime
-  lastUsedAt  DateTime?
+  tokenHash          String    @unique
+  userId             String
+  user               User      @relation(fields: [userId], references: [id])
+  createdAt          DateTime  @default(now())
+  expiresAt          DateTime
+  lastUsedAt         DateTime?
   /// Set when the session is explicitly revoked (logout or rotation).
-  revokedAt   DateTime?
+  revokedAt          DateTime?
+  /// Optional device fingerprint for session inventory (e.g., user-agent hash, IP hash).
+  deviceFingerprint  String?
+  /// Optional reason for revocation (e.g., "REMOTE_REVOCATION", "DEVICE_LOSS").
+  revocationReason   String?
   /// Links to the replacement session produced during rotation.
-  rotatedToId String?   @unique
-  rotatedTo   AuthSession? @relation("SessionRotation", fields: [rotatedToId], references: [id])
-  rotatedFrom AuthSession? @relation("SessionRotation")
+  rotatedToId        String?   @unique
+  rotatedTo          AuthSession? @relation("SessionRotation", fields: [rotatedToId], references: [id])
+  rotatedFrom        AuthSession? @relation("SessionRotation")
 
   @@index([userId])
   @@index([expiresAt])
   @@index([revokedAt])
+  @@index([deviceFingerprint])
 }
 
 model Organization {
@@ -178,6 +189,7 @@ model Organization {
   slug        String          @unique
   website     String?
   status      ResourceStatus  @default(PENDING)
+  revision    Int             @default(0)
   createdById String
   createdBy   User            @relation(fields: [createdById], references: [id])
   createdAt   DateTime        @default(now())
@@ -185,11 +197,28 @@ model Organization {
   issuers     Issuer[]
   apiKeys     ApiKey[]
   webhooks    Webhook[]
+  members     OrganizationMember[]
   idempotencyRecords IdempotencyRecord[]
 
   @@index([status])
 }
 
+model OrganizationMember {
+  id             String                    @id @default(cuid())
+  organizationId String
+  organization   Organization              @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  userId         String
+  user           User                      @relation("organizationMemberships", fields: [userId], references: [id], onDelete: Restrict)
+  role           OrganizationMemberRole
+  status         ResourceStatus            @default(ACTIVE)
+  joinedAt       DateTime?
+  createdAt      DateTime                  @default(now())
+  updatedAt      DateTime                  @updatedAt
+
+  @@unique([organizationId, userId])
+  @@index([organizationId])
+  @@index([userId])
+  @@index([status])
 /// Stores idempotency records to prevent duplicate mutations within an organization.
 /// Indexed by (organizationId, idempotencyKey) to enforce uniqueness and enable O(1) lookup.
 /// The requestFingerprint is checked on incoming requests; if the key exists but fingerprint
@@ -225,6 +254,7 @@ model Issuer {
   organization    Organization    @relation(fields: [organizationId], references: [id])
   stellarAddress  String          @unique
   status          ResourceStatus  @default(PENDING)
+  revision        Int             @default(0)
   metadataHash    String?
   publicMetadata  Json?
   contractSyncState       String          @default("PENDING")
@@ -291,6 +321,7 @@ model TrustedSource {
   issuerId      String?
   issuer        Issuer?         @relation(fields: [issuerId], references: [id])
   status        ResourceStatus  @default(ACTIVE)
+  revision      Int             @default(0)
   createdAt     DateTime        @default(now())
   updatedAt     DateTime        @updatedAt
 
@@ -430,6 +461,7 @@ model Webhook {
   secretEncrypted  String
   events           Json
   status           ResourceStatus    @default(ACTIVE)
+  revision         Int               @default(0)
   createdAt        DateTime          @default(now())
   updatedAt        DateTime          @updatedAt
   deliveries       WebhookDelivery[]
