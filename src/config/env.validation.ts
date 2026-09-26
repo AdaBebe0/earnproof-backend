@@ -388,6 +388,16 @@ const envSchema = z.object({
   )
     .default(0),
 
+  /** Maximum stored verification metadata events per proof in the budget window */
+  VERIFICATION_METADATA_BUDGET_PER_PROOF: rateLimitCounter(
+    "VERIFICATION_METADATA_BUDGET_PER_PROOF",
+  ).default(100),
+
+  /** Privacy-budget window for stored verification metadata */
+  VERIFICATION_METADATA_BUDGET_WINDOW_MS: timeWindowMs(
+    "VERIFICATION_METADATA_BUDGET_WINDOW_MS",
+  ).default(86400000),
+
   // ──────────────────────────────────────────────────────────────────────
   // DATA RETENTION (All retention durations validated at startup)
   // ──────────────────────────────────────────────────────────────────────
@@ -525,6 +535,26 @@ const envSchema = z.object({
     .positive("RATE_LIMIT_AUTHENTICATED_MULTIPLIER must be positive")
     .finite("RATE_LIMIT_AUTHENTICATED_MULTIPLIER must be finite")
     .default(3),
+
+  /** Proof-verification abuse-control window */
+  PROOF_VERIFICATION_ABUSE_WINDOW_MS: timeWindowMs(
+    "PROOF_VERIFICATION_ABUSE_WINDOW_MS",
+  ).default(900000),
+
+  /** Unknown proof identifiers allowed per privacy-safe client in the window */
+  PROOF_VERIFICATION_UNKNOWN_LIMIT: rateLimitCounter(
+    "PROOF_VERIFICATION_UNKNOWN_LIMIT",
+  ).default(10),
+
+  /** Repeated verification attempts allowed per proof and client */
+  PROOF_VERIFICATION_REPEATED_LIMIT: rateLimitCounter(
+    "PROOF_VERIFICATION_REPEATED_LIMIT",
+  ).default(60),
+
+  /** Distinct proof identifiers allowed per privacy-safe client */
+  PROOF_VERIFICATION_DISTINCT_CLIENT_LIMIT: rateLimitCounter(
+    "PROOF_VERIFICATION_DISTINCT_CLIENT_LIMIT",
+  ).default(100),
 });
 
 /**

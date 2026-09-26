@@ -29,6 +29,10 @@ import { ApiErrorCode } from "../common/dto/api-error.dto";
 import { PrismaService } from "../database/prisma.service";
 import { AttestationsService } from "../attestations/attestations.service";
 import { WebhookDeliveryService } from "../webhooks/webhook-delivery.service";
+import {
+  ProofVerificationAbuseService,
+  VerificationClientContext,
+} from "../common/rate-limit/proof-verification-abuse.service";
 import { ContractAnchoringService } from "./contract-anchoring.service";
 import { CreateMinimumIncomeProofDto } from "./dto/create-minimum-income-proof.dto";
 import { CreatePaymentReceiptProofDto } from "./dto/create-payment-receipt-proof.dto";
@@ -133,6 +137,8 @@ export class ProofsService {
     private readonly contractAnchoringService?: ContractAnchoringService,
     @Optional()
     private readonly webhookDeliveryService?: WebhookDeliveryService,
+    @Optional()
+    private readonly verificationAbuseService?: ProofVerificationAbuseService,
   ) {
     this.signingSecret = configService.getOrThrow<string>(
       "credentialSigningSecret",
@@ -760,7 +766,11 @@ export class ProofsService {
     };
   }
 
-  async verifyProof(proofId: string) {
+  async verifyProof(
+    proofId: string,
+    clientContext?: VerificationClientContext,
+  ) {
+    this.verificationAbuseService?.checkClientCardinality(clientContext, proofId);
     const proof = await this.prisma.proof.findUnique({
       where: {
         id: proofId,
@@ -775,20 +785,15 @@ export class ProofsService {
       },
     });
 
-    if (!proof || !proof.claim) {
-      // Fail-open policy: record event asynchronously
-      // If event recording fails, the verification response is still returned.
-      // This ensures verification availability over audit completeness.
-      this.verificationEventService
-        .recordEvent(VerificationOutcome.UNKNOWN, proofId, {
-          outcome: "UNKNOWN",
-          timestamp: new Date(),
-        })
-        .catch(() => {
-          // Error already logged by the service
-          // Verification continues unblocked
-        });
+    this.verificationAbuseService?.checkVerification(
+      clientContext,
+      proofId,
+      Boolean(proof?.claim),
+    );
 
+    if (!proof || !proof.claim) {
+      // Unknown probes deliberately do not create audit rows: the identifier
+      // is untrusted and could otherwise create an unbounded data sink.
       return {
         result: VerificationResult.UNKNOWN_PROOF,
         status: "unknown",
@@ -880,22 +885,27 @@ export class ProofsService {
     // If event recording fails, the verification response is still returned.
     // This ensures verification availability over audit completeness.
     // Event recording errors are caught and logged by the service.
-    this.verificationEventService
-      .recordEvent(outcome, proof.id, {
-        outcome: outcome,
-        timestamp: new Date(),
-      })
-      .catch(() => {
-        // Error already logged by the service
-        // Verification continues unblocked
-      });
+    const verificationEventService = this.verificationEventService as VerificationEventService & {
+      tryConsumePrivacyBudget?: (proofId: string) => boolean;
+    };
+    if (verificationEventService.tryConsumePrivacyBudget?.(proof.id) ?? true) {
+      this.verificationEventService
+        .recordEvent(outcome, proof.id, {
+          outcome: outcome,
+          timestamp: new Date(),
+        })
+        .catch(() => {
+          // Error already logged by the service
+          // Verification continues unblocked
+        });
 
-    await this.prisma.verificationEvent.create({
-      data: {
-        proofId: proof.id,
-        result,
-      },
-    });
+      await this.prisma.verificationEvent.create({
+        data: {
+          proofId: proof.id,
+          result,
+        },
+      });
+    }
 
     this.emitWebhook(proof.userId, "proof.verified", {
       proofId: proof.id,

@@ -124,5 +124,23 @@ export const configuration = () => ({
     authenticatedMultiplier: Number(
       process.env.RATE_LIMIT_AUTHENTICATED_MULTIPLIER ?? 3,
     ),
+    proofVerificationWindowMs: Number(
+      process.env.PROOF_VERIFICATION_ABUSE_WINDOW_MS ?? 900000,
+    ),
+    proofVerificationUnknownLimit: Number(
+      process.env.PROOF_VERIFICATION_UNKNOWN_LIMIT ?? 10,
+    ),
+    proofVerificationRepeatedLimit: Number(
+      process.env.PROOF_VERIFICATION_REPEATED_LIMIT ?? 60,
+    ),
+    proofVerificationDistinctClientLimit: Number(
+      process.env.PROOF_VERIFICATION_DISTINCT_CLIENT_LIMIT ?? 100,
+    ),
   },
+  verificationMetadataBudgetPerProof: Number(
+    process.env.VERIFICATION_METADATA_BUDGET_PER_PROOF ?? 100,
+  ),
+  verificationMetadataBudgetWindowMs: Number(
+    process.env.VERIFICATION_METADATA_BUDGET_WINDOW_MS ?? 86400000,
+  ),
 });
