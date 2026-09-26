@@ -1,9 +1,10 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { Injectable } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import { sha256 } from "../common/crypto/hash";
 import { redact } from "../common/observability/redaction";
+import { StructuredLogger } from "../common/logger";
 
 const execFileAsync = promisify(execFile);
 
@@ -38,7 +39,7 @@ export type ContractProofStatus =
 
 @Injectable()
 export class ContractAnchoringService {
-  private readonly logger = new Logger(ContractAnchoringService.name);
+  private readonly logger = new StructuredLogger(ContractAnchoringService.name);
   private readonly enabled: boolean;
   private readonly required: boolean;
   private readonly stellarCliPath: string;

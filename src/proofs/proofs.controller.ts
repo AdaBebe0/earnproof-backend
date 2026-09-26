@@ -6,6 +6,7 @@ import {
   Param,
   Patch,
   Post,
+  Req,
   Query,
   UseGuards,
 } from "@nestjs/common";
@@ -23,6 +24,7 @@ import {
   AuthenticatedRoute,
   PublicRoute,
 } from "../common/decorators/authorization-policy.decorator";
+import { Idempotent } from "../common/decorators/idempotent.decorator";
 import { ApiErrorDto } from "../common/dto/api-error.dto";
 import { AuthGuard } from "../common/guards/auth.guard";
 import { CreateMinimumIncomeProofDto } from "./dto/create-minimum-income-proof.dto";
@@ -38,6 +40,7 @@ import { RevokeProofResponseDto } from "./dto/revoke-proof-response.dto";
 import { VerifyProofResponseDto } from "./dto/verify-proof-response.dto";
 import { VerificationStatsDto } from "./dto/verification-stats.dto";
 import { ProofsService } from "./proofs.service";
+import type { Request } from "express";
 
 @ApiTags("proofs")
 @Controller("proofs")
@@ -134,7 +137,18 @@ export class ProofsController {
     description: "Bearer token is missing, malformed, invalid, or expired.",
     type: ApiErrorDto,
   })
+  @ApiResponse({
+    status: HttpStatus.CONFLICT,
+    description: "Idempotency key was used with a different request payload.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.REQUEST_TIMEOUT,
+    description: "Previous idempotent request is still being processed.",
+    type: ApiErrorDto,
+  })
   @UseGuards(AuthGuard)
+  @Idempotent({ headerName: "idempotency-key", required: true })
   @Post("payment-receipt")
   @AuthenticatedRoute({ ownership: "user" })
   createPaymentReceiptProof(
@@ -176,6 +190,16 @@ export class ProofsController {
     description: "Bearer token is missing, malformed, invalid, or expired.",
     type: ApiErrorDto,
   })
+  @ApiResponse({
+    status: HttpStatus.CONFLICT,
+    description: "Idempotency key was used with a different request payload.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.REQUEST_TIMEOUT,
+    description: "Previous idempotent request is still being processed.",
+    type: ApiErrorDto,
+  })
   @UseGuards(AuthGuard)
   // Proof creation is expensive (Stellar reads, contract anchoring) — the
   // "strict" tier, not "default". SkipThrottle excludes the OTHER named
@@ -183,6 +207,7 @@ export class ProofsController {
   // three simultaneously (see rate-limit.module.ts's doc comment).
   @SkipThrottle({ default: true, verification: true })
   @Throttle({ strict: {} })
+  @Idempotent({ headerName: "idempotency-key", required: true })
   @Post("minimum-income")
   @AuthenticatedRoute({ ownership: "user" })
   createMinimumIncomeProof(
@@ -214,7 +239,18 @@ export class ProofsController {
     description: "Bearer token is missing, malformed, invalid, or expired.",
     type: ApiErrorDto,
   })
+  @ApiResponse({
+    status: HttpStatus.CONFLICT,
+    description: "Idempotency key was used with a different request payload.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.REQUEST_TIMEOUT,
+    description: "Previous idempotent request is still being processed.",
+    type: ApiErrorDto,
+  })
   @UseGuards(AuthGuard)
+  @Idempotent({ headerName: "idempotency-key", required: true })
   @Post("recurring-income")
   @AuthenticatedRoute({ ownership: "user" })
   createRecurringIncomeProof(
@@ -287,6 +323,8 @@ export class ProofsController {
   @PublicRoute()
   verifyProof(@Param("id") id: string) {
     return this.proofsService.verifyProof(id);
+  verifyProof(@Param("id") id: string, @Req() request: Request) {
+    return this.proofsService.verifyProof(id, { ip: request.ip });
   }
 
   @ApiBearerAuth()

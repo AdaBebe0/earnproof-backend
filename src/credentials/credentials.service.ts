@@ -1,7 +1,6 @@
 import {
   BadRequestException,
   Injectable,
-  Logger,
   Optional,
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
@@ -11,6 +10,7 @@ import { z } from "zod";
 import { canonicalize } from "../common/crypto/canonicalize";
 import { sha256 } from "../common/crypto/hash";
 import { safeEqual } from "../common/crypto/timing-safe";
+import { StructuredLogger } from "../common/logger";
 import { PrismaService } from "../database/prisma.service";
 import { ContractAnchoringService } from "../proofs/contract-anchoring.service";
 
@@ -95,7 +95,7 @@ function objectDepth(value: unknown, current = 0): number {
 
 @Injectable()
 export class CredentialsService {
-  private readonly logger = new Logger(CredentialsService.name);
+  private readonly logger = new StructuredLogger(CredentialsService.name);
   private readonly signingSecret: string;
 
   constructor(
@@ -181,9 +181,8 @@ export class CredentialsService {
       .digest("base64url")}`;
 
     if (!safeEqual(expectedSignature, proof.signature)) {
-      this.logger.log({
-        event: "credential_verify",
-        result: "invalid_signature",
+      this.logger.warn("Credential verification failed", {
+        outcome: "invalid_signature",
         credentialHash,
       });
       return { result: "invalid_signature" };
@@ -204,18 +203,16 @@ export class CredentialsService {
     });
 
     if (!record) {
-      this.logger.log({
-        event: "credential_verify",
-        result: "unknown_anchor",
+      this.logger.warn("Credential anchor unknown", {
+        outcome: "unknown_anchor",
         credentialHash,
       });
       return { result: "unknown_anchor" };
     }
 
     if (record.status === ProofStatus.REVOKED) {
-      this.logger.log({
-        event: "credential_verify",
-        result: "revoked",
+      this.logger.warn("Credential revoked", {
+        outcome: "revoked",
         credentialHash,
       });
       return { result: "revoked" };
@@ -225,18 +222,16 @@ export class CredentialsService {
       record.expiresAt <= new Date() ||
       new Date(credential.expiresAt) <= new Date()
     ) {
-      this.logger.log({
-        event: "credential_verify",
-        result: "expired",
+      this.logger.warn("Credential expired", {
+        outcome: "expired",
         credentialHash,
       });
       return { result: "expired" };
     }
 
     if (record.status !== ProofStatus.ACTIVE) {
-      this.logger.log({
-        event: "credential_verify",
-        result: "unverified_issuer",
+      this.logger.warn("Credential unverified issuer", {
+        outcome: "unverified_issuer",
         credentialHash,
       });
       return { result: "unverified_issuer" };
@@ -256,9 +251,8 @@ export class CredentialsService {
     // ------------------------------------------------------------------
     // 7. All checks passed
     // ------------------------------------------------------------------
-    this.logger.log({
-      event: "credential_verify",
-      result: "valid",
+    this.logger.log("Credential verified", {
+      outcome: "valid",
       credentialHash,
     });
     return { result: "valid" };
