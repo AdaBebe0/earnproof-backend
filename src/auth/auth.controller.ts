@@ -1,4 +1,4 @@
-﻿import { Body, Controller, Get, HttpCode, HttpStatus, Post, Req, UseGuards } from "@nestjs/common";
+import { Body, Controller, Get, Headers, HttpCode, HttpStatus, Param, Patch, Post, UseGuards } from "@nestjs/common";
 import {
   ApiBearerAuth,
   ApiOperation,
@@ -24,6 +24,8 @@ import { SessionResponseDto } from "./dto/session-response.dto";
 import { VerifyChallengeDto } from "./dto/verify-challenge.dto";
 import { VerifyResponseDto } from "./dto/verify-response.dto";
 import { SessionService } from "./session.service";
+import { RenameSessionDto } from "./dto/rename-session.dto";
+import { SessionInventoryItemDto } from "./dto/session-inventory.dto";
 import { SessionInventoryResponseDto, SessionInventoryItemDto } from "./dto/session-inventory.dto";
 import { RevokeSingleSessionResponseDto, RevokeAllOtherSessionsResponseDto } from "./dto/revoke-session.dto";
 import { RecentAuthService } from "./recent-auth.service";
@@ -94,6 +96,11 @@ export class AuthController {
     type: ApiErrorDto,
   })
   @Post("verify")
+  verifyChallenge(
+    @Body() body: VerifyChallengeDto,
+    @Headers() headers?: Record<string, string | string[] | undefined>,
+  ) {
+    return this.authService.verifyChallenge(body, headers);
   @PublicRoute()
   verifyChallenge(@Body() body: VerifyChallengeDto) {
     return this.authService.verifyChallenge(body);
@@ -119,6 +126,36 @@ export class AuthController {
   @AuthenticatedRoute({ ownership: "user" })
   getSession(@CurrentUser() session: AuthenticatedSession) {
     return this.authService.getSession(session.id);
+  }
+
+  @ApiOperation({ summary: "List the authenticated user's sessions" })
+  @ApiBearerAuth()
+  @ApiResponse({ status: HttpStatus.OK, type: SessionInventoryItemDto, isArray: true })
+  @ApiResponse({ status: HttpStatus.UNAUTHORIZED, type: ApiErrorDto })
+  @UseGuards(AuthGuard)
+  @Get("sessions")
+  async listSessions(@CurrentUser() session: AuthenticatedSession) {
+    const sessions = await this.sessionService.listForUser(session.id);
+    return sessions.map((item) => ({
+      ...item,
+      deviceLabel: item.deviceLabel ?? "Unknown device",
+      current: item.id === session.sessionId,
+    }));
+  }
+
+  @ApiOperation({ summary: "Rename one of the authenticated user's sessions" })
+  @ApiBearerAuth()
+  @ApiResponse({ status: HttpStatus.NO_CONTENT, description: "Session label updated." })
+  @ApiResponse({ status: HttpStatus.UNAUTHORIZED, type: ApiErrorDto })
+  @UseGuards(AuthGuard)
+  @Patch("sessions/:sessionId")
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async renameSession(
+    @CurrentUser() session: AuthenticatedSession,
+    @Param("sessionId") sessionId: string,
+    @Body() body: RenameSessionDto,
+  ) {
+    await this.sessionService.renameForUser(session.id, sessionId, body.label);
   }
 
   @ApiOperation({
@@ -165,11 +202,17 @@ export class AuthController {
   @UseGuards(AuthGuard)
   @HttpCode(HttpStatus.OK)
   @Post("rotate")
+  async rotate(
+    @CurrentUser() session: AuthenticatedSession,
+    @Headers() headers?: Record<string, string | string[] | undefined>,
+  ) {
   @AuthenticatedRoute({ ownership: "user" })
   async rotate(@CurrentUser() session: AuthenticatedSession) {
     const { token, sessionId, expiresAt } = await this.sessionService.rotate(
       session.sessionId,
       session,
+      undefined,
+      headers,
     );
 
     return { token, tokenType: "Bearer", sessionId, expiresAt };

@@ -6,6 +6,7 @@ import { PrismaService } from "../database/prisma.service";
 import { sha256 } from "../common/crypto/hash";
 import { AuthenticatedUser } from "./auth.types";
 import { Clock, SystemClock } from "../common/time/clock";
+import { deriveDeviceLabel, escapeLabel, SessionDeviceHeaders } from "./session-device-metadata";
 
 /** Default session TTL: 12 hours in seconds. */
 const DEFAULT_TTL_SECONDS = 60 * 60 * 12;
@@ -63,6 +64,7 @@ export class SessionService {
   async create(
     user: AuthenticatedUser,
     ttlSeconds = this.sessionTtlSeconds,
+    headers?: SessionDeviceHeaders,
   ): Promise<{ token: string; sessionId: string; expiresAt: Date }> {
     const { token, tokenHash, sessionId } = this.generateToken();
     const expiresAt = new Date(this.clock.nowMs() + ttlSeconds * 1000);
@@ -72,6 +74,9 @@ export class SessionService {
         id: sessionId,
         tokenHash,
         userId: user.id,
+        deviceLabel: deriveDeviceLabel(headers),
+        firstSeenAt: this.clock.now(),
+        lastSeenAt: this.clock.now(),
         expiresAt,
       },
     });
@@ -116,7 +121,7 @@ export class SessionService {
     this.prisma.authSession
       .update({
         where: { id: session.id },
-        data: { lastUsedAt: this.clock.now() },
+        data: { lastUsedAt: this.clock.now(), lastSeenAt: this.clock.now() },
       })
       .catch(() => {
         // Deliberately swallowed: a failed timestamp update must not break
@@ -176,6 +181,7 @@ export class SessionService {
     sessionId: string,
     user: AuthenticatedUser,
     ttlSeconds = this.sessionTtlSeconds,
+    headers?: SessionDeviceHeaders,
   ): Promise<{ token: string; sessionId: string; expiresAt: Date }> {
     const { token, tokenHash, sessionId: newSessionId } = this.generateToken();
     const expiresAt = new Date(this.clock.nowMs() + ttlSeconds * 1000);
@@ -205,6 +211,9 @@ export class SessionService {
           id: newSessionId,
           tokenHash,
           userId: user.id,
+          deviceLabel: deriveDeviceLabel(headers),
+          firstSeenAt: this.clock.now(),
+          lastSeenAt: this.clock.now(),
           expiresAt,
         },
       });
@@ -238,6 +247,34 @@ export class SessionService {
       },
       data: { revokedAt: this.clock.now() },
     });
+  }
+
+  /** Return only the caller's session metadata; token hashes never leave storage. */
+  async listForUser(userId: string) {
+    return this.prisma.authSession.findMany({
+      where: { userId },
+      orderBy: [{ lastSeenAt: "desc" }, { id: "asc" }],
+      select: {
+        id: true,
+        deviceLabel: true,
+        firstSeenAt: true,
+        lastSeenAt: true,
+        expiresAt: true,
+        revokedAt: true,
+      },
+    });
+  }
+
+  /** Rename only a session owned by the caller. */
+  async renameForUser(userId: string, sessionId: string, label: string): Promise<void> {
+    const result = await this.prisma.authSession.updateMany({
+      where: { id: sessionId, userId },
+      data: { deviceLabel: escapeLabel(label) },
+    });
+
+    if (result.count !== 1) {
+      throw new UnauthorizedException("Session does not belong to the current user");
+    }
   }
 
   /**
@@ -425,7 +462,8 @@ export class SessionService {
         id: true,
         userId: true,
         expiresAt: true,
-        revokedAt: true,
+          revokedAt: true,
+          lastSeenAt: true,
       },
     });
   }

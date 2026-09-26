@@ -29,6 +29,6 @@ describe("AuthController", () => {
       sessionId: "new-session",
       expiresAt,
     });
-    expect(sessionService.rotate).toHaveBeenCalledWith("old-session", session);
+    expect(sessionService.rotate).toHaveBeenCalledWith("old-session", session, undefined, undefined);
   });
 });
