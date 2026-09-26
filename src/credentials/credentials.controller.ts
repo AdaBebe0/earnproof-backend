@@ -18,6 +18,7 @@ import {
 } from "@nestjs/swagger";
 import { Throttle } from "@nestjs/throttler";
 import { ApiErrorDto } from "../common/dto/api-error.dto";
+import { PublicRoute } from "../common/decorators/authorization-policy.decorator";
 import { RequestTimeoutInterceptor } from "../common/interceptors/request-timeout.interceptor";
 import { CredentialsService } from "./credentials.service";
 import { VerifyCredentialResponseDto } from "./dto/verify-credential-response.dto";
@@ -78,6 +79,7 @@ export class CredentialsController {
 
   /** Verify a portable credential submitted by a third party. */
   @Post("verify")
+  @PublicRoute()
   @ApiOperation({
     summary: "Verify a portable EarnProof credential",
     description:

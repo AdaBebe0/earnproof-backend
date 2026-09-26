@@ -23,6 +23,7 @@ import {
 import { ApiKeyScope } from "@prisma/client";
 import { AuthGuard } from "../common/guards/auth.guard";
 import { CurrentUser } from "../common/decorators/current-user.decorator";
+import { AuthenticatedRoute } from "../common/decorators/authorization-policy.decorator";
 import { AuthenticatedUser } from "../auth/auth.types";
 import { ApiErrorDto } from "../common/dto/api-error.dto";
 import { SESSION_AUTH_SCHEME } from "../common/swagger/security-schemes";
@@ -58,6 +59,7 @@ import {
  * - If secret is lost, client must rotate the key to get a new one
  */
 @ApiBearerAuth(SESSION_AUTH_SCHEME)
+@AuthenticatedRoute({ roles: ["ADMIN"] })
 @ApiTags("api-keys")
 @UseGuards(AuthGuard)
 @Controller("api-keys")

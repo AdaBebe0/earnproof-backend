@@ -8,6 +8,10 @@ import {
 } from "@nestjs/swagger";
 import { Request } from "express";
 import { CurrentUser } from "../common/decorators/current-user.decorator";
+import {
+  AuthenticatedRoute,
+  PublicRoute,
+} from "../common/decorators/authorization-policy.decorator";
 import { ApiErrorDto } from "../common/dto/api-error.dto";
 import { AuthGuard } from "../common/guards/auth.guard";
 import { AuthenticatedSession } from "./auth.types";
@@ -57,6 +61,7 @@ export class AuthController {
     type: ApiErrorDto,
   })
   @Post("challenge")
+  @PublicRoute()
   createChallenge(@Body() body: CreateChallengeDto) {
     return this.authService.createChallenge(body.walletAddress);
   }
@@ -89,6 +94,7 @@ export class AuthController {
     type: ApiErrorDto,
   })
   @Post("verify")
+  @PublicRoute()
   verifyChallenge(@Body() body: VerifyChallengeDto) {
     return this.authService.verifyChallenge(body);
   }
@@ -110,6 +116,7 @@ export class AuthController {
   })
   @UseGuards(AuthGuard)
   @Get("session")
+  @AuthenticatedRoute({ ownership: "user" })
   getSession(@CurrentUser() session: AuthenticatedSession) {
     return this.authService.getSession(session.id);
   }
@@ -133,6 +140,7 @@ export class AuthController {
   @UseGuards(AuthGuard)
   @HttpCode(HttpStatus.OK)
   @Post("logout")
+  @AuthenticatedRoute({ ownership: "user" })
   async logout(@CurrentUser() session: AuthenticatedSession) {
     await this.authService.logout(session.sessionId);
     return { status: "ok" };
@@ -157,6 +165,7 @@ export class AuthController {
   @UseGuards(AuthGuard)
   @HttpCode(HttpStatus.OK)
   @Post("rotate")
+  @AuthenticatedRoute({ ownership: "user" })
   async rotate(@CurrentUser() session: AuthenticatedSession) {
     const { token, sessionId, expiresAt } = await this.sessionService.rotate(
       session.sessionId,

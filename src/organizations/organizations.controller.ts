@@ -19,6 +19,7 @@ import {
   ApiResponse,
 } from "@nestjs/swagger";
 import { CurrentUser } from "../common/decorators/current-user.decorator";
+import { AuthenticatedRoute } from "../common/decorators/authorization-policy.decorator";
 import { ApiErrorDto } from "../common/dto/api-error.dto";
 import { RequiredRole } from "../common/decorators/required-role.decorator";
 import { AuthGuard } from "../common/guards/auth.guard";
@@ -41,6 +42,7 @@ import { RecentAuthGuard, RequireRecentAuth } from "../common/guards/recent-auth
 import { RecentAuthService, DESTRUCTIVE_ACTIONS } from "../auth/recent-auth.service";
 
 @ApiBearerAuth()
+@AuthenticatedRoute({ roles: ["ADMIN"] })
 @ApiTags("organizations")
 @Controller("organizations")
 export class OrganizationsController {

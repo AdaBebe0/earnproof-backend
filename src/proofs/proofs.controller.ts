@@ -20,6 +20,10 @@ import {
 import { SkipThrottle, Throttle } from "@nestjs/throttler";
 import { AuthenticatedUser } from "../auth/auth.types";
 import { CurrentUser } from "../common/decorators/current-user.decorator";
+import {
+  AuthenticatedRoute,
+  PublicRoute,
+} from "../common/decorators/authorization-policy.decorator";
 import { Idempotent } from "../common/decorators/idempotent.decorator";
 import { ApiErrorDto } from "../common/dto/api-error.dto";
 import { AuthGuard } from "../common/guards/auth.guard";
@@ -66,6 +70,7 @@ export class ProofsController {
   })
   @UseGuards(AuthGuard)
   @Get()
+  @AuthenticatedRoute({ ownership: "user" })
   listProofs(
     @CurrentUser() user: AuthenticatedUser,
     @Query() query: ListProofsDto,
@@ -97,6 +102,7 @@ export class ProofsController {
   })
   @UseGuards(AuthGuard)
   @Get(":id")
+  @AuthenticatedRoute({ ownership: "user" })
   getProofDetail(
     @CurrentUser() user: AuthenticatedUser,
     @Param("id") id: string,
@@ -144,6 +150,7 @@ export class ProofsController {
   @UseGuards(AuthGuard)
   @Idempotent({ headerName: "idempotency-key", required: true })
   @Post("payment-receipt")
+  @AuthenticatedRoute({ ownership: "user" })
   createPaymentReceiptProof(
     @CurrentUser() user: AuthenticatedUser,
     @Body() body: CreatePaymentReceiptProofDto,
@@ -202,6 +209,7 @@ export class ProofsController {
   @Throttle({ strict: {} })
   @Idempotent({ headerName: "idempotency-key", required: true })
   @Post("minimum-income")
+  @AuthenticatedRoute({ ownership: "user" })
   createMinimumIncomeProof(
     @CurrentUser() user: AuthenticatedUser,
     @Body() body: CreateMinimumIncomeProofDto,
@@ -244,6 +252,7 @@ export class ProofsController {
   @UseGuards(AuthGuard)
   @Idempotent({ headerName: "idempotency-key", required: true })
   @Post("recurring-income")
+  @AuthenticatedRoute({ ownership: "user" })
   createRecurringIncomeProof(
     @CurrentUser() user: AuthenticatedUser,
     @Body() body: CreateRecurringIncomeProofDto,
@@ -286,6 +295,7 @@ export class ProofsController {
   })
   @UseGuards(AuthGuard)
   @Patch(":id/revoke")
+  @AuthenticatedRoute({ ownership: "user" })
   revokeProof(@CurrentUser() user: AuthenticatedUser, @Param("id") id: string) {
     return this.proofsService.revokeProof(user.id, id);
   }
@@ -310,6 +320,9 @@ export class ProofsController {
   @SkipThrottle({ default: true, strict: true })
   @Throttle({ verification: {} })
   @Get(":id/verify")
+  @PublicRoute()
+  verifyProof(@Param("id") id: string) {
+    return this.proofsService.verifyProof(id);
   verifyProof(@Param("id") id: string, @Req() request: Request) {
     return this.proofsService.verifyProof(id, { ip: request.ip });
   }
@@ -343,6 +356,7 @@ export class ProofsController {
   })
   @UseGuards(AuthGuard)
   @Get(":id/verification-stats")
+  @AuthenticatedRoute({ ownership: "user" })
   getVerificationStats(
     @CurrentUser() user: AuthenticatedUser,
     @Param("id") id: string,
