@@ -4,8 +4,14 @@ import {
   ApiOperation,
   ApiResponse,
   ApiTags,
+  ApiParam,
 } from "@nestjs/swagger";
+import { Request } from "express";
 import { CurrentUser } from "../common/decorators/current-user.decorator";
+import {
+  AuthenticatedRoute,
+  PublicRoute,
+} from "../common/decorators/authorization-policy.decorator";
 import { ApiErrorDto } from "../common/dto/api-error.dto";
 import { AuthGuard } from "../common/guards/auth.guard";
 import { AuthenticatedSession } from "./auth.types";
@@ -20,6 +26,11 @@ import { VerifyResponseDto } from "./dto/verify-response.dto";
 import { SessionService } from "./session.service";
 import { RenameSessionDto } from "./dto/rename-session.dto";
 import { SessionInventoryItemDto } from "./dto/session-inventory.dto";
+import { SessionInventoryResponseDto, SessionInventoryItemDto } from "./dto/session-inventory.dto";
+import { RevokeSingleSessionResponseDto, RevokeAllOtherSessionsResponseDto } from "./dto/revoke-session.dto";
+import { RecentAuthService } from "./recent-auth.service";
+import { IssueAssertionDto } from "./dto/issue-assertion.dto";
+import { AssertionResponseDto } from "./dto/assertion-response.dto";
 
 @ApiTags("auth")
 @Controller("auth")
@@ -27,6 +38,7 @@ export class AuthController {
   constructor(
     private readonly authService: AuthService,
     private readonly sessionService: SessionService,
+    private readonly recentAuthService: RecentAuthService,
   ) {}
 
   @ApiOperation({
@@ -51,6 +63,7 @@ export class AuthController {
     type: ApiErrorDto,
   })
   @Post("challenge")
+  @PublicRoute()
   createChallenge(@Body() body: CreateChallengeDto) {
     return this.authService.createChallenge(body.walletAddress);
   }
@@ -88,6 +101,9 @@ export class AuthController {
     @Headers() headers?: Record<string, string | string[] | undefined>,
   ) {
     return this.authService.verifyChallenge(body, headers);
+  @PublicRoute()
+  verifyChallenge(@Body() body: VerifyChallengeDto) {
+    return this.authService.verifyChallenge(body);
   }
 
   @ApiOperation({
@@ -107,6 +123,7 @@ export class AuthController {
   })
   @UseGuards(AuthGuard)
   @Get("session")
+  @AuthenticatedRoute({ ownership: "user" })
   getSession(@CurrentUser() session: AuthenticatedSession) {
     return this.authService.getSession(session.id);
   }
@@ -160,6 +177,7 @@ export class AuthController {
   @UseGuards(AuthGuard)
   @HttpCode(HttpStatus.OK)
   @Post("logout")
+  @AuthenticatedRoute({ ownership: "user" })
   async logout(@CurrentUser() session: AuthenticatedSession) {
     await this.authService.logout(session.sessionId);
     return { status: "ok" };
@@ -188,6 +206,8 @@ export class AuthController {
     @CurrentUser() session: AuthenticatedSession,
     @Headers() headers?: Record<string, string | string[] | undefined>,
   ) {
+  @AuthenticatedRoute({ ownership: "user" })
+  async rotate(@CurrentUser() session: AuthenticatedSession) {
     const { token, sessionId, expiresAt } = await this.sessionService.rotate(
       session.sessionId,
       session,
@@ -196,5 +216,176 @@ export class AuthController {
     );
 
     return { token, tokenType: "Bearer", sessionId, expiresAt };
+  }
+
+  @ApiOperation({
+    summary: "List active sessions for the current user",
+    description:
+      "Returns a list of all active sessions with non-sensitive metadata. " +
+      "Token hashes and full device fingerprints are never returned.",
+  })
+  @ApiBearerAuth()
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: "Active sessions retrieved successfully.",
+    type: SessionInventoryResponseDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.UNAUTHORIZED,
+    description: "Bearer token is missing, malformed, invalid, expired, or revoked.",
+    type: ApiErrorDto,
+  })
+  @UseGuards(AuthGuard)
+  @Get("sessions")
+  async getSessions(@CurrentUser() session: AuthenticatedSession) {
+    const sessions = await this.sessionService.getSessions(session.id);
+    
+    const sessionsData = sessions.map((s) => ({
+      id: s.id,
+      deviceFingerprint: s.deviceFingerprint,
+      createdAt: s.createdAt.toISOString(),
+      expiresAt: s.expiresAt.toISOString(),
+      lastUsedAt: s.lastUsedAt?.toISOString() || null,
+      isCurrent: s.id === session.sessionId,
+    }));
+
+    return {
+      sessions: sessionsData,
+      total: sessionsData.length,
+    };
+  }
+
+  @ApiOperation({
+    summary: "Revoke a specific other session",
+    description:
+      "Revokes a single session by its ID. " +
+      "The current session cannot be revoked via this endpoint — use POST /auth/logout instead. " +
+      "Remote revocation takes effect on the next authenticated request.",
+  })
+  @ApiParam({
+    name: "sessionId",
+    description: "The session ID to revoke (not the token itself).",
+    example: "clx1abc2def3ghi4",
+  })
+  @ApiBearerAuth()
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: "Session revoked successfully.",
+    type: RevokeSingleSessionResponseDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.UNAUTHORIZED,
+    description:
+      "Bearer token is invalid, or the session does not belong to the authenticated user, " +
+      "or is already revoked.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.NOT_FOUND,
+    description: "The specified session ID does not exist.",
+    type: ApiErrorDto,
+  })
+  @UseGuards(AuthGuard)
+  @HttpCode(HttpStatus.OK)
+  @Post("sessions/:sessionId/revoke")
+  async revokeSingleSession(
+    @Param("sessionId") sessionId: string,
+    @CurrentUser() session: AuthenticatedSession,
+  ) {
+    if (sessionId === session.sessionId) {
+      throw new ForbiddenException(
+        "Cannot revoke the current session via this endpoint. Use POST /auth/logout instead.",
+      );
+    }
+
+    try {
+      const revokedSessionId = await this.sessionService.revokeOtherSession(
+        sessionId,
+        session.id,
+      );
+
+      return {
+        status: "ok",
+        revokedSessionId,
+      };
+    } catch (error) {
+      if (error instanceof Error && error.message === "Session not found") {
+        throw new NotFoundException("Session not found");
+      }
+      throw error;
+    }
+  }
+
+  @ApiOperation({
+    summary: "Revoke all other sessions",
+    description:
+      "Revokes all active sessions except the current one (the one making this request). " +
+      "Useful for responding to suspected device loss or compromise. " +
+      "Remote revocation takes effect on the next authenticated request.",
+  })
+  @ApiBearerAuth()
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: "All other sessions revoked successfully.",
+    type: RevokeAllOtherSessionsResponseDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.UNAUTHORIZED,
+    description: "Bearer token is invalid or expired.",
+    type: ApiErrorDto,
+  })
+  @UseGuards(AuthGuard)
+  @HttpCode(HttpStatus.OK)
+  @Post("sessions/revoke-all-other")
+  async revokeAllOtherSessions(@CurrentUser() session: AuthenticatedSession) {
+    const revokedCount = await this.sessionService.revokeAllOtherSessions(
+      session.id,
+      session.sessionId,
+    );
+
+    return {
+      status: "ok",
+      revokedCount,
+    };
+  }
+}
+    summary: "Issue a recent-auth assertion",
+    description:
+      "Issues a short-lived (5 minute), single-use assertion token that proves the " +
+      "caller completed wallet re-verification for the specified destructive action. " +
+      "Present the returned token in the `X-Recent-Auth` header when calling the " +
+      "destructive endpoint. Requires an active session (AuthGuard).",
+  })
+  @ApiResponse({
+    status: HttpStatus.CREATED,
+    description: "Assertion issued.",
+    type: AssertionResponseDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.UNAUTHORIZED,
+    description: "Bearer token is missing, malformed, invalid, or expired.",
+  })
+  @ApiBearerAuth()
+  @UseGuards(AuthGuard)
+  @Post("assert")
+  async issueAssertion(
+    @CurrentUser() session: AuthenticatedSession,
+    @Body() body: IssueAssertionDto,
+    @Req() req: Request,
+  ): Promise<AssertionResponseDto> {
+    const origin = String(req.headers["origin"] ?? "null");
+    const resourceId = body.resourceId ?? "*";
+    const { token, expiresAt } = await this.recentAuthService.issue(
+      session.id,
+      body.action,
+      resourceId,
+      origin,
+    );
+    return {
+      token,
+      expiresAt: expiresAt.toISOString(),
+      action: body.action,
+      resourceId,
+    };
   }
 }

@@ -119,8 +119,8 @@ describe("Auth challenge replay and race-condition tests", () => {
             .mockResolvedValueOnce({ count: 0 }), // Second call fails (already used)
           findUnique: jest
             .fn()
-            .mockResolvedValueOnce({ message, walletAddress: walletAddressA })
-            .mockResolvedValueOnce({ message, walletAddress: walletAddressA }),
+            .mockResolvedValueOnce({ message, walletAddress: walletAddressA, networkPassphrase: "Test SDF Network ; September 2015", origin: "http://localhost:3000" })
+            .mockResolvedValueOnce({ message, walletAddress: walletAddressA, networkPassphrase: "Test SDF Network ; September 2015", origin: "http://localhost:3000" }),
         },
         user: {
           upsert: jest.fn().mockResolvedValue({
@@ -177,7 +177,7 @@ describe("Auth challenge replay and race-condition tests", () => {
             .mockResolvedValueOnce({ count: 0 }), // 5th loses
           findUnique: jest
             .fn()
-            .mockResolvedValue({ message, walletAddress: walletAddressA }),
+            .mockResolvedValue({ message, walletAddress: walletAddressA, networkPassphrase: "Test SDF Network ; September 2015", origin: "http://localhost:3000" }),
         },
         user: {
           upsert: jest.fn().mockResolvedValue({
@@ -254,7 +254,7 @@ describe("Auth challenge replay and race-condition tests", () => {
             .mockResolvedValueOnce({ count: 0 }), // Second loses
           findUnique: jest
             .fn()
-            .mockResolvedValue({ message, walletAddress: walletAddressA }),
+            .mockResolvedValue({ message, walletAddress: walletAddressA, networkPassphrase: "Test SDF Network ; September 2015", origin: "http://localhost:3000" }),
         },
         user: {
           upsert: jest.fn().mockResolvedValue({
@@ -302,9 +302,7 @@ describe("Auth challenge replay and race-condition tests", () => {
 
       mockPrisma = {
         walletChallenge: {
-          updateMany: jest
-            .fn()
-            .mockResolvedValue({ count: 0 }), // No challenge found (expired)
+          updateMany: jest.fn().mockResolvedValue({ count: 0 }), // No challenge found (expired)
         },
         user: {
           upsert: jest.fn(),
@@ -335,6 +333,8 @@ describe("Auth challenge replay and race-condition tests", () => {
           findUnique: jest.fn().mockResolvedValue({
             message,
             walletAddress: walletAddressA,
+            networkPassphrase: "Test SDF Network ; September 2015",
+            origin: "http://localhost:3000",
           }),
         },
         user: {
@@ -434,6 +434,8 @@ describe("Auth challenge replay and race-condition tests", () => {
           findUnique: jest.fn().mockResolvedValue({
             message,
             walletAddress: walletAddressA,
+            networkPassphrase: "Test SDF Network ; September 2015",
+            origin: "http://localhost:3000",
           }),
         },
         user: {
@@ -469,6 +471,8 @@ describe("Auth challenge replay and race-condition tests", () => {
           findUnique: jest.fn().mockResolvedValue({
             message,
             walletAddress: walletAddressA,
+            networkPassphrase: "Test SDF Network ; September 2015",
+            origin: "http://localhost:3000",
           }),
         },
         user: {
@@ -505,6 +509,8 @@ describe("Auth challenge replay and race-condition tests", () => {
           findUnique: jest.fn().mockResolvedValue({
             message: messageB, // Challenge B has a different message
             walletAddress: walletAddressA,
+            networkPassphrase: "Test SDF Network ; September 2015",
+            origin: "http://localhost:3000",
           }),
         },
         user: {
@@ -622,6 +628,8 @@ describe("Auth challenge replay and race-condition tests", () => {
           findUnique: jest.fn().mockResolvedValue({
             message,
             walletAddress: walletAddressA,
+            networkPassphrase: "Test SDF Network ; September 2015",
+            origin: "http://localhost:3000",
           }),
         },
         user: {
@@ -740,3 +748,6 @@ describe("Auth challenge replay and race-condition tests", () => {
     });
   });
 });
+
+
+
