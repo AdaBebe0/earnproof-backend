@@ -1,7 +1,8 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { Injectable } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { VerificationOutcome } from "@prisma/client";
 import { createHmac } from "crypto";
+import { StructuredLogger } from "../common/logger";
 import { PrismaService } from "../database/prisma.service";
 
 /**
@@ -30,7 +31,7 @@ import { PrismaService } from "../database/prisma.service";
  */
 @Injectable()
 export class VerificationEventService {
-  private readonly logger = new Logger(VerificationEventService.name);
+  private readonly logger = new StructuredLogger(VerificationEventService.name);
   private readonly retentionDays: number;
   private readonly currentSaltVersion: number;
   private readonly salts: Map<number, string>;
@@ -75,25 +76,23 @@ export class VerificationEventService {
     }
 
     if (this.salts.size === 0) {
-      this.logger.warn(
-        "No verification hash salts configured. Using default temporary salt.",
-      );
+      this.logger.warn("No verification hash salts configured. Using default temporary salt.");
       // Fallback: create a temporary salt from env
       const fallbackSalt = configService.get<string>("credentialSigningSecret");
       if (fallbackSalt) {
         this.salts.set(0, fallbackSalt);
         this.logger.warn(
-          "Using credentialSigningSecret as fallback salt V0. Configure VERIFICATION_HASH_SALT_V* for production.",
+          "Using credentialSigningSecret as fallback salt V0",
+          { context: "Configure VERIFICATION_HASH_SALT_V* for production" }
         );
       }
     }
 
     if (!this.salts.has(this.currentSaltVersion)) {
-      this.logger.warn(
-        `Configured salt version ${this.currentSaltVersion} is not available. ` +
-          `Available versions: 0-${this.salts.size - 1}. ` +
-          `Adjust VERIFICATION_HASH_SALT_VERSION or configure VERIFICATION_HASH_SALT_V${this.currentSaltVersion}.`,
-      );
+      this.logger.warn("Configured salt version is not available", {
+        configuredVersion: this.currentSaltVersion,
+        availableVersions: this.salts.size - 1,
+      });
     }
   }
 
@@ -135,11 +134,10 @@ export class VerificationEventService {
       });
     } catch (error) {
       // Fail-open: log but do not throw
-      this.logger.warn(
-        `Failed to record verification event for proof ${proofId}: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
+      this.logger.warn("Failed to record verification event", {
+        proofId,
+        errorMessage: error instanceof Error ? error.message : String(error),
+      });
     }
   }
 
@@ -235,17 +233,16 @@ export class VerificationEventService {
         },
       });
 
-      this.logger.log(
-        `Verification event cleanup: deleted ${result.count} records (timestamp: ${now.toISOString()})`,
-      );
+      this.logger.log("Verification event cleanup completed", {
+        count: result.count,
+        timestamp: now.toISOString(),
+      });
 
       return result.count;
     } catch (error) {
-      this.logger.error(
-        `Verification event cleanup failed: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
+      this.logger.error("Verification event cleanup failed", error, {
+        errorMessage: error instanceof Error ? error.message : String(error),
+      });
       return 0;
     }
   }
@@ -300,11 +297,7 @@ export class VerificationEventService {
 
       return stats as Record<VerificationOutcome, number>;
     } catch (error) {
-      this.logger.error(
-        `Failed to get verification stats for proof ${proofId}: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
+      this.logger.error("Failed to get verification stats", error, { proofId });
       // Return empty stats on error
       const empty: Record<string, number> = {};
       for (const outcome of Object.values(VerificationOutcome)) {

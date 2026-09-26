@@ -18,6 +18,7 @@ import {
 } from "@nestjs/swagger";
 import { SkipThrottle, Throttle } from "@nestjs/throttler";
 import { CurrentUser } from "../common/decorators/current-user.decorator";
+import { Idempotent } from "../common/decorators/idempotent.decorator";
 import { ApiErrorDto } from "../common/dto/api-error.dto";
 import { AuthGuard } from "../common/guards/auth.guard";
 import { AuthenticatedUser } from "../auth/auth.types";
@@ -57,8 +58,19 @@ export class PaymentsController {
     description: "Stellar Horizon or the database is temporarily unreachable.",
     type: ApiErrorDto,
   })
+  @ApiResponse({
+    status: HttpStatus.CONFLICT,
+    description: "Idempotency key was used with a different request payload.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.REQUEST_TIMEOUT,
+    description: "Previous idempotent request is still being processed.",
+    type: ApiErrorDto,
+  })
   @SkipThrottle({ default: true, verification: true })
   @Throttle({ strict: {} })
+  @Idempotent({ headerName: "idempotency-key", required: true })
   @Post("sync")
   syncPayments(@CurrentUser() user: AuthenticatedUser): Promise<SyncResultDto> {
     return this.paymentsService.syncPayments(user);

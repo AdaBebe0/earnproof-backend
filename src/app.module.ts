@@ -6,12 +6,14 @@ import { AuditModule } from "./audit/audit.module";
 import { ApiKeysModule } from "./api-keys/api-keys.module";
 import { AuthModule } from "./auth/auth.module";
 import { RateLimitModule } from "./common/rate-limit/rate-limit.module";
+import { CommonModule } from "./common/common.module";
 import { configuration } from "./config/configuration";
 import { validateEnv } from "./config/env.validation";
 import { CredentialsModule } from "./credentials/credentials.module";
 import { DatabaseModule } from "./database/database.module";
 import { HealthModule } from "./health/health.module";
 import { HttpMetricsInterceptor } from "./common/interceptors/http-metrics.interceptor";
+import { IdempotentInterceptor } from "./common/interceptors/idempotent.interceptor";
 import { ObservabilityModule } from "./common/observability/observability.module";
 import { JobsModule } from "./jobs/jobs.module";
 import { IssuersModule } from "./issuers/issuers.module";
@@ -31,6 +33,7 @@ import { WebhooksModule } from "./webhooks/webhooks.module";
     ScheduleModule.forRoot(),
     ObservabilityModule,
     DatabaseModule,
+    CommonModule,
     AuditModule,
     ApiKeysModule,
     AuthModule,
@@ -49,6 +52,10 @@ import { WebhooksModule } from "./webhooks/webhooks.module";
     {
       provide: APP_INTERCEPTOR,
       useClass: HttpMetricsInterceptor,
+    },
+    {
+      provide: APP_INTERCEPTOR,
+      useClass: IdempotentInterceptor,
     },
   ],
 })

@@ -1,4 +1,6 @@
-import { Injectable, Logger } from "@nestjs/common";
+﻿import { Injectable, Logger } from "@nestjs/common";
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+import { ContractDriftService } from "./contract-drift.service";
 import { ConfigService } from "@nestjs/config";
 import { PrismaService } from "../database/prisma.service";
 import {
@@ -60,6 +62,7 @@ export class HealthService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
+    private readonly contractDrift: ContractDriftService,
   ) {}
 
   /**
