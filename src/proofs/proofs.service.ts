@@ -28,7 +28,12 @@ import { sha256 } from "../common/crypto/hash";
 import { PaymentEncryptionKeyringService } from "../common/crypto/payment-encryption-keyring.service";
 import { ApiErrorCode } from "../common/dto/api-error.dto";
 import { PrismaService } from "../database/prisma.service";
+import { AttestationsService } from "../attestations/attestations.service";
 import { WebhookDeliveryService } from "../webhooks/webhook-delivery.service";
+import {
+  ProofVerificationAbuseService,
+  VerificationClientContext,
+} from "../common/rate-limit/proof-verification-abuse.service";
 import { ContractAnchoringService } from "./contract-anchoring.service";
 import { CreateMinimumIncomeProofDto } from "./dto/create-minimum-income-proof.dto";
 import { CreatePaymentReceiptProofDto } from "./dto/create-payment-receipt-proof.dto";
@@ -128,12 +133,14 @@ export class ProofsService {
     private readonly prisma: PrismaService,
     configService: ConfigService,
     private readonly verificationEventService: VerificationEventService,
+    private readonly attestationsService: AttestationsService,
     @Optional()
     private readonly contractAnchoringService?: ContractAnchoringService,
     @Optional()
     private readonly webhookDeliveryService?: WebhookDeliveryService,
     @Optional()
     private readonly credentialVerificationKeyService?: CredentialVerificationKeyService,
+    private readonly verificationAbuseService?: ProofVerificationAbuseService,
   ) {
     this.signingSecret = configService.getOrThrow<string>(
       "credentialSigningSecret",
@@ -761,7 +768,11 @@ export class ProofsService {
     };
   }
 
-  async verifyProof(proofId: string) {
+  async verifyProof(
+    proofId: string,
+    clientContext?: VerificationClientContext,
+  ) {
+    this.verificationAbuseService?.checkClientCardinality(clientContext, proofId);
     const proof = await this.prisma.proof.findUnique({
       where: {
         id: proofId,
@@ -776,20 +787,15 @@ export class ProofsService {
       },
     });
 
-    if (!proof || !proof.claim) {
-      // Fail-open policy: record event asynchronously
-      // If event recording fails, the verification response is still returned.
-      // This ensures verification availability over audit completeness.
-      this.verificationEventService
-        .recordEvent(VerificationOutcome.UNKNOWN, proofId, {
-          outcome: "UNKNOWN",
-          timestamp: new Date(),
-        })
-        .catch(() => {
-          // Error already logged by the service
-          // Verification continues unblocked
-        });
+    this.verificationAbuseService?.checkVerification(
+      clientContext,
+      proofId,
+      Boolean(proof?.claim),
+    );
 
+    if (!proof || !proof.claim) {
+      // Unknown probes deliberately do not create audit rows: the identifier
+      // is untrusted and could otherwise create an unbounded data sink.
       return {
         result: VerificationResult.UNKNOWN_PROOF,
         status: "unknown",
@@ -881,22 +887,27 @@ export class ProofsService {
     // If event recording fails, the verification response is still returned.
     // This ensures verification availability over audit completeness.
     // Event recording errors are caught and logged by the service.
-    this.verificationEventService
-      .recordEvent(outcome, proof.id, {
-        outcome: outcome,
-        timestamp: new Date(),
-      })
-      .catch(() => {
-        // Error already logged by the service
-        // Verification continues unblocked
-      });
+    const verificationEventService = this.verificationEventService as VerificationEventService & {
+      tryConsumePrivacyBudget?: (proofId: string) => boolean;
+    };
+    if (verificationEventService.tryConsumePrivacyBudget?.(proof.id) ?? true) {
+      this.verificationEventService
+        .recordEvent(outcome, proof.id, {
+          outcome: outcome,
+          timestamp: new Date(),
+        })
+        .catch(() => {
+          // Error already logged by the service
+          // Verification continues unblocked
+        });
 
-    await this.prisma.verificationEvent.create({
-      data: {
-        proofId: proof.id,
-        result,
-      },
-    });
+      await this.prisma.verificationEvent.create({
+        data: {
+          proofId: proof.id,
+          result,
+        },
+      });
+    }
 
     this.emitWebhook(proof.userId, "proof.verified", {
       proofId: proof.id,
@@ -1436,5 +1447,50 @@ export class ProofsService {
         checked: false,
       };
     }
+  }
+
+  /**
+   * Validate that all active attestations for a subject wallet are still valid
+   * (not expired, not revoked) for proof issuance.
+   *
+   * This is called during proof creation to ensure attestation lifecycle requirements
+   * are met before issuing credentials.
+   *
+   * @param subjectWalletHash Subject wallet hash
+   * @returns true if all attestations are valid or no attestations exist
+   */
+  async validateSubjectAttestations(subjectWalletHash: string): Promise<boolean> {
+    const attestations = await this.attestationsService.getValidAttestationsForSubject(
+      subjectWalletHash,
+    );
+
+    // If no attestations exist, validation passes
+    if (attestations.length === 0) {
+      return true;
+    }
+
+    // All attestations must be valid (checked via getValidAttestationsForSubject)
+    // which already filters for active status and non-expired/non-revoked states
+    return attestations.length > 0;
+  }
+
+  /**
+   * Check if an issuer's attestations for a subject are still valid.
+   *
+   * Used to gate proof issuance on issuer attestation status.
+   *
+   * @param issuerId Issuer ID
+   * @param subjectWalletHash Subject wallet hash
+   * @returns true if issuer has at least one valid attestation for subject
+   */
+  async hasValidAttestationsFromIssuer(
+    issuerId: string,
+    subjectWalletHash: string,
+  ): Promise<boolean> {
+    const attestations = await this.attestationsService.getValidAttestationsForSubject(
+      subjectWalletHash,
+      issuerId,
+    );
+    return attestations.length > 0;
   }
 }

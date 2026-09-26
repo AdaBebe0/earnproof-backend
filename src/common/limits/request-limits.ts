@@ -149,4 +149,9 @@ export const FIELD_LIMITS = {
   /** Free-form metadata objects, by serialised size and nesting depth. */
   metadataBytes: 8 * KB,
   metadataDepth: 5,
+  /** SHA256 hashes (sha256:hex...) */
+  hash: 100,
+  /** Signed credential payloads for attestations */
+  credentialBytes: 32 * KB,
+  credentialDepth: 5,
 } as const;
