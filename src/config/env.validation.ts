@@ -260,6 +260,16 @@ const envSchema = z.object({
 
   /** Credential signature verification secret (minimum 8 chars, non-empty) */
   CREDENTIAL_SIGNING_SECRET: secret(8),
+  CREDENTIAL_SIGNING_SECRET_PREVIOUS: optionalString(secret(8)),
+  CREDENTIAL_SIGNING_KEY_ID: optionalString(
+    z.string().regex(/^[A-Za-z0-9._-]{1,100}$/),
+  ),
+  CREDENTIAL_SIGNING_PREVIOUS_KEY_ID: optionalString(
+    z.string().regex(/^[A-Za-z0-9._-]{1,100}$/),
+  ),
+  CREDENTIAL_SIGNING_KEY_OVERLAP_DAYS: retentionDays(
+    "CREDENTIAL_SIGNING_KEY_OVERLAP_DAYS",
+  ).default(30),
 
   /** Payment encryption key (32 bytes as hex or base64) */
   PAYMENT_ENCRYPTION_KEY: encryptionKey,

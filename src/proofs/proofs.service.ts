@@ -23,6 +23,7 @@ import { createHmac, randomUUID } from "crypto";
 import { VerificationEventService } from "../audit/verification-event.service";
 import { AuthenticatedUser } from "../auth/auth.types";
 import { canonicalize } from "../common/crypto/canonicalize";
+import { CredentialVerificationKeyService } from "../common/crypto/credential-verification-key.service";
 import { sha256 } from "../common/crypto/hash";
 import { PaymentEncryptionKeyringService } from "../common/crypto/payment-encryption-keyring.service";
 import { ApiErrorCode } from "../common/dto/api-error.dto";
@@ -138,6 +139,7 @@ export class ProofsService {
     @Optional()
     private readonly webhookDeliveryService?: WebhookDeliveryService,
     @Optional()
+    private readonly credentialVerificationKeyService?: CredentialVerificationKeyService,
     private readonly verificationAbuseService?: ProofVerificationAbuseService,
   ) {
     this.signingSecret = configService.getOrThrow<string>(
@@ -1196,6 +1198,13 @@ export class ProofsService {
   }
 
   private signCredential<T extends EarnProofCredential>(credential: T) {
+    if (this.credentialVerificationKeyService) {
+      return {
+        ...credential,
+        proof: this.credentialVerificationKeyService.signCredential(credential),
+      };
+    }
+
     const canonicalPayload = canonicalize(credential);
     return {
       ...credential,
