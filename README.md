@@ -2,7 +2,7 @@
 
 EarnProof is an open-source, privacy-focused income and payment verification protocol built on Stellar.
 
-This repository contains the NestJS API for wallet authentication, Stellar payment indexing, payment classification, minimum-income proof issuance, public proof verification, proof revocation, optional contract anchoring, and operational health. Issuer management, webhooks, API keys, and audit-log expansion are planned but not yet wired into the application.
+This repository contains the NestJS API for wallet authentication, Stellar payment indexing, payment classification, minimum-income proof issuance, public proof verification, proof revocation, optional contract anchoring, and operational health. Issuer management, webhooks, API keys, and audit-log expansion are implemented. API keys are ready for production machine-to-machine integrations.
 
 ## Product Role
 
