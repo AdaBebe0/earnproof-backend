@@ -112,6 +112,8 @@ enum OrganizationMemberRole {
   ADMIN
   MEMBER
   VIEWER
+}
+
 enum IdempotencyStatus {
   PENDING
   COMPLETED
@@ -133,7 +135,7 @@ model User {
   proofs             Proof[]
   createdApiKeys     ApiKey[]
   sessions           AuthSession[]
-  organizationMemberships OrganizationMember[]
+  organizationMemberships OrganizationMember[] @relation("organizationMemberships")
 
   @@index([walletHash])
   @@index([status])
@@ -219,6 +221,8 @@ model OrganizationMember {
   @@index([organizationId])
   @@index([userId])
   @@index([status])
+}
+
 /// Stores idempotency records to prevent duplicate mutations within an organization.
 /// Indexed by (organizationId, idempotencyKey) to enforce uniqueness and enable O(1) lookup.
 /// The requestFingerprint is checked on incoming requests; if the key exists but fingerprint
@@ -356,6 +360,7 @@ model Proof {
   @@index([userId, createdAt, id])
   @@index([proofType])
   @@index([expiresAt])
+  @@index([status, expiresAt])
 }
 
 model ProofClaim {
@@ -602,6 +607,8 @@ model RequestNonce {
   createdAt    DateTime @default(now())
 
   @@index([apiKeyId, expiresAt])
+}
+
 /// Acknowledgement for an expected / planned contract configuration drift.
 /// Allows operators to suppress blocking drift during upgrades for a bounded window.
 model ContractDriftAcknowledgement {
@@ -617,6 +624,8 @@ model ContractDriftAcknowledgement {
   createdAt   DateTime @default(now())
 
   @@index([driftKey, expiresAt])
+}
+
 /// Short-lived, action-bound assertion issued after wallet re-verification.
 /// Consumed (single-use) when the destructive operation succeeds.
 /// Bound to: userId, action, resourceId (or "*"), origin, network.
