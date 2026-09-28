@@ -327,6 +327,8 @@ export class RetentionCleanupService {
       audit_logs: this.prisma.auditLog as unknown as PrismaDelegate,
       failed_anchoring_intents: this.prisma
         .anchoringIntent as unknown as PrismaDelegate,
+      idempotency_records: this.prisma
+        .idempotencyRecord as unknown as PrismaDelegate,
     };
 
     const delegate = delegates[entry.key];

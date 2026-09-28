@@ -179,4 +179,9 @@ export const FIELD_LIMITS = {
    * constrains abuse, not real requests.
    */
   batchCredentialsBytes: 36 * KB,
+  /** SHA256 hashes (sha256:hex...) */
+  hash: 100,
+  /** Signed credential payloads for attestations */
+  credentialBytes: 32 * KB,
+  credentialDepth: 5,
 } as const;

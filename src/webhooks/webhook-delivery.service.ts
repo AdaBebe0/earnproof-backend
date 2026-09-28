@@ -1,7 +1,6 @@
 import {
   BadRequestException,
   Injectable,
-  Logger,
   NotFoundException,
   OnModuleInit,
 } from "@nestjs/common";
@@ -9,6 +8,7 @@ import { ConfigService } from "@nestjs/config";
 import { Prisma, WebhookDeliveryStatus } from "@prisma/client";
 import { randomUUID } from "crypto";
 import { PaymentEncryptionKeyringService } from "../common/crypto/payment-encryption-keyring.service";
+import { StructuredLogger } from "../common/logger";
 import { PrismaService } from "../database/prisma.service";
 import { WebhookEnvelope, WebhookEventType } from "./webhook-event.types";
 import { WebhookSigningService } from "./webhook-signing.service";
@@ -50,7 +50,7 @@ type WebhookChain = { tail: Promise<void> };
 
 @Injectable()
 export class WebhookDeliveryService implements OnModuleInit {
-  private readonly logger = new Logger(WebhookDeliveryService.name);
+  private readonly logger = new StructuredLogger(WebhookDeliveryService.name);
   private readonly paymentEncryptionKeyring: PaymentEncryptionKeyringService;
 
   /**
