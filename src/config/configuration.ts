@@ -151,3 +151,15 @@ export const configuration = () => ({
     process.env.VERIFICATION_METADATA_BUDGET_WINDOW_MS ?? 86400000,
   ),
 });
+
+apiDeprecation: {
+  allowedDocumentationOrigins: (
+    process.env.API_DEPRECATION_ALLOWED_DOCUMENTATION_ORIGINS ??
+    ""
+  )
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean),
+
+  routes: [],
+},
