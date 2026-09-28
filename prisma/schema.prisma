@@ -118,6 +118,51 @@ enum IdempotencyStatus {
   FAILED
 }
 
+model ApiKey {
+  id           String   @id @default(uuid())
+  key          String   @unique
+  name         String
+  organization String
+  allowlistCidrs String[] @default([])
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+model SecurityNotificationPreference {
+  id             String   @id @default(uuid())
+  userId         String?
+  organizationId String?
+  category       String
+  enabled        Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([userId, organizationId, category])
+}
+
+model SecurityNotificationOutbox {
+  id             String   @id @default(uuid())
+  eventId        String
+  category       String
+  mandatory      Boolean  @default(false)
+  payload        Json
+  status         String   @default("PENDING") // PENDING, DELIVERED, FAILED
+  attempts       Int      @default(0)
+  nextAttemptAt  DateTime @default(now())
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+}
+
+model WebhookEndpoint {
+  id                 String   @id @default(uuid())
+  url                String
+  secret             String
+  concurrencyLimit   Int      @default(5)
+  isPartitionOrdered Boolean  @default(true)
+  enabled            Boolean  @default(true)
+  createdAt          DateTime @default(now())
+}
+
 model User {
   id                 String          @id @default(cuid())
   walletAddress      String          @unique
