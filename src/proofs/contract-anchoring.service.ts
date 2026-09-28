@@ -4,13 +4,7 @@ import { execFile } from "child_process";
 import { promisify } from "util";
 import { sha256 } from "../common/crypto/hash";
 import { redact } from "../common/observability/redaction";
-import { CircuitBreakerRegistry } from "../common/resilience/circuit-breaker.registry";
-import {
-  CircuitBreaker,
-  CircuitOpenError,
-  CircuitState,
-} from "../common/resilience/circuit-breaker";
-import { classifyContractError } from "./contract-error";
+import { StructuredLogger } from "../common/logger";
 
 const execFileAsync = promisify(execFile);
 
@@ -57,7 +51,7 @@ export type ContractProofStatus =
 
 @Injectable()
 export class ContractAnchoringService {
-  private readonly logger = new Logger(ContractAnchoringService.name);
+  private readonly logger = new StructuredLogger(ContractAnchoringService.name);
   private readonly enabled: boolean;
   private readonly required: boolean;
   private readonly stellarCliPath: string;

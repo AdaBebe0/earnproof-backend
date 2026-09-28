@@ -1,4 +1,6 @@
-import { Injectable, Logger, Optional } from "@nestjs/common";
+﻿import { Injectable, Logger } from "@nestjs/common";
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+import { ContractDriftService } from "./contract-drift.service";
 import { ConfigService } from "@nestjs/config";
 import { PrismaService } from "../database/prisma.service";
 import { CircuitBreakerRegistry } from "../common/resilience/circuit-breaker.registry";
@@ -67,6 +69,7 @@ export class HealthService {
      * surfaced in diagnostics.
      */
     @Optional() private readonly circuits?: CircuitBreakerRegistry,
+    private readonly contractDrift: ContractDriftService,
   ) {}
 
   /**

@@ -15,6 +15,8 @@ import {
   ExportDownloadController,
   OrganizationExportsController,
 } from "./exports/organization-exports.controller";
+import { OrganizationMembersService } from "./organization-members.service";
+import { OrganizationMemberGuard } from "./guards/organization-member.guard";
 
 /**
  * JobsModule is imported so the export worker can record its runs in the shared
@@ -23,25 +25,9 @@ import {
  * in an in-memory implementation against the same token.
  */
 @Module({
-  imports: [DatabaseModule, AuthModule, JobsModule],
-  controllers: [
-    OrganizationsController,
-    OrganizationExportsController,
-    ExportDownloadController,
-  ],
-  providers: [
-    OrganizationsService,
-    OrganizationExportService,
-    OrganizationExportWorkerService,
-    {
-      provide: EXPORT_ARTIFACT_STORE,
-      useFactory: (config: ConfigService) =>
-        new FsExportArtifactStore(
-          config.get<string>("organizations.export.tempDir"),
-        ),
-      inject: [ConfigService],
-    },
-  ],
-  exports: [OrganizationsService],
+  imports: [DatabaseModule, AuthModule],
+  controllers: [OrganizationsController],
+  providers: [OrganizationsService, OrganizationMembersService, OrganizationMemberGuard],
+  exports: [OrganizationsService, OrganizationMembersService],
 })
 export class OrganizationsModule {}
