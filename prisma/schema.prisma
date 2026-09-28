@@ -112,10 +112,43 @@ enum OrganizationMemberRole {
   ADMIN
   MEMBER
   VIEWER
+}
+
 enum IdempotencyStatus {
   PENDING
   COMPLETED
   FAILED
+}
+
+enum SharingOutcome {
+  ACCEPTED
+  REJECTED
+  EXPIRED
+  REVOKED
+  REPLAYED
+  TOKEN_GENERATED
+  EXPIRED_TOKEN
+  INVALID_TOKEN
+  PROOF_NOT_FOUND
+  PROOF_INACTIVE
+  SUCCESS
+  ERROR
+}
+
+enum PolicyType {
+  PRIVACY_POLICY
+  TERMS_OF_SERVICE
+}
+
+enum PolicyStatus {
+  DRAFT
+  PUBLISHED
+  SUPERSEDED
+}
+
+enum ConsentAction {
+  ACCEPT
+  WITHDRAW
 }
 
 model User {
@@ -133,7 +166,8 @@ model User {
   proofs             Proof[]
   createdApiKeys     ApiKey[]
   sessions           AuthSession[]
-  organizationMemberships OrganizationMember[]
+  organizationMemberships OrganizationMember[] @relation("organizationMemberships")
+  consentRecords     ConsentRecord[]
 
   @@index([walletHash])
   @@index([status])
@@ -199,6 +233,9 @@ model Organization {
   webhooks    Webhook[]
   members     OrganizationMember[]
   idempotencyRecords IdempotencyRecord[]
+  proofSharingEvents ProofSharingEvent[]
+  consentRecords     ConsentRecord[]
+  disclosureReceipts DisclosureReceipt[]
 
   @@index([status])
 }
@@ -219,6 +256,8 @@ model OrganizationMember {
   @@index([organizationId])
   @@index([userId])
   @@index([status])
+}
+
 /// Stores idempotency records to prevent duplicate mutations within an organization.
 /// Indexed by (organizationId, idempotencyKey) to enforce uniqueness and enable O(1) lookup.
 /// The requestFingerprint is checked on incoming requests; if the key exists but fingerprint
@@ -351,6 +390,8 @@ model Proof {
   claim                   ProofClaim?
   verificationEvents      VerificationEvent[]
   anchoringIntents        AnchoringIntent[]
+  sharingEvents           ProofSharingEvent[]
+  disclosureReceipts      DisclosureReceipt[]
 
   @@index([userId, status])
   @@index([userId, createdAt, id])
@@ -432,6 +473,7 @@ model ApiKey {
   prefix         String          @db.VarChar(8)
   keyHash        String          @unique
   scopeAssignments ApiKeyScopeAssignment[] @relation("apiKeyScopeAssignments")
+  quotas         ApiKeyQuota[]
   status         ResourceStatus  @default(ACTIVE)
   lastUsedAt     DateTime?
   rotatedAt      DateTime?
@@ -602,6 +644,8 @@ model RequestNonce {
   createdAt    DateTime @default(now())
 
   @@index([apiKeyId, expiresAt])
+}
+
 /// Acknowledgement for an expected / planned contract configuration drift.
 /// Allows operators to suppress blocking drift during upgrades for a bounded window.
 model ContractDriftAcknowledgement {
@@ -617,6 +661,8 @@ model ContractDriftAcknowledgement {
   createdAt   DateTime @default(now())
 
   @@index([driftKey, expiresAt])
+}
+
 /// Short-lived, action-bound assertion issued after wallet re-verification.
 /// Consumed (single-use) when the destructive operation succeeds.
 /// Bound to: userId, action, resourceId (or "*"), origin, network.
@@ -640,5 +686,113 @@ model RecentAuthAssertion {
   createdAt     DateTime @default(now())
 
   @@index([userId, action, usedAt])
+  @@index([expiresAt])
+}
+
+/// API key quota configuration per scope.
+/// Defines rate limits specific to each scope an API key can use.
+/// Supports unlimited (null limit), disabled (0 limit), and finite quotas.
+model ApiKeyQuota {
+  id             String      @id @default(cuid())
+  apiKeyId       String
+  apiKey         ApiKey      @relation(fields: [apiKeyId], references: [id], onDelete: Cascade)
+  scope          ApiKeyScope
+  /// Quota limit: null = unlimited, 0 = disabled, positive = requests per window
+  quotaLimit     Int?
+  /// Rolling window in seconds
+  windowSeconds  Int         @default(3600)
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+
+  @@unique([apiKeyId, scope])
+  @@index([apiKeyId])
+}
+
+/// Privacy-safe proof sharing access events.
+/// Records sharing token usage outcomes without storing raw tokens or verifier identities.
+/// Retention is independent from general verification events.
+model ProofSharingEvent {
+  id                 String         @id @default(cuid())
+  proofId            String
+  proof              Proof          @relation(fields: [proofId], references: [id], onDelete: Cascade)
+  organizationId     String
+  organization       Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  /// SHA-256 hash of the sharing token - never stores raw token
+  tokenHash          String
+  /// SHA-256 hash of anonymized IP address (subnet level)
+  ipHash             String?
+  /// SHA-256 hash of user agent string
+  userAgentHash      String?
+  /// Access outcome
+  outcome            SharingOutcome
+  /// Purpose of the sharing request (sanitized)
+  purpose            String?
+  /// Who requested the sharing token
+  requestedBy        String?
+  createdAt          DateTime       @default(now())
+  /// When this event should be purged for data retention
+  expiresAt          DateTime
+
+  @@index([organizationId, proofId, createdAt])
+  @@index([proofId, createdAt])
+  @@index([expiresAt])
+}
+
+/// Immutable policy versions with content hash commitments.
+/// Each published version has a unique content hash for tamper detection.
+model PolicyVersion {
+  id            String       @id @default(cuid())
+  policyType    PolicyType
+  version       String
+  /// SHA-256 hash of the exact policy content accepted
+  contentHash   String
+  status        PolicyStatus @default(DRAFT)
+  publishedAt   DateTime?
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  @@unique([policyType, version])
+  @@index([policyType, status])
+  @@index([policyType, publishedAt])
+}
+
+/// Immutable consent acceptance and withdrawal history.
+/// Preserves audit trail of policy version acceptance by authenticated users.
+model ConsentRecord {
+  id              String        @id @default(cuid())
+  userId          String
+  user            User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organizationId  String
+  organization    Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  policyType      PolicyType
+  policyVersion   String
+  /// Content hash from PolicyVersion - ensures integrity
+  contentHash     String
+  action          ConsentAction
+  createdAt       DateTime      @default(now())
+
+  @@index([userId, policyType, createdAt])
+  @@index([organizationId, userId])
+  @@index([userId, policyType, action, createdAt])
+}
+
+/// Signed proof disclosure consent receipts.
+/// Stores receipt metadata and cryptographic commitments without duplicating proof data.
+model DisclosureReceipt {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  proofId        String
+  proof          Proof        @relation(fields: [proofId], references: [id], onDelete: Cascade)
+  /// SHA-256 hash of the canonical receipt payload
+  receiptHash    String       @unique
+  /// Signature data: { signature, keyVersion, algorithm, metadata }
+  signatureData  Json
+  /// When this receipt expires and becomes invalid
+  expiresAt      DateTime
+  createdAt      DateTime     @default(now())
+
+  @@index([organizationId, proofId])
+  @@index([organizationId, createdAt])
   @@index([expiresAt])
 }
