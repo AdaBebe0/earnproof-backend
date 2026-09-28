@@ -1,12 +1,26 @@
-import { Injectable, Logger } from "@nestjs/common";
+import {
+  Injectable,
+  OnApplicationShutdown,
+} from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { Interval } from "@nestjs/schedule";
 import { AnchoringOperation, AnchoringStatus } from "@prisma/client";
 import { PrismaService } from "../database/prisma.service";
+import { redactError } from "../common/observability/redaction";
+import { StructuredLogger } from "../common/logger";
 import {
   AnchorProofInput,
   ContractAnchoringService,
 } from "../proofs/contract-anchoring.service";
+
+/**
+ * Upper bound on how long shutdown waits for an in-flight poll cycle to
+ * finish draining before giving up (earnproof-backend#68). A batch is at
+ * most BATCH_SIZE intents, each a single CLI invocation, so this generously
+ * covers a healthy drain without letting one stuck call block shutdown
+ * indefinitely — the orchestrator's own SIGKILL grace period is the backstop.
+ */
+const SHUTDOWN_DRAIN_TIMEOUT_MS = 25_000;
 
 /**
  * Maximum number of delivery attempts before an intent is permanently failed.
@@ -54,13 +68,6 @@ const PERMANENT_ERROR_PATTERNS: RegExp[] = [
  * Strip potential secrets from an error message before storing.
  * Removes Stellar secret-key-like tokens (S…56 chars) and KEY=VALUE pairs.
  */
-function sanitiseError(message: string): string {
-  return message
-    .replace(/S[A-Z2-7]{55}/g, "[REDACTED_SECRET]")
-    .replace(/\b[A-Z_]{3,}=[^\s]+/g, "[REDACTED_ENV]")
-    .slice(0, 500); // cap length to avoid unbounded storage
-}
-
 function isPermanentError(message: string): boolean {
   return PERMANENT_ERROR_PATTERNS.some((pattern) => pattern.test(message));
 }
@@ -74,8 +81,21 @@ function computeNextRetryAt(attemptCount: number): Date {
 }
 
 @Injectable()
-export class AnchoringWorkerService {
-  private readonly logger = new Logger(AnchoringWorkerService.name);
+export class AnchoringWorkerService implements OnApplicationShutdown {
+  private readonly logger = new StructuredLogger(AnchoringWorkerService.name);
+
+  /** Set once shutdown begins — `poll()` becomes a no-op after this. */
+  private draining = false;
+
+  /**
+   * The currently in-flight poll cycle, if any. `onApplicationShutdown`
+   * awaits this (bounded by SHUTDOWN_DRAIN_TIMEOUT_MS) instead of tearing
+   * the process down mid-batch, so a claimed intent either finishes its
+   * CLI call and is written CONFIRMED/FAILED, or is left PROCESSING for
+   * `resetStaleProcessing` to reclaim on the next healthy worker's tick —
+   * never left half-committed.
+   */
+  private inFlightCycle: Promise<void> | null = null;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -92,12 +112,77 @@ export class AnchoringWorkerService {
    */
   @Interval(10_000)
   async poll(): Promise<void> {
+    if (this.draining) {
+      // New work stops being picked up as soon as shutdown begins
+      // (earnproof-backend#68) — only a cycle already in flight is allowed
+      // to finish.
+      return;
+    }
     if (!this.config.get<boolean>("contractAnchoring.enabled")) {
       return;
     }
 
+    const cycle = this.runCycle();
+    this.inFlightCycle = cycle;
+    try {
+      await cycle;
+    } finally {
+      if (this.inFlightCycle === cycle) {
+        this.inFlightCycle = null;
+      }
+    }
+  }
+
+  private async runCycle(): Promise<void> {
     await this.resetStaleProcessing();
     await this.processBatch();
+  }
+
+  /**
+   * Called by Nest during shutdown (requires `app.enableShutdownHooks()` in
+   * main.ts — see that file). Stops new poll cycles immediately and waits
+   * for any cycle already running to finish, up to
+   * SHUTDOWN_DRAIN_TIMEOUT_MS.
+   */
+  async onApplicationShutdown(signal?: string): Promise<void> {
+    this.draining = true;
+    this.logger.log(
+      `Draining: no new poll cycles will start (signal=${signal ?? "unknown"})`,
+    );
+
+    const cycle = this.inFlightCycle;
+    if (!cycle) {
+      return;
+    }
+
+    let timer: NodeJS.Timeout | undefined;
+    const timeout = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, SHUTDOWN_DRAIN_TIMEOUT_MS);
+    });
+
+    let drained: boolean;
+    try {
+      drained = await Promise.race([
+        cycle.then(() => true).catch(() => true),
+        timeout.then(() => false),
+      ]);
+    } finally {
+      // Whichever side of the race lost, its timer/handle must not outlive
+      // this call — an uncleared setTimeout otherwise keeps the process
+      // (and, in tests, the Jest worker) alive after shutdown has already
+      // decided the outcome.
+      clearTimeout(timer);
+    }
+
+    if (drained) {
+      this.logger.log("In-flight poll cycle finished draining");
+    } else {
+      this.logger.warn(
+        `In-flight poll cycle did not finish within ${SHUTDOWN_DRAIN_TIMEOUT_MS}ms — ` +
+          "any intent still PROCESSING will be reclaimed by resetStaleProcessing " +
+          "on a future worker's tick",
+      );
+    }
   }
 
   /**
@@ -338,7 +423,7 @@ export class AnchoringWorkerService {
         isPermanentError(message) ||
         newAttemptCount >= MAX_ATTEMPTS;
 
-      const safeError = sanitiseError(message);
+      const safeError = redactError(err);
 
       if (permanent) {
         await this.prisma.anchoringIntent.update({

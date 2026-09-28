@@ -1,49 +1,80 @@
-import { Injectable, ServiceUnavailableException } from "@nestjs/common";
+import {
+  HttpStatus,
+  Injectable,
+  Optional,
+  ServiceUnavailableException,
+} from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import {
-  HorizonCollection,
-  HorizonPaymentRecord,
-  HorizonTransactionRecord,
-  NormalizedPayment,
-} from "./stellar.types";
+  HorizonClient,
+  HorizonCancelledError,
+  HorizonReadOptions,
+  HorizonReadResult,
+} from "./horizon-client";
+import { HorizonTransactionRecord, NormalizedPayment } from "./stellar.types";
+import { HorizonException } from "../common/exceptions/domain.exceptions";
 
 @Injectable()
 export class StellarService {
   private readonly horizonUrl: string;
+  private readonly horizon: HorizonClient;
 
-  constructor(configService: ConfigService) {
+  constructor(
+    configService: ConfigService,
+    /**
+     * Injected only by tests, which supply a scripted transport and a no-op
+     * sleep. Production builds its own client from configuration.
+     */
+    @Optional() horizonClient?: HorizonClient,
+  ) {
     this.horizonUrl = configService
       .getOrThrow<string>("stellar.horizonUrl")
       .replace(/\/$/, "");
+
+    this.horizon = horizonClient ?? new HorizonClient({ horizonUrl: this.horizonUrl });
   }
 
-  async fetchIncomingPayments(walletAddress: string): Promise<NormalizedPayment[]> {
-    let response: Response;
+  /**
+   * Incoming payments for a wallet, newest first.
+   *
+   * Delegates to {@link HorizonClient}, which walks Horizon's cursors, retries
+   * only transient faults, and stops at an explicit page, record, or time
+   * bound. Every Horizon failure is collapsed to one dependency error here: the
+   * caller is an HTTP handler that can do nothing differently for a 429 than
+   * for a 503, and the fault taxonomy that distinguishes them has already done
+   * its work inside the retry loop.
+   */
+  async fetchIncomingPayments(
+    walletAddress: string,
+    options: HorizonReadOptions = {},
+  ): Promise<NormalizedPayment[]> {
+    const result = await this.readIncomingPayments(walletAddress, options);
+    return result.payments;
+  }
+
+  /**
+   * The full read result, including the resume cursor and what stopped the walk.
+   *
+   * Separate from {@link fetchIncomingPayments} so the common caller keeps its
+   * simple array contract while a caller that wants to resume, or to alert on
+   * malformed records, can reach the detail.
+   */
+  async readIncomingPayments(
+    walletAddress: string,
+    options: HorizonReadOptions = {},
+  ): Promise<HorizonReadResult> {
     try {
-      response = await fetch(
-        `${this.horizonUrl}/accounts/${walletAddress}/payments?limit=200&order=desc`,
-      );
-    } catch {
+      return await this.horizon.listIncomingPayments(walletAddress, options);
+    } catch (error) {
+      // Cancellation is the caller's own decision, not a dependency failure;
+      // reporting it as one would make a client disconnect look like a Horizon
+      // outage on the dashboards.
+      if (error instanceof HorizonCancelledError) throw error;
+
       throw new ServiceUnavailableException(
         "Stellar Horizon is temporarily unavailable",
       );
     }
-
-    if (!response.ok) {
-      throw new ServiceUnavailableException(
-        "Stellar Horizon is temporarily unavailable",
-      );
-    }
-
-    const data =
-      (await response.json()) as HorizonCollection<HorizonPaymentRecord>;
-    const records = data._embedded?.records ?? [];
-
-    return records
-      .filter((record) => record.type === "payment")
-      .filter((record) => record.to === walletAddress)
-      .filter((record) => Boolean(record.from && record.amount))
-      .map((record) => this.normalizePayment(record));
   }
 
   async fetchTransaction(
@@ -54,25 +85,18 @@ export class StellarService {
     );
 
     if (!response.ok) {
-      throw new Error(`Stellar Horizon request failed with ${response.status}`);
+      // Never echo the response body — Horizon errors can include the raw
+      // request path/params, which for this endpoint includes the
+      // transaction hash but could carry more in other Horizon error shapes.
+      throw new HorizonException(
+        "Stellar Horizon is temporarily unavailable",
+        response.status === 404
+          ? HttpStatus.NOT_FOUND
+          : HttpStatus.SERVICE_UNAVAILABLE,
+      );
     }
 
     const transaction = (await response.json()) as HorizonTransactionRecord;
     return transaction && typeof transaction === "object" ? transaction : null;
-  }
-
-  private normalizePayment(record: HorizonPaymentRecord): NormalizedPayment {
-    const isNative = record.asset_type === "native";
-
-    return {
-      operationId: record.id,
-      stellarTransactionHash: record.transaction_hash,
-      sourceAddress: record.from as string,
-      destinationAddress: record.to as string,
-      assetCode: isNative ? "XLM" : (record.asset_code as string),
-      assetIssuer: isNative ? null : (record.asset_issuer ?? null),
-      amount: record.amount as string,
-      occurredAt: new Date(record.created_at),
-    };
   }
 }

@@ -1,17 +1,20 @@
 import { Module } from "@nestjs/common";
 import { ConfigModule } from "@nestjs/config";
-import { APP_GUARD, APP_INTERCEPTOR } from "@nestjs/core";
-import { ThrottlerGuard, ThrottlerModule } from "@nestjs/throttler";
+import { APP_INTERCEPTOR, DiscoveryModule } from "@nestjs/core";
 import { ScheduleModule } from "@nestjs/schedule";
 import { AuditModule } from "./audit/audit.module";
 import { ApiKeysModule } from "./api-keys/api-keys.module";
 import { AuthModule } from "./auth/auth.module";
+import { RateLimitModule } from "./common/rate-limit/rate-limit.module";
+import { AuthorizationPolicyRegistry } from "./common/guards/authorization-policy.registry";
+import { CommonModule } from "./common/common.module";
 import { configuration } from "./config/configuration";
 import { validateEnv } from "./config/env.validation";
 import { CredentialsModule } from "./credentials/credentials.module";
 import { DatabaseModule } from "./database/database.module";
 import { HealthModule } from "./health/health.module";
 import { HttpMetricsInterceptor } from "./common/interceptors/http-metrics.interceptor";
+import { IdempotentInterceptor } from "./common/interceptors/idempotent.interceptor";
 import { ObservabilityModule } from "./common/observability/observability.module";
 import { JobsModule } from "./jobs/jobs.module";
 import { IssuersModule } from "./issuers/issuers.module";
@@ -28,19 +31,15 @@ import { WebhooksModule } from "./webhooks/webhooks.module";
       load: [configuration],
       validate: validateEnv,
     }),
-    ThrottlerModule.forRoot([
-      {
-        name: "default",
-        ttl: 60_000, // 1 minute in milliseconds
-        limit: 1000, // generous default; per-route overrides tighten this
-      },
-    ]),
     ScheduleModule.forRoot(),
+    DiscoveryModule,
     ObservabilityModule,
     DatabaseModule,
+    CommonModule,
     AuditModule,
     ApiKeysModule,
     AuthModule,
+    RateLimitModule,
     HealthModule,
     OrganizationsModule,
     IssuersModule,
@@ -53,12 +52,13 @@ import { WebhooksModule } from "./webhooks/webhooks.module";
   ],
   providers: [
     {
-      provide: APP_GUARD,
-      useClass: ThrottlerGuard,
-    },
-    {
       provide: APP_INTERCEPTOR,
       useClass: HttpMetricsInterceptor,
+    },
+    AuthorizationPolicyRegistry,
+    {
+      provide: APP_INTERCEPTOR,
+      useClass: IdempotentInterceptor,
     },
   ],
 })

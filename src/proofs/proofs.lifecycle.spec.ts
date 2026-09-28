@@ -7,6 +7,7 @@ import {
 import { ProofsService } from "./proofs.service";
 import { VerificationEventService } from "../audit/verification-event.service";
 import { unlimitedQuotas } from "../testing/quotas";
+import { AttestationsService } from "../attestations/attestations.service";
 
 describe("ProofsService lifecycle", () => {
   it("creates, verifies, revokes, and re-verifies a minimum income proof", async () => {
@@ -16,6 +17,9 @@ describe("ProofsService lifecycle", () => {
       getAggregateStats: jest.fn().mockResolvedValue({}),
       cleanupExpiredEvents: jest.fn().mockResolvedValue(0),
     } as unknown as VerificationEventService;
+    const mockAttestationsService = {
+      getValidAttestationsForSubject: jest.fn().mockResolvedValue([]),
+    } as unknown as AttestationsService;
     const service = new ProofsService(store.prisma as never, {
       getOrThrow: jest.fn((key: string) => {
         const values: Record<string, string> = {
@@ -33,6 +37,7 @@ describe("ProofsService lifecycle", () => {
         return values[key];
       }),
     } as never, mockVerificationEventService, unlimitedQuotas() as never);
+    } as never, mockVerificationEventService, mockAttestationsService);
     const user = {
       id: "user_lifecycle",
       walletAddress: "GB_TEST",
@@ -130,6 +135,9 @@ const recurringRequest = {
 };
 
 function createRecurringService(store: ReturnType<typeof createRecurringProofStore>) {
+  const mockAttestationsService = {
+    getValidAttestationsForSubject: jest.fn().mockResolvedValue([]),
+  } as unknown as AttestationsService;
   return new ProofsService(
     store.prisma as never,
     {
@@ -146,6 +154,7 @@ function createRecurringService(store: ReturnType<typeof createRecurringProofSto
     } as never,
     { recordEvent: jest.fn().mockResolvedValue(undefined) } as never,
     unlimitedQuotas() as never,
+    mockAttestationsService,
   );
 }
 
@@ -281,6 +290,9 @@ describe("ProofsService lifecycle – recurring-income", () => {
       getAggregateStats: jest.fn().mockResolvedValue({}),
       cleanupExpiredEvents: jest.fn().mockResolvedValue(0),
     } as unknown as VerificationEventService;
+    const mockAttestationsService = {
+      getValidAttestationsForSubject: jest.fn().mockResolvedValue([]),
+    } as unknown as AttestationsService;
     const service = new ProofsService(store.prisma as never, {
       getOrThrow: jest.fn((key: string) => {
         const values: Record<string, string> = {
@@ -292,6 +304,7 @@ describe("ProofsService lifecycle – recurring-income", () => {
       }),
       get: jest.fn(() => false),
     } as never, mockVerificationEventService, unlimitedQuotas() as never);
+    } as never, mockVerificationEventService, mockAttestationsService);
     const user = {
       id: "user_ri_lifecycle",
       walletAddress: "GB_TEST",

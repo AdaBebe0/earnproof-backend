@@ -1,4 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
+import { ApiProperty } from "@nestjs/swagger";
 import {
   ArrayMaxSize,
   ArrayMinSize,
@@ -14,6 +15,12 @@ import {
   WebhookEventType,
   WebhookPayloadVersion,
 } from "../webhook-event.types";
+  IsUrl,
+  MaxLength,
+} from "class-validator";
+import { FIELD_LIMITS } from "../../common/limits/request-limits";
+import { IsSafeUrl } from "../../common/validation/url.validator";
+import { WEBHOOK_EVENT_TYPES, WebhookEventType } from "../webhook-event.types";
 
 export class CreateWebhookDto {
   @ApiProperty({
@@ -21,6 +28,8 @@ export class CreateWebhookDto {
     example: "https://example.com/webhooks/earnproof",
   })
   @IsUrl({ protocols: ["https"], require_tld: true, require_protocol: true })
+  @IsSafeUrl()
+  @MaxLength(FIELD_LIMITS.url)
   url!: string;
 
   @ApiProperty({

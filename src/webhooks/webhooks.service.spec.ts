@@ -10,6 +10,7 @@ import { unlimitedQuotas } from "../testing/quotas";
 // ---------------------------------------------------------------------------
 
 const ENCRYPTION_KEY = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=";
+const ENCRYPTION_KEYRING = new Map([[0, ENCRYPTION_KEY]]);
 
 function makeConfig() {
   return {
@@ -115,7 +116,11 @@ describe("WebhooksService", () => {
 
   describe("rotateSecret", () => {
     it("stores a new encrypted secret and returns the raw value once", async () => {
-      let latestEncrypted = encryptProtectedAmount("original-secret", ENCRYPTION_KEY);
+      let latestEncrypted = encryptProtectedAmount(
+        "original-secret",
+        ENCRYPTION_KEYRING,
+        0,
+      );
 
       const prisma = {
         webhook: {

@@ -11,6 +11,9 @@ describe("StellarService", () => {
   it("normalizes incoming native payments", async () => {
     global.fetch = jest.fn().mockResolvedValue({
       ok: true,
+      // The Horizon transport classifies by status code, so a stub standing in
+      // for a Response has to carry one.
+      status: 200,
       json: async () => ({
         _embedded: {
           records: [
@@ -80,7 +83,7 @@ describe("StellarService", () => {
     } as unknown as ConfigService);
 
     await expect(service.fetchTransaction("tx")).rejects.toThrow(
-      "Stellar Horizon request failed with 503",
+      "Stellar Horizon is temporarily unavailable",
     );
   });
 

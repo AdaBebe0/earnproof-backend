@@ -11,6 +11,7 @@ import {
 import { ApiErrorCode } from "../common/dto/api-error.dto";
 import { ProofsService } from "./proofs.service";
 import { unlimitedQuotas } from "../testing/quotas";
+import { AttestationsService } from "../attestations/attestations.service";
 
 describe("ProofsService payment-receipt proofs", () => {
   const user = {
@@ -101,11 +102,15 @@ describe("ProofsService payment-receipt proofs", () => {
         key === "contractAnchoring.enabled" ? Boolean(contract) : false,
       ),
     };
+    const mockAttestationsService = {
+      getValidAttestationsForSubject: jest.fn().mockResolvedValue([]),
+    } as unknown as AttestationsService;
     const service = new ProofsService(
       prisma as never,
       harnessConfig as never,
       events as never,
       unlimitedQuotas() as never,
+      mockAttestationsService,
       contract as never,
     );
     return { service, prisma, getStoredProof: () => storedProof };

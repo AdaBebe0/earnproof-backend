@@ -551,4 +551,127 @@ describe("AnchoringWorkerService", () => {
       ).rejects.toThrow("Unique constraint failed");
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // Graceful shutdown / draining (earnproof-backend#68)
+  // ---------------------------------------------------------------------------
+
+  describe("onApplicationShutdown", () => {
+    it("stops new poll cycles from starting once shutdown begins", async () => {
+      const prisma = makePrisma();
+      const anchoring = makeAnchoring();
+      const config = makeConfig(true);
+      const worker = new AnchoringWorkerService(
+        prisma as never,
+        anchoring as never,
+        config as never,
+      );
+
+      await worker.onApplicationShutdown("SIGTERM");
+      (prisma.anchoringIntent.updateMany as jest.Mock).mockClear();
+
+      await worker.poll();
+
+      // resetStaleProcessing() would have called updateMany; poll() must
+      // have returned immediately instead.
+      expect(prisma.anchoringIntent.updateMany).not.toHaveBeenCalled();
+    });
+
+    it("waits for an in-flight poll cycle to finish before resolving", async () => {
+      const prisma = makePrisma();
+      let releaseQueryRaw!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        releaseQueryRaw = resolve;
+      });
+      // $queryRaw is called inside processBatch — block it until the test
+      // explicitly releases the gate, simulating a still-running cycle.
+      (prisma.$queryRaw as jest.Mock).mockImplementation(async () => {
+        await gate;
+        return [];
+      });
+      const anchoring = makeAnchoring();
+      const config = makeConfig(true);
+      const worker = new AnchoringWorkerService(
+        prisma as never,
+        anchoring as never,
+        config as never,
+      );
+
+      const pollPromise = worker.poll();
+      // Let poll() reach the gated $queryRaw call before shutdown begins.
+      await new Promise((r) => setImmediate(r));
+
+      let shutdownResolved = false;
+      const shutdownPromise = worker
+        .onApplicationShutdown("SIGTERM")
+        .then(() => {
+          shutdownResolved = true;
+        });
+
+      // Give the event loop a couple of ticks — shutdown must NOT resolve
+      // while the cycle is still gated.
+      await new Promise((r) => setImmediate(r));
+      await new Promise((r) => setImmediate(r));
+      expect(shutdownResolved).toBe(false);
+
+      releaseQueryRaw();
+      await pollPromise;
+      await shutdownPromise;
+
+      expect(shutdownResolved).toBe(true);
+    });
+
+    it("gives up waiting after the drain timeout and logs a warning", async () => {
+      jest.useFakeTimers();
+      try {
+        const prisma = makePrisma();
+        let releaseQueryRaw!: () => void;
+        const gate = new Promise<void>((resolve) => {
+          releaseQueryRaw = resolve;
+        });
+        (prisma.$queryRaw as jest.Mock).mockImplementation(async () => {
+          await gate;
+          return [];
+        });
+        const anchoring = makeAnchoring();
+        const config = makeConfig(true);
+        const worker = new AnchoringWorkerService(
+          prisma as never,
+          anchoring as never,
+          config as never,
+        );
+
+        const pollPromise = worker.poll();
+        await Promise.resolve();
+
+        const shutdownPromise = worker.onApplicationShutdown("SIGTERM");
+        // Advance past SHUTDOWN_DRAIN_TIMEOUT_MS (25s) while the cycle is
+        // still gated — the timeout branch must win the race.
+        await jest.advanceTimersByTimeAsync(30_000);
+
+        await expect(shutdownPromise).resolves.toBeUndefined();
+
+        // Release the gate so the still-running poll cycle (and this test's
+        // own promises) resolve cleanly instead of leaking a handle past
+        // the test.
+        releaseQueryRaw();
+        await pollPromise;
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it("resolves immediately when no cycle is in flight", async () => {
+      const prisma = makePrisma();
+      const anchoring = makeAnchoring();
+      const config = makeConfig(true);
+      const worker = new AnchoringWorkerService(
+        prisma as never,
+        anchoring as never,
+        config as never,
+      );
+
+      await expect(worker.onApplicationShutdown("SIGTERM")).resolves.toBeUndefined();
+    });
+  });
 });

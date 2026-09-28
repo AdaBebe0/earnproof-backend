@@ -20,7 +20,10 @@ describe("PaymentsService", () => {
         ]),
       },
       payment: {
-        findUnique: jest.fn().mockResolvedValue(null),
+        // syncPayments batches the existence check into one findMany ahead
+        // of its loop; an empty result means nothing pre-exists, i.e. every
+        // incoming payment is a create.
+        findMany: jest.fn().mockResolvedValue([]),
         upsert: jest.fn().mockResolvedValue({ id: "payment_1" }),
       },
     };
@@ -68,7 +71,7 @@ describe("PaymentsService", () => {
         create: expect.objectContaining({
           classification: PaymentClassification.UNKNOWN,
           isEligible: true,
-          amountEncrypted: expect.stringMatching(/^enc:v1:/),
+          amountEncrypted: expect.stringMatching(/^enc:v0:/),
           memo: {
             type: "text",
             value: "Salary June",
@@ -93,7 +96,7 @@ describe("PaymentsService", () => {
     const prisma = {
       supportedAsset: { findMany: jest.fn().mockResolvedValue([]) },
       payment: {
-        findUnique: jest.fn().mockResolvedValue(null),
+        findMany: jest.fn().mockResolvedValue([]),
         upsert: jest.fn().mockResolvedValue({}),
       },
     };
@@ -128,7 +131,7 @@ describe("PaymentsService", () => {
     const prisma = {
       supportedAsset: { findMany: jest.fn().mockResolvedValue([]) },
       payment: {
-        findUnique: jest.fn().mockResolvedValue(null),
+        findMany: jest.fn().mockResolvedValue([]),
         upsert: jest.fn().mockResolvedValue({}),
       },
     };

@@ -1,0 +1,551 @@
+import {
+  HorizonFault,
+  HorizonFaultKind,
+  classifyStatus,
+  classifyThrown,
+  isRetryable,
+} from "./horizon-fault";
+import {
+  FetchHorizonTransport,
+  HorizonTransport,
+  retryAfterFrom,
+} from "./horizon-transport";
+import { HorizonPaymentRecord, NormalizedPayment } from "./stellar.types";
+
+/**
+ * Cursor-paginated, fault-classifying reader for a Horizon payments feed.
+ *
+ * ## Why pagination needs bounds
+ *
+ * Horizon will page forever. An account with a long history, a cursor that
+ * loops, or a Horizon replaying the same page all produce a read that never
+ * terminates, and the symptom is a request that hangs rather than an error
+ * anybody can act on. Every loop here therefore has an explicit bound — pages,
+ * records, and time — and the result says which one stopped it.
+ *
+ * ## Ordering
+ *
+ * Pages are walked newest-first (`order=desc`). That keeps the existing product
+ * behaviour, where a bounded sync returns the most recent activity rather than
+ * the oldest, and it makes the time bound meaningful: once a page's oldest
+ * record precedes the boundary, nothing further back can be in range.
+ *
+ * ## Cursors are rebuilt, never followed
+ *
+ * Horizon supplies `_links.next.href` as an absolute URL. This client extracts
+ * only the `cursor` parameter from it and rebuilds the request against the
+ * configured Horizon origin. Following the href directly would let a
+ * compromised or misconfigured upstream redirect the sync at a host of its
+ * choosing, which is a request-forgery primitive handed over for free.
+ */
+
+/** Records requested per page. Horizon's own maximum. */
+const DEFAULT_PAGE_LIMIT = 200;
+
+/** Pages walked in one read, before `page_bound` stops it. */
+const DEFAULT_MAX_PAGES = 10;
+
+/** Records accumulated in one read, before `record_bound` stops it. */
+const DEFAULT_MAX_RECORDS = 2_000;
+
+/** Attempts per page, including the first. */
+const DEFAULT_MAX_ATTEMPTS = 3;
+
+/**
+ * Backoff base. Deliberately small: this runs inside a request the user is
+ * waiting on, and the surrounding request deadline is measured in seconds. Two
+ * retries cost 600ms, which is worth spending; 7 seconds is not.
+ */
+const DEFAULT_BACKOFF_MS = 200;
+
+/** Deadline for one HTTP request. */
+const DEFAULT_TIMEOUT_MS = 5_000;
+
+export type StopReason =
+  /** Horizon ran out of pages. The feed was read to its end. */
+  | "exhausted"
+  | "page_bound"
+  | "record_bound"
+  | "time_bound"
+  /** The same cursor came back twice — Horizon is looping. */
+  | "repeated_cursor";
+
+export interface HorizonReadOptions {
+  /** Cancels the read between and during requests. */
+  signal?: AbortSignal;
+  /** Stop once records predate this instant. */
+  notBefore?: Date;
+  /** Resume from a cursor a previous read returned. */
+  cursor?: string;
+  pageLimit?: number;
+  maxPages?: number;
+  maxRecords?: number;
+  maxAttemptsPerPage?: number;
+}
+
+export interface HorizonReadResult {
+  payments: NormalizedPayment[];
+  pagesFetched: number;
+  /** Records Horizon returned, before filtering. */
+  recordsSeen: number;
+  /** Records rejected as permanently invalid. Never retried. */
+  malformedRecords: number;
+  /** Records already seen in this read — Horizon replayed or overlapped a page. */
+  duplicateRecords: number;
+  /** Total HTTP attempts, including retries. */
+  attempts: number;
+  /** Cursor to resume from. `null` when the feed was exhausted. */
+  lastCursor: string | null;
+  stopReason: StopReason;
+}
+
+export interface HorizonClientOptions {
+  horizonUrl: string;
+  transport?: HorizonTransport;
+  /** Injected so backoff costs no wall-clock time in tests. */
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
+  timeoutMs?: number;
+  backoffMs?: number;
+}
+
+/** Raised when the caller's signal aborts the read. Never retried. */
+export class HorizonCancelledError extends Error {
+  constructor() {
+    super("Horizon read was cancelled");
+    this.name = "HorizonCancelledError";
+  }
+}
+
+export class HorizonClient {
+  private readonly horizonUrl: string;
+  private readonly transport: HorizonTransport;
+  private readonly sleep: (ms: number, signal?: AbortSignal) => Promise<void>;
+  private readonly timeoutMs: number;
+  private readonly backoffMs: number;
+
+  /**
+   * Reads already running, keyed by account and options.
+   *
+   * Two concurrent syncs of the same account are the common case, not an edge
+   * one: a client retrying a slow request, or two app instances reacting to the
+   * same event. Without this they each walk the whole feed and each write the
+   * same rows, doubling Horizon load to produce one result. Coalescing them
+   * makes the second caller await the first read instead.
+   */
+  private readonly inFlight = new Map<string, Promise<HorizonReadResult>>();
+
+  constructor(options: HorizonClientOptions) {
+    this.horizonUrl = options.horizonUrl.replace(/\/$/, "");
+    this.transport = options.transport ?? new FetchHorizonTransport();
+    this.sleep = options.sleep ?? defaultSleep;
+    this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.backoffMs = options.backoffMs ?? DEFAULT_BACKOFF_MS;
+  }
+
+  /**
+   * Reads incoming payments for `address`, following cursors until a bound.
+   *
+   * Only payments *to* `address` are returned: Horizon's payments feed for an
+   * account includes both directions, and the caller wants received funds.
+   */
+  async listIncomingPayments(
+    address: string,
+    options: HorizonReadOptions = {},
+  ): Promise<HorizonReadResult> {
+    // A cancelled read must not be coalesced with, or into, another caller's:
+    // aborting one would abort the other. These run on their own.
+    if (options.signal) {
+      return this.read(address, options);
+    }
+
+    const key = coalescingKey(address, options);
+    const existing = this.inFlight.get(key);
+    if (existing) return existing;
+
+    const started = this.read(address, options).finally(() => {
+      this.inFlight.delete(key);
+    });
+
+    this.inFlight.set(key, started);
+    return started;
+  }
+
+  private async read(
+    address: string,
+    options: HorizonReadOptions,
+  ): Promise<HorizonReadResult> {
+    const pageLimit = options.pageLimit ?? DEFAULT_PAGE_LIMIT;
+    const maxPages = options.maxPages ?? DEFAULT_MAX_PAGES;
+    const maxRecords = options.maxRecords ?? DEFAULT_MAX_RECORDS;
+    const maxAttempts = options.maxAttemptsPerPage ?? DEFAULT_MAX_ATTEMPTS;
+    const notBefore = options.notBefore?.getTime();
+
+    const payments: NormalizedPayment[] = [];
+    /** Operation ids already accepted, so a replayed page cannot double-count. */
+    const seenOperationIds = new Set<string>();
+    const seenCursors = new Set<string>();
+
+    let cursor = options.cursor;
+    let pagesFetched = 0;
+    let recordsSeen = 0;
+    let malformedRecords = 0;
+    let duplicateRecords = 0;
+    let attempts = 0;
+    let lastCursor: string | null = cursor ?? null;
+    let stopReason: StopReason = "exhausted";
+
+    while (true) {
+      if (pagesFetched >= maxPages) {
+        stopReason = "page_bound";
+        break;
+      }
+
+      this.assertNotCancelled(options.signal);
+
+      const url = this.pageUrl(address, pageLimit, cursor);
+      const page = await this.fetchPage(url, maxAttempts, options.signal, (used) => {
+        attempts += used;
+      });
+
+      pagesFetched += 1;
+
+      const records = page.records;
+      if (records.length === 0) {
+        // An empty page is the end of the feed, whether or not Horizon still
+        // offers a next link. Continuing would loop on an empty cursor.
+        stopReason = "exhausted";
+        lastCursor = page.nextCursor ?? lastCursor;
+        break;
+      }
+
+      let crossedTimeBound = false;
+
+      for (const record of records) {
+        recordsSeen += 1;
+
+        const normalized = normalizeRecord(record, address);
+        if (normalized === "malformed") {
+          // Permanent: the record cannot become valid, so it is counted and
+          // skipped rather than retried or allowed to fail the whole read.
+          malformedRecords += 1;
+          continue;
+        }
+        if (normalized === "not-incoming") continue;
+
+        if (notBefore !== undefined && normalized.occurredAt.getTime() < notBefore) {
+          crossedTimeBound = true;
+          continue;
+        }
+
+        if (seenOperationIds.has(normalized.operationId)) {
+          duplicateRecords += 1;
+          continue;
+        }
+
+        seenOperationIds.add(normalized.operationId);
+        payments.push(normalized);
+
+        if (payments.length >= maxRecords) break;
+      }
+
+      lastCursor = page.nextCursor ?? lastCursor;
+
+      if (payments.length >= maxRecords) {
+        stopReason = "record_bound";
+        break;
+      }
+
+      if (crossedTimeBound) {
+        // Pages are newest-first, so once a record precedes the boundary every
+        // later page does too.
+        stopReason = "time_bound";
+        break;
+      }
+
+      if (!page.nextCursor) {
+        stopReason = "exhausted";
+        lastCursor = null;
+        break;
+      }
+
+      if (seenCursors.has(page.nextCursor) || page.nextCursor === cursor) {
+        // Horizon handed back a cursor already used. Following it would fetch
+        // the same page forever.
+        stopReason = "repeated_cursor";
+        break;
+      }
+
+      seenCursors.add(page.nextCursor);
+      cursor = page.nextCursor;
+    }
+
+    return {
+      payments,
+      pagesFetched,
+      recordsSeen,
+      malformedRecords,
+      duplicateRecords,
+      attempts,
+      lastCursor,
+      stopReason,
+    };
+  }
+
+  /**
+   * Fetches one page, retrying only transient faults.
+   *
+   * The retry budget is per page, so a read that survives a rate limit on page
+   * one still has its full budget for page two — a shared budget would let one
+   * unlucky page starve the rest of the sync.
+   */
+  private async fetchPage(
+    url: string,
+    maxAttempts: number,
+    signal: AbortSignal | undefined,
+    countAttempts: (used: number) => void,
+  ): Promise<ParsedPage> {
+    let lastFault: HorizonFault | undefined;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      this.assertNotCancelled(signal);
+      countAttempts(1);
+
+      let fault: HorizonFault;
+
+      try {
+        const response = await this.transport.get({
+          url,
+          signal,
+          timeoutMs: this.timeoutMs,
+        });
+
+        if (response.status >= 200 && response.status < 300) {
+          const parsed = parsePage(response.body);
+          if (parsed) return parsed;
+
+          // A 2xx whose body is not a Horizon collection will not become one on
+          // a retry.
+          throw new HorizonFault("malformed_page", "Horizon returned an unreadable page", {
+            status: response.status,
+          });
+        }
+
+        const kind = classifyStatus(response.status);
+        fault = new HorizonFault(kind, faultMessage(kind), {
+          status: response.status,
+          retryAfterSeconds: retryAfterFrom(response),
+        });
+      } catch (error) {
+        // A caller-initiated cancellation looks like a timeout at the transport
+        // level. Checking the caller's signal first keeps the two apart, so a
+        // cancelled read is not retried as though Horizon were slow.
+        if (signal?.aborted) throw new HorizonCancelledError();
+        if (error instanceof HorizonCancelledError) throw error;
+
+        const kind = classifyThrown(error);
+        fault = error instanceof HorizonFault
+          ? error
+          : new HorizonFault(kind, faultMessage(kind), { cause: error });
+      }
+
+      lastFault = fault;
+
+      if (!isRetryable(fault.kind) || attempt === maxAttempts) break;
+
+      const delay =
+        fault.retryAfterSeconds !== undefined
+          ? fault.retryAfterSeconds * 1000
+          : this.backoffMs * Math.pow(2, attempt - 1);
+
+      await this.sleep(delay, signal);
+    }
+
+    throw lastFault ?? new HorizonFault("network_error", faultMessage("network_error"));
+  }
+
+  private pageUrl(address: string, limit: number, cursor?: string): string {
+    const url = new URL(
+      `${this.horizonUrl}/accounts/${encodeURIComponent(address)}/payments`,
+    );
+    url.searchParams.set("limit", String(limit));
+    url.searchParams.set("order", "desc");
+    if (cursor) url.searchParams.set("cursor", cursor);
+    return url.toString();
+  }
+
+  private assertNotCancelled(signal: AbortSignal | undefined): void {
+    if (signal?.aborted) throw new HorizonCancelledError();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Page and record parsing
+// ---------------------------------------------------------------------------
+
+interface ParsedPage {
+  records: unknown[];
+  nextCursor: string | null;
+}
+
+/**
+ * Reads a Horizon collection, or returns null if the body is not one.
+ *
+ * An absent `_embedded.records` is treated as an empty page rather than a
+ * malformed one: Horizon answers that way for an account with no activity, and
+ * failing there would make an empty account indistinguishable from an outage.
+ */
+function parsePage(body: unknown): ParsedPage | null {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return null;
+
+  const collection = body as {
+    _embedded?: { records?: unknown };
+    _links?: { next?: { href?: unknown } };
+  };
+
+  const embedded = collection._embedded;
+  if (embedded !== undefined && (typeof embedded !== "object" || embedded === null)) {
+    return null;
+  }
+
+  const records = embedded?.records;
+  if (records !== undefined && !Array.isArray(records)) return null;
+
+  return {
+    records: records ?? [],
+    nextCursor: extractCursor(collection._links?.next?.href),
+  };
+}
+
+/**
+ * Pulls the `cursor` parameter out of a next link.
+ *
+ * Only the parameter is taken; the origin is discarded and the request is
+ * rebuilt against the configured Horizon. A next link pointing somewhere else
+ * yields its cursor and nothing more, so it cannot redirect the read.
+ */
+export function extractCursor(href: unknown): string | null {
+  if (typeof href !== "string" || href.length === 0) return null;
+
+  try {
+    // The base only matters for relative hrefs; it is never used as a target.
+    const url = new URL(href, "https://horizon.invalid");
+    const cursor = url.searchParams.get("cursor");
+    return cursor && cursor.length > 0 ? cursor : null;
+  } catch {
+    return null;
+  }
+}
+
+type RecordOutcome = NormalizedPayment | "malformed" | "not-incoming";
+
+/**
+ * Validates and normalizes one Horizon record.
+ *
+ * Anything structurally unusable is `malformed` — a permanent condition. A
+ * well-formed record that simply is not an incoming payment to this account is
+ * `not-incoming`, which is ordinary and not counted as a fault. Conflating the
+ * two would make a normal outgoing payment look like data corruption.
+ */
+export function normalizeRecord(record: unknown, address: string): RecordOutcome {
+  if (!record || typeof record !== "object" || Array.isArray(record)) return "malformed";
+
+  const candidate = record as HorizonPaymentRecord;
+
+  if (typeof candidate.id !== "string" || candidate.id.length === 0) return "malformed";
+  if (typeof candidate.type !== "string") return "malformed";
+
+  if (candidate.type !== "payment") return "not-incoming";
+  if (candidate.to !== address) return "not-incoming";
+
+  if (typeof candidate.transaction_hash !== "string" || candidate.transaction_hash.length === 0) {
+    return "malformed";
+  }
+  if (typeof candidate.from !== "string" || candidate.from.length === 0) return "malformed";
+  if (typeof candidate.amount !== "string" || !isDecimalAmount(candidate.amount)) {
+    return "malformed";
+  }
+  if (typeof candidate.created_at !== "string") return "malformed";
+
+  const occurredAt = new Date(candidate.created_at);
+  if (Number.isNaN(occurredAt.getTime())) return "malformed";
+
+  const isNative = candidate.asset_type === "native";
+  if (!isNative && typeof candidate.asset_code !== "string") return "malformed";
+
+  return {
+    operationId: candidate.id,
+    stellarTransactionHash: candidate.transaction_hash,
+    sourceAddress: candidate.from,
+    destinationAddress: candidate.to as string,
+    assetCode: isNative ? "XLM" : (candidate.asset_code as string),
+    assetIssuer: isNative ? null : (candidate.asset_issuer ?? null),
+    amount: candidate.amount,
+    occurredAt,
+  };
+}
+
+/** Amounts are decimal strings; anything else would corrupt arithmetic downstream. */
+function isDecimalAmount(value: string): boolean {
+  return /^\d+(\.\d+)?$/.test(value);
+}
+
+function faultMessage(kind: HorizonFaultKind): string {
+  switch (kind) {
+    case "rate_limited":
+      return "Horizon rate limit reached";
+    case "server_error":
+      return "Horizon returned a server error";
+    case "timeout":
+      return "Horizon request timed out";
+    case "network_error":
+      return "Horizon could not be reached";
+    case "expired_cursor":
+      return "Horizon rejected the pagination cursor";
+    case "not_found":
+      return "Horizon has no record of this account";
+    case "client_error":
+      return "Horizon rejected the request";
+    case "malformed_page":
+      return "Horizon returned an unreadable page";
+  }
+}
+
+/**
+ * Identity for coalescing concurrent reads.
+ *
+ * Options are part of the key because two reads of the same account with
+ * different bounds are different reads; sharing one result would silently give
+ * a caller a page count it did not ask for.
+ */
+function coalescingKey(address: string, options: HorizonReadOptions): string {
+  return JSON.stringify([
+    address,
+    options.cursor ?? null,
+    options.pageLimit ?? null,
+    options.maxPages ?? null,
+    options.maxRecords ?? null,
+    options.maxAttemptsPerPage ?? null,
+    options.notBefore?.toISOString() ?? null,
+  ]);
+}
+
+function defaultSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new HorizonCancelledError());
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+
+    function onAbort() {
+      clearTimeout(timer);
+      reject(new HorizonCancelledError());
+    }
+
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}

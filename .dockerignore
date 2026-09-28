@@ -1,0 +1,50 @@
+# Everything the image does not need, excluded before the daemon ever sees it.
+# A smaller context is a faster build, but the reason this file matters is the
+# second one: anything copied in is in the image, and `.env` is in this list.
+
+# Dependencies and build output are produced inside the image, never copied in.
+node_modules
+dist
+coverage
+*.tsbuildinfo
+
+# Secrets. .env.example is kept: it is the documented template, and it holds no
+# real values.
+.env
+.env.*
+!.env.example
+
+# Version control and CI.
+.git
+.gitignore
+.github
+.kiro
+
+# Tests, fixtures and local tooling. The image runs a compiled application; it
+# never runs a suite.
+test
+prisma/seed.ts
+prisma/seed-demo.ts
+prisma/reset.ts
+jest.config.js
+jest.integration.config.js
+scripts
+semantic-review
+eslint.config.mjs
+.prettierrc
+.editorconfig
+
+# Documentation and repository metadata.
+docs
+*.md
+
+# Local orchestration. Compose brings up Postgres and Redis for development and
+# has no role inside the image.
+docker-compose.yml
+Dockerfile
+.dockerignore
+
+# Editor and OS noise.
+.vscode
+.idea
+.DS_Store

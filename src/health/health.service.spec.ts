@@ -49,6 +49,8 @@ function findDependency(
   return dependency;
 }
 
+const mockDrift = { checkDrift: jest.fn().mockResolvedValue({ overall: "none", items: [], lastCheckedAt: null, cached: false }), isBlocked: jest.fn().mockResolvedValue(false) } as never;
+
 describe("HealthService", () => {
   beforeEach(() => {
     // The service logs full errors server-side by design; silence that in tests.
@@ -62,7 +64,7 @@ describe("HealthService", () => {
   describe("liveness", () => {
     it("performs no external calls", () => {
       const prisma = buildPrisma();
-      const service = new HealthService(prisma, buildConfig());
+      const service = new HealthService(prisma, buildConfig(), mockDrift);
 
       const result = service.checkLiveness();
 
@@ -73,7 +75,7 @@ describe("HealthService", () => {
 
   describe("readiness", () => {
     it("is ready when required dependencies are healthy", async () => {
-      const service = new HealthService(buildPrisma(), buildConfig());
+      const service = new HealthService(buildPrisma(), buildConfig(), mockDrift);
 
       const result = await service.checkReadiness();
 
@@ -89,6 +91,7 @@ describe("HealthService", () => {
           $queryRaw: jest.fn().mockRejectedValue(new Error("connection refused")),
         } as Partial<PrismaService>),
         buildConfig(),
+        mockDrift,
       );
 
       const result = await service.checkReadiness();
@@ -103,6 +106,7 @@ describe("HealthService", () => {
       const service = new HealthService(
         buildPrisma(),
         buildConfig({ credentialSigningSecret: "" }),
+        mockDrift,
       );
 
       const result = await service.checkReadiness();
@@ -117,7 +121,7 @@ describe("HealthService", () => {
     it("excludes optional dependencies entirely", async () => {
       // Readiness must not consult optional dependencies at all: a Horizon
       // outage cannot be allowed to take unrelated routes offline.
-      const service = new HealthService(buildPrisma(), buildConfig());
+      const service = new HealthService(buildPrisma(), buildConfig(), mockDrift);
 
       const result = await service.checkReadiness();
       const names = result.dependencies.map((d) => d.name);
@@ -141,6 +145,7 @@ describe("HealthService", () => {
           $queryRaw: jest.fn().mockImplementation(() => stalled),
         } as Partial<PrismaService>),
         buildConfig({ "health.probeTimeoutMs": 20 }),
+        mockDrift,
       );
 
       const result = await service.checkReadiness();
@@ -170,6 +175,7 @@ describe("HealthService", () => {
           $queryRaw: jest.fn().mockRejectedValue(leaky),
         } as Partial<PrismaService>),
         buildConfig(),
+        mockDrift,
       );
 
       const result = await service.checkReadiness();
@@ -185,6 +191,7 @@ describe("HealthService", () => {
       const service = new HealthService(
         buildPrisma(),
         buildConfig({ sessionSecret: "" }),
+        mockDrift,
       );
 
       const result = await service.checkReadiness();
@@ -205,6 +212,7 @@ describe("HealthService", () => {
       const service = new HealthService(
         prisma,
         buildConfig({ "health.cacheTtlMs": 10_000 }),
+        mockDrift,
       );
 
       await service.checkReadiness();
@@ -222,6 +230,7 @@ describe("HealthService", () => {
       const service = new HealthService(
         prisma,
         buildConfig({ "health.cacheTtlMs": 0 }),
+        mockDrift,
       );
 
       await service.checkReadiness();
@@ -235,6 +244,7 @@ describe("HealthService", () => {
       const service = new HealthService(
         prisma,
         buildConfig({ "health.cacheTtlMs": 10_000 }),
+        mockDrift,
       );
 
       await service.checkReadiness();
@@ -261,6 +271,7 @@ describe("HealthService", () => {
       const service = new HealthService(
         prisma,
         buildConfig({ "health.cacheTtlMs": 0 }),
+        mockDrift,
       );
 
       const inFlight = Promise.all([
@@ -287,6 +298,7 @@ describe("HealthService", () => {
       const service = new HealthService(
         buildPrisma({ $queryRaw } as Partial<PrismaService>),
         buildConfig({ "health.cacheTtlMs": 0 }),
+        mockDrift,
       );
 
       await expect(service.checkReadiness()).resolves.toMatchObject({
@@ -305,7 +317,7 @@ describe("HealthService", () => {
         .mockResolvedValue({ ok: false, status: 503 } as Response);
       global.fetch = fetchMock as unknown as typeof fetch;
 
-      const service = new HealthService(buildPrisma(), buildConfig());
+      const service = new HealthService(buildPrisma(), buildConfig(), mockDrift);
       const result = await service.checkDiagnostics();
 
       expect(result.status).toBe("ready");
@@ -323,6 +335,7 @@ describe("HealthService", () => {
           webhookDelivery: { count: jest.fn().mockResolvedValue(4) },
         } as unknown as Partial<PrismaService>),
         buildConfig(),
+        mockDrift,
       );
 
       const result = await service.checkDiagnostics();
@@ -338,6 +351,7 @@ describe("HealthService", () => {
       const service = new HealthService(
         buildPrisma(),
         buildConfig({ "contractAnchoring.enabled": false }),
+        mockDrift,
       );
 
       const result = await service.checkDiagnostics();
@@ -354,6 +368,7 @@ describe("HealthService", () => {
           "contractAnchoring.enabled": true,
           "contractAnchoring.proofRegistryContractId": "",
         }),
+        mockDrift,
       );
 
       const result = await service.checkDiagnostics();
@@ -367,6 +382,7 @@ describe("HealthService", () => {
       const service = new HealthService(
         buildPrisma(),
         buildConfig({ "stellar.horizonUrl": "" }),
+        mockDrift,
       );
 
       const result = await service.checkDiagnostics();
@@ -374,6 +390,48 @@ describe("HealthService", () => {
       expect(findDependency(result, "horizon").status).toBe(
         DependencyStatus.NOT_CONFIGURED,
       );
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // beginShutdown (earnproof-backend#68)
+  // ---------------------------------------------------------------------------
+
+  describe("beginShutdown", () => {
+    it("makes checkReadiness report not_ready immediately, even with a healthy database", async () => {
+      const prisma = buildPrisma();
+      const service = new HealthService(prisma, buildConfig(), mockDrift);
+
+      // Sanity check: ready before shutdown begins.
+      expect((await service.checkReadiness()).status).toBe("ready");
+
+      service.beginShutdown();
+      const result = await service.checkReadiness();
+
+      expect(result.status).toBe("not_ready");
+      expect(prisma.$queryRaw).toHaveBeenCalledTimes(1); // only the pre-shutdown call
+    });
+
+    it("does not consult or extend the dependency cache while shutting down", async () => {
+      const prisma = buildPrisma();
+      const service = new HealthService(prisma, buildConfig(), mockDrift);
+      await service.checkReadiness(); // warms the cache
+
+      service.beginShutdown();
+      await service.checkReadiness();
+      await service.checkReadiness();
+
+      // No additional probes after beginShutdown() — the not_ready answer is
+      // synthesized without touching the database at all.
+      expect(prisma.$queryRaw).toHaveBeenCalledTimes(1);
+    });
+
+    it("is idempotent — calling it more than once is safe", () => {
+      const service = new HealthService(buildPrisma(), buildConfig(), mockDrift);
+      expect(() => {
+        service.beginShutdown();
+        service.beginShutdown();
+      }).not.toThrow();
     });
   });
 });

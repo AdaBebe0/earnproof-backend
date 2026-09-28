@@ -4,20 +4,32 @@ import {
   UnauthorizedException,
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
+import { AuthEventType } from "@prisma/client";
 import { Keypair, StrKey } from "@stellar/stellar-base";
 import { createHash, randomBytes } from "crypto";
+import { Logger } from "@nestjs/common";
 import { PrismaService } from "../database/prisma.service";
 import { sha256 } from "../common/crypto/hash";
+import { AuthAuditService } from "./auth-audit.service";
+import { AuthRateLimiterService } from "./auth-rate-limiter.service";
 import { SessionService } from "./session.service";
+import type { SessionDeviceHeaders } from "./session-device-metadata";
+import {
+  normalizeOrigin,
+  OriginValidationError,
+} from "./originNormalizer";
 
 @Injectable()
 export class AuthService {
   private readonly appUrl: string;
   private readonly networkPassphrase: string;
+  private readonly logger = new Logger(AuthService.name);
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly sessionService: SessionService,
+    private readonly auditService: AuthAuditService,
+    private readonly rateLimiter: AuthRateLimiterService,
     configService: ConfigService,
   ) {
     this.appUrl = configService.getOrThrow<string>("appUrl");
@@ -26,8 +38,32 @@ export class AuthService {
     );
   }
 
-  async createChallenge(walletAddress: string) {
+  async createChallenge(walletAddress: string, clientMetadata?: string, requestOrigin?: string) {
     this.assertValidPublicKey(walletAddress);
+
+    // Check rate limits before creating challenge
+    await this.rateLimiter.checkChallengeCreationLimit(
+      walletAddress,
+      clientMetadata,
+    );
+
+    // Normalize and validate origin — reject with auditable reason on failure
+    let normalizedOrigin: string;
+    try {
+      // If no origin provided, use appUrl as default
+      const originToValidate = requestOrigin || this.appUrl;
+      normalizedOrigin = normalizeOrigin(originToValidate);
+    } catch (error) {
+      if (error instanceof OriginValidationError) {
+        this.logger.warn('[Auth] Challenge creation rejected — invalid origin', {
+          reason: error.reason,
+          // Note: rawOrigin logged for audit but NEVER included in client response
+          errorMessage: error.message,
+        });
+        throw new BadRequestException(`Invalid origin: ${error.reason}`);
+      }
+      throw error;
+    }
 
     const nonce = randomBytes(24).toString("base64url");
     const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
@@ -46,6 +82,8 @@ export class AuthService {
         nonceHash: sha256(nonce),
         message,
         expiresAt,
+        networkPassphrase: this.networkPassphrase,
+        origin: normalizedOrigin,
       },
       select: {
         id: true,
@@ -54,6 +92,17 @@ export class AuthService {
       },
     });
 
+    // Record successful challenge creation
+    await this.auditService.recordEvent(
+      AuthEventType.CHALLENGE_CREATED,
+      walletAddress,
+      {
+        challengeId: challenge.id,
+        success: true,
+        clientMetadata,
+      },
+    );
+
     return challenge;
   }
 
@@ -61,22 +110,138 @@ export class AuthService {
     challengeId: string;
     walletAddress: string;
     signature: string;
+    clientMetadata?: string;
+  }, headers?: SessionDeviceHeaders) {
+    requestOrigin?: string;
   }) {
     this.assertValidPublicKey(input.walletAddress);
 
-    const challenge = await this.prisma.walletChallenge.findFirst({
+    // Check rate limits before verification attempt
+    await this.rateLimiter.checkVerificationLimit(
+      input.walletAddress,
+      input.clientMetadata,
+    );
+
+    // Atomically mark the challenge as consumed only if it exists, is not used,
+    // and is not expired. This closes the TOCTOU window in which two concurrent
+    // requests could both pass an existence check before either marked it used.
+    // Atomically mark challenge as consumed only if it exists, is not used, and is not expired.
+    // This prevents TOCTOU race conditions where multiple concurrent requests could both
+    // pass the existence check before any are marked as used.
+    const consumedChallenge = await this.prisma.walletChallenge.updateMany({
       where: {
         id: input.challengeId,
         walletAddress: input.walletAddress,
-        usedAt: null,
-        expiresAt: { gt: new Date() },
+        usedAt: null, // Not yet consumed
+        expiresAt: {
+          gt: new Date(), // Not expired
+        },
+      },
+      data: {
+        usedAt: new Date(),
+      },
+    });
+
+    if (consumedChallenge.count === 0) {
+      // Nothing was consumed: the challenge was already used (a replay), or it
+      // expired or never existed. The two are audited separately; both return
+      // the same message, so the caller learns nothing either way.
+      // The atomic update matched nothing — either the challenge doesn't
+      // exist, was already consumed (replay), or is expired. Distinguish
+      // those for the audit trail with a read-only lookup; this happens
+      // after the fact, so it cannot reintroduce the race the update above
+      // closes.
+      const usedChallenge = await this.prisma.walletChallenge.findFirst({
+        where: {
+          id: input.challengeId,
+          walletAddress: input.walletAddress,
+          usedAt: { not: null },
+        },
+      });
+
+      if (usedChallenge) {
+        await this.auditService.recordEvent(
+          AuthEventType.CHALLENGE_REPLAYED,
+          input.walletAddress,
+          {
+            challengeId: input.challengeId,
+            success: false,
+            failureReason: "Challenge already used",
+            clientMetadata: input.clientMetadata,
+          },
+        );
+      } else {
+        await this.auditService.recordEvent(
+          AuthEventType.CHALLENGE_EXPIRED,
+          input.walletAddress,
+          {
+            challengeId: input.challengeId,
+            success: false,
+            failureReason: "Challenge expired or not found",
+            clientMetadata: input.clientMetadata,
+          },
+        );
+      }
+
+      throw new UnauthorizedException("Challenge is expired or unavailable");
+    }
+
+    // Fetch the challenge again to get the message for signature verification.
+    // It is already marked used, so a failed verification cannot be retried.
+    // The challenge is now marked as used, so even if verification fails, it cannot be reused.
+    const challenge = await this.prisma.walletChallenge.findUnique({
+      where: {
+        id: input.challengeId,
       },
     });
 
     if (!challenge) {
+      // Unreachable unless the row was deleted between the two statements;
+      // safeguarded rather than dereferenced.
+      // Should be unreachable: updateMany just matched and updated this row,
+      // so it exists. Safeguard against a concurrent deletion between the
+      // two statements.
       throw new UnauthorizedException("Challenge is expired or unavailable");
     }
 
+    // Reject legacy challenges (no network or origin bound)
+    if (!challenge.networkPassphrase || !challenge.origin) {
+      this.logger.warn('[Auth] Legacy challenge rejected — no network/origin binding', {
+        challengeId: input.challengeId,
+      });
+      throw new UnauthorizedException(
+        'Challenge context is not bound to network and origin',
+      );
+    }
+
+    // Verify network passphrase matches
+    if (challenge.networkPassphrase !== this.networkPassphrase) {
+      this.logger.warn('[Auth] Network mismatch rejected', {
+        challengeId: input.challengeId,
+        // Do NOT log the challenge's stored passphrase to avoid oracle attack
+      });
+      throw new UnauthorizedException('Challenge network mismatch');
+    }
+
+    // Normalize and verify origin matches
+    let normalizedRequestOrigin: string;
+    try {
+      // If no request origin provided, use appUrl as default
+      const originToValidate = input.requestOrigin || this.appUrl;
+      normalizedRequestOrigin = normalizeOrigin(originToValidate);
+    } catch {
+      throw new UnauthorizedException('Invalid request origin');
+    }
+
+    if (challenge.origin !== normalizedRequestOrigin) {
+      this.logger.warn('[Auth] Origin mismatch rejected', {
+        challengeId: input.challengeId,
+        // Log neither origin for audit — just that a mismatch occurred
+      });
+      throw new UnauthorizedException('Challenge origin mismatch');
+    }
+
+    // Network and origin verified — now verify signature (existing logic)
     const isValid = this.verifySignature(
       input.walletAddress,
       challenge.message,
@@ -84,6 +249,17 @@ export class AuthService {
     );
 
     if (!isValid) {
+      await this.auditService.recordEvent(
+        AuthEventType.SIGNATURE_INVALID,
+        input.walletAddress,
+        {
+          challengeId: input.challengeId,
+          success: false,
+          failureReason: "Invalid signature",
+          clientMetadata: input.clientMetadata,
+        },
+      );
+
       throw new UnauthorizedException("Invalid wallet signature");
     }
 
@@ -98,20 +274,24 @@ export class AuthService {
       },
     });
 
-    // Mark challenge as consumed before issuing a session so that a crash
-    // between the two writes leaves no valid challenge open.
-    await this.prisma.walletChallenge.update({
-      where: { id: challenge.id },
-      data: { usedAt: new Date() },
-    });
-
     // Create a persisted, revocable session.  Only the hash is stored.
     const { token, sessionId, expiresAt } = await this.sessionService.create({
       id: user.id,
       walletAddress: user.walletAddress,
       walletHash: user.walletHash,
       role: user.role,
-    });
+    }, undefined, headers);
+
+    // Record successful verification
+    await this.auditService.recordEvent(
+      AuthEventType.CHALLENGE_VERIFIED,
+      input.walletAddress,
+      {
+        challengeId: input.challengeId,
+        success: true,
+        clientMetadata: input.clientMetadata,
+      },
+    );
 
     return {
       user: {

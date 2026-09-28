@@ -1,4 +1,6 @@
-import { Injectable, Logger } from "@nestjs/common";
+﻿import { Injectable, Logger } from "@nestjs/common";
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+import { ContractDriftService } from "./contract-drift.service";
 import { ConfigService } from "@nestjs/config";
 import { PrismaService } from "../database/prisma.service";
 import {
@@ -40,6 +42,14 @@ export class HealthService {
   private readonly cache = new Map<string, CacheEntry>();
 
   /**
+   * Flips true the instant shutdown begins (earnproof-backend#68) — see
+   * `beginShutdown()`. `checkReadiness` reports `not_ready` immediately once
+   * this is set, before any in-flight work has actually finished draining,
+   * so a load balancer stops routing new traffic here as early as possible.
+   */
+  private shuttingDown = false;
+
+  /**
    * In-flight probes, keyed by dependency name.
    *
    * This is the single-flight guard: when N concurrent requests arrive for a
@@ -52,6 +62,7 @@ export class HealthService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
+    private readonly contractDrift: ContractDriftService,
   ) {}
 
   /**
@@ -78,6 +89,25 @@ export class HealthService {
    * flip the verdict.
    */
   async checkReadiness(): Promise<ReadinessResult> {
+    if (this.shuttingDown) {
+      // Skip the dependency probes entirely — they'd cost time and I/O for
+      // an answer that's already decided. Not-ready-during-shutdown must
+      // never be masked by a fresh cache entry from a probe that started
+      // before the signal arrived.
+      return {
+        status: "not_ready",
+        dependencies: [
+          {
+            name: "shutdown",
+            kind: DependencyKind.REQUIRED,
+            status: DependencyStatus.ERROR,
+            reason: "shutting_down",
+            durationMs: 0,
+          },
+        ],
+      };
+    }
+
     const dependencies = await Promise.all([
       this.probeCached("database", DependencyKind.REQUIRED, () =>
         this.probeDatabase(),
@@ -97,6 +127,16 @@ export class HealthService {
       status: blocked ? "not_ready" : "ready",
       dependencies,
     };
+  }
+
+  /**
+   * Called once, as early as possible in the shutdown sequence (see
+   * `main.ts`'s SIGTERM handler). Makes `checkReadiness` report `not_ready`
+   * immediately, before any in-flight work has actually finished draining —
+   * see this module's own doc for why liveness must NOT do the same.
+   */
+  beginShutdown(): void {
+    this.shuttingDown = true;
   }
 
   /**

@@ -4,11 +4,13 @@ import { DatabaseModule } from "../database/database.module";
 import { QuotasModule } from "../quotas/quotas.module";
 import { OrganizationsService } from "./organizations.service";
 import { OrganizationsController } from "./organizations.controller";
+import { OrganizationMembersService } from "./organization-members.service";
+import { OrganizationMemberGuard } from "./guards/organization-member.guard";
 
 @Module({
   imports: [DatabaseModule, AuthModule, QuotasModule],
   controllers: [OrganizationsController],
-  providers: [OrganizationsService],
-  exports: [OrganizationsService],
+  providers: [OrganizationsService, OrganizationMembersService, OrganizationMemberGuard],
+  exports: [OrganizationsService, OrganizationMembersService],
 })
 export class OrganizationsModule {}

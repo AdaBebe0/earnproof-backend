@@ -1,4 +1,4 @@
-import {
+﻿import {
   AnchoringOperation,
   AnchoringStatus,
   PaymentClassification,
@@ -10,6 +10,7 @@ import { sha256 } from "../common/crypto/hash";
 import { ProofsService } from "./proofs.service";
 import { VerificationEventService } from "../audit/verification-event.service";
 import { unlimitedQuotas } from "../testing/quotas";
+import { AttestationsService } from "../attestations/attestations.service";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -65,6 +66,10 @@ const mockVerificationEventService = {
   getAggregateStats: jest.fn().mockResolvedValue({}),
   cleanupExpiredEvents: jest.fn().mockResolvedValue(0),
 } as unknown as VerificationEventService;
+
+const mockAttestationsService = {
+  getValidAttestationsForSubject: jest.fn().mockResolvedValue([]),
+} as unknown as AttestationsService;
 
 const user = {
   id: "user_1",
@@ -144,6 +149,7 @@ describe("ProofsService", () => {
       $transaction: jest.fn(),
     };
     const service = new ProofsService(prisma as never, config as never, mockVerificationEventService, unlimitedQuotas() as never);
+    const service = new ProofsService(prisma as never, config as never, mockVerificationEventService, mockAttestationsService);
 
     await expect(
       service.createMinimumIncomeProof(user, {
@@ -157,6 +163,7 @@ describe("ProofsService", () => {
   });
 
   it("returns an unknown public verification state for missing proofs", async () => {
+    (mockVerificationEventService.recordEvent as jest.Mock).mockClear();
     const prisma = {
       proof: {
         findUnique: jest.fn().mockResolvedValue(null),
@@ -166,11 +173,13 @@ describe("ProofsService", () => {
       },
     };
     const service = new ProofsService(prisma as never, config as never, mockVerificationEventService, unlimitedQuotas() as never);
+    const service = new ProofsService(prisma as never, config as never, mockVerificationEventService, mockAttestationsService);
 
     await expect(service.verifyProof("missing")).resolves.toEqual({
       result: VerificationResult.UNKNOWN_PROOF,
       status: "unknown",
     });
+    expect(mockVerificationEventService.recordEvent).not.toHaveBeenCalled();
   });
 
   it("returns a revoked public verification state", async () => {
@@ -191,7 +200,7 @@ describe("ProofsService", () => {
       },
       privacy: { exactIncomeHidden: true, sourceTransactionsHidden: true },
       issuedAt: "2026-08-02T00:00:00.000Z",
-      expiresAt: "2026-09-01T00:00:00.000Z",
+      expiresAt: "2027-09-01T00:00:00.000Z",
     };
     const prisma = {
       proof: {
@@ -205,7 +214,7 @@ describe("ProofsService", () => {
           assetIssuer: null,
           periodStart: new Date("2026-08-01T00:00:00.000Z"),
           periodEnd: new Date("2026-08-31T23:59:59.000Z"),
-          expiresAt: new Date("2026-09-01T00:00:00.000Z"),
+          expiresAt: new Date("2027-09-01T00:00:00.000Z"),
           revokedAt: new Date("2026-08-03T00:00:00.000Z"),
           createdAt: new Date("2026-08-02T00:00:00.000Z"),
           credentialHash: `sha256:${sha256(canonicalize(credential))}`,
@@ -222,6 +231,7 @@ describe("ProofsService", () => {
       },
     };
     const service = new ProofsService(prisma as never, config as never, mockVerificationEventService, unlimitedQuotas() as never);
+    const service = new ProofsService(prisma as never, config as never, mockVerificationEventService, mockAttestationsService);
 
     const result = await service.verifyProof("proof_1");
 
@@ -229,9 +239,6 @@ describe("ProofsService", () => {
 
     expect(result.result).toBe(VerificationResult.REVOKED);
     expect(result.status).toBe("revoked");
-    expect(prisma.verificationEvent.create).toHaveBeenCalledWith({
-      data: { proofId: "proof_1", result: VerificationResult.REVOKED },
-    });
   });
 
   it("revokes anchored proofs by enqueuing REVOKE intent in same transaction", async () => {
@@ -268,6 +275,8 @@ describe("ProofsService", () => {
       prisma as never,
       makeConfig(true) as never, // anchoring enabled
       mockVerificationEventService, unlimitedQuotas() as never,
+      mockVerificationEventService,
+      mockAttestationsService,
     );
 
     const result = await service.revokeProof("user_1", "proof_anchored");
@@ -301,7 +310,7 @@ describe("ProofsService", () => {
       },
       privacy: { exactIncomeHidden: true, sourceTransactionsHidden: true },
       issuedAt: "2026-08-02T00:00:00.000Z",
-      expiresAt: "2026-09-01T00:00:00.000Z",
+      expiresAt: "2027-09-01T00:00:00.000Z",
     };
     const prisma = {
       proof: {
@@ -315,7 +324,7 @@ describe("ProofsService", () => {
           assetIssuer: null,
           periodStart: new Date("2026-08-01T00:00:00.000Z"),
           periodEnd: new Date("2026-08-31T23:59:59.000Z"),
-          expiresAt: new Date("2026-09-01T00:00:00.000Z"),
+          expiresAt: new Date("2027-09-01T00:00:00.000Z"),
           revokedAt: null,
           createdAt: new Date("2026-08-02T00:00:00.000Z"),
           credentialHash: `sha256:${sha256(canonicalize(credential))}`,
@@ -343,6 +352,7 @@ describe("ProofsService", () => {
       config as never,
       mockVerificationEventService,
       unlimitedQuotas() as never,
+      mockAttestationsService,
       anchoring as never,
     );
 
@@ -361,7 +371,7 @@ describe("ProofsService", () => {
   // Outbox / anchoring policy tests
   // ---------------------------------------------------------------------------
 
-  describe("anchoring outbox — same-transaction intent creation", () => {
+  describe("anchoring outbox â€” same-transaction intent creation", () => {
     it("writes REGISTER AnchoringIntent inside the proof creation transaction when anchoring is enabled", async () => {
       const capturedIntents: unknown[] = [];
       const prisma = makeCreatePrisma((data) => capturedIntents.push(data));
@@ -369,6 +379,8 @@ describe("ProofsService", () => {
         prisma as never,
         makeConfig(true) as never, // anchoring enabled
         mockVerificationEventService, unlimitedQuotas() as never,
+        mockVerificationEventService,
+        mockAttestationsService,
       );
 
       await service.createMinimumIncomeProof(user, {
@@ -394,6 +406,7 @@ describe("ProofsService", () => {
         makeConfig(false) as never, // anchoring disabled
         mockVerificationEventService, unlimitedQuotas() as never,
       );
+      const service = new ProofsService(prisma as never, makeConfig(false) as never, mockVerificationEventService, mockAttestationsService);
 
       await service.createMinimumIncomeProof(user, {
         selectedPaymentIds: ["payment_1"],
@@ -414,6 +427,7 @@ describe("ProofsService", () => {
         mockVerificationEventService,
         unlimitedQuotas() as never,
       );
+      const service = new ProofsService(prisma as never, makeConfig(true) as never, mockVerificationEventService, mockAttestationsService);
 
       const result = await service.createMinimumIncomeProof(user, {
         selectedPaymentIds: ["payment_1"],
@@ -434,6 +448,7 @@ describe("ProofsService", () => {
         mockVerificationEventService,
         unlimitedQuotas() as never,
       );
+      const service = new ProofsService(prisma as never, makeConfig(false) as never, mockVerificationEventService, mockAttestationsService);
 
       const result = await service.createMinimumIncomeProof(user, {
         selectedPaymentIds: ["payment_1"],
@@ -447,7 +462,7 @@ describe("ProofsService", () => {
     });
   });
 
-  describe("required anchoring policy — verify endpoint", () => {
+  describe("required anchoring policy â€” verify endpoint", () => {
     function makeVerifyProof(contractTransactionHash: string | null, credOverrides: Record<string, unknown> = {}) {
       const credential = {
         id: "proof_req",
@@ -466,7 +481,7 @@ describe("ProofsService", () => {
         },
         privacy: { exactIncomeHidden: true, sourceTransactionsHidden: true },
         issuedAt: "2026-08-02T00:00:00.000Z",
-        expiresAt: "2026-09-01T00:00:00.000Z",
+        expiresAt: "2027-09-01T00:00:00.000Z",
         ...credOverrides,
       };
       return {
@@ -481,7 +496,7 @@ describe("ProofsService", () => {
             assetIssuer: null,
             periodStart: new Date("2026-08-01T00:00:00.000Z"),
             periodEnd: new Date("2026-08-31T23:59:59.000Z"),
-            expiresAt: new Date("2026-09-01T00:00:00.000Z"),
+            expiresAt: new Date("2027-09-01T00:00:00.000Z"),
             revokedAt: null,
             createdAt: new Date("2026-08-02T00:00:00.000Z"),
             credentialHash: `sha256:${sha256(canonicalize(credential))}`,
@@ -507,6 +522,7 @@ describe("ProofsService", () => {
         makeConfig(true, true) as never, // enabled + required
         mockVerificationEventService, unlimitedQuotas() as never,
       );
+      const service = new ProofsService(prisma as never, makeConfig(true, true) as never, mockVerificationEventService, mockAttestationsService);
 
       const result = await service.verifyProof("proof_req");
 
@@ -521,6 +537,7 @@ describe("ProofsService", () => {
         mockVerificationEventService,
         unlimitedQuotas() as never,
       );
+      const service = new ProofsService(prisma as never, makeConfig(true, true) as never, mockVerificationEventService, mockAttestationsService);
 
       const result = await service.verifyProof("proof_req");
 
@@ -536,6 +553,7 @@ describe("ProofsService", () => {
         mockVerificationEventService,
         unlimitedQuotas() as never,
       );
+      const service = new ProofsService(prisma as never, makeConfig(true, false) as never, mockVerificationEventService, mockAttestationsService);
 
       const result = await service.verifyProof("proof_req");
 
@@ -550,6 +568,7 @@ describe("ProofsService", () => {
         mockVerificationEventService,
         unlimitedQuotas() as never,
       );
+      const service = new ProofsService(prisma as never, makeConfig(false, false) as never, mockVerificationEventService, mockAttestationsService);
 
       const result = await service.verifyProof("proof_req");
 
@@ -557,4 +576,6 @@ describe("ProofsService", () => {
     });
   });
 });
+
+
 

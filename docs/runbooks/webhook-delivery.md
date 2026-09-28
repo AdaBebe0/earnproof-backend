@@ -46,6 +46,11 @@ address the guard treats as internal, both present this way.
 A uniform 4xx across tenants that began at a deployment points at signature
 generation. Customers verifying signatures reject every delivery at once.
 
+Confirm before rolling back: `npm run webhook:conformance` replays the frozen
+signing vectors against the shipping signer. If it fails, the wire format
+changed and every integrator is broken. If it passes, the cause is elsewhere.
+See [the verification guide](../webhooks.md) for the scheme itself.
+
 ### 5. Is anything being dispatched?
 
 ```
