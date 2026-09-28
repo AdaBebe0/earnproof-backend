@@ -856,6 +856,19 @@ export class ProofsService {
       result = VerificationResult.INVALID_SIGNATURE;
     }
 
+    const contractStatus = proof.contractTransactionHash
+      ? await this.contractAnchoringService?.getProofStatus(proof.id)
+      : undefined;
+
+    // Fail closed: authoritative on-chain invalidity overrides stale local state
+    if (contractStatus?.checked) {
+      if (contractStatus.revoked) {
+        result = VerificationResult.REVOKED;
+      } else if (result === VerificationResult.VALID && !contractStatus.valid) {
+        result = VerificationResult.INVALID_SIGNATURE;
+      }
+    }
+
     // If required anchoring is enabled and this proof has not yet been
     // confirmed on-chain, return UNVERIFIED_ISSUER to signal that the proof
     // is not yet verifiable via the contract. Optional anchoring (or no
@@ -866,18 +879,6 @@ export class ProofsService {
       !proof.contractTransactionHash
     ) {
       result = VerificationResult.UNVERIFIED_ISSUER;
-    }
-
-    const contractStatus = proof.contractTransactionHash
-      ? await this.contractAnchoringService?.getProofStatus(proof.id)
-      : undefined;
-
-    if (contractStatus?.checked) {
-      if (contractStatus.revoked) {
-        result = VerificationResult.REVOKED;
-      } else if (result === VerificationResult.VALID && !contractStatus.valid) {
-        result = VerificationResult.INVALID_SIGNATURE;
-      }
     }
 
     // Convert VerificationResult to VerificationOutcome for event recording

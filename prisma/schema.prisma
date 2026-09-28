@@ -642,3 +642,251 @@ model RecentAuthAssertion {
   @@index([userId, action, usedAt])
   @@index([expiresAt])
 }
+
+/// Migration deployment lease for preventing concurrent migration execution.
+/// Only one deployment may hold the migration lease at a time.
+/// Uses both PostgreSQL advisory locks for mutual exclusion and persisted state for observability.
+model MigrationLease {
+  id              String   @id @default("migration_deployment")
+  /// Process/deployment identifier holding the lease (hostname, container ID, etc).
+  ownerId         String
+  /// When the lease was acquired.
+  acquiredAt      DateTime @default(now())
+  /// When the lease expires and can be recovered by another deployment.
+  expiresAt       DateTime
+  /// Current migration state/version being processed.
+  migrationState  String?
+  /// Last successful migration version completed.
+  lastVersion     String?
+  /// Whether migration execution is currently active.
+  isActive        Boolean  @default(true)
+  /// Deployment/process metadata for debugging.
+  ownerMetadata   Json?
+  updatedAt       DateTime @updatedAt
+
+  @@index([expiresAt])
+}
+
+/// Proof state reconciliation checkpoints for tracking contract synchronization progress.
+model ProofReconciliationCheckpoint {
+  id                    String   @id @default("proof_reconciliation")
+  /// Contract address being reconciled.
+  contractId            String
+  /// Stellar network (testnet, mainnet, etc).
+  network               String
+  /// Last processed ledger sequence number.
+  lastLedger            BigInt?
+  /// Last processed event cursor/position.
+  lastEventCursor       String?
+  /// Contract schema version being processed.
+  contractVersion       String?
+  /// Reconciliation progress state.
+  syncState             String   @default("PENDING")
+  /// Last successful reconciliation timestamp.
+  lastSyncedAt          DateTime?
+  /// Any reconciliation errors for visibility.
+  lastError             String?
+  /// Number of events processed in last run.
+  eventsProcessed       Int      @default(0)
+  /// Number of conflicts quarantined.
+  conflictsQuarantined  Int      @default(0)
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  @@index([contractId, network])
+  @@index([lastSyncedAt])
+}
+
+/// Issuer state reconciliation checkpoints for tracking registry synchronization progress.
+model IssuerReconciliationCheckpoint {
+  id                    String   @id @default("issuer_reconciliation")
+  /// Registry contract address being reconciled.
+  contractId            String
+  /// Stellar network (testnet, mainnet, etc).
+  network               String
+  /// Last processed ledger sequence number.
+  lastLedger            BigInt?
+  /// Last processed event cursor/position.
+  lastEventCursor       String?
+  /// Contract schema version being processed.
+  contractVersion       String?
+  /// Reconciliation progress state.
+  syncState             String   @default("PENDING")
+  /// Last successful reconciliation timestamp.
+  lastSyncedAt          DateTime?
+  /// Any reconciliation errors for visibility.
+  lastError             String?
+  /// Number of events processed in last run.
+  eventsProcessed       Int      @default(0)
+  /// Number of conflicts quarantined.
+  conflictsQuarantined  Int      @default(0)
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  @@index([contractId, network])
+  @@index([lastSyncedAt])
+}
+
+enum ReconciliationConflictType {
+  STATE_MISMATCH
+  UNKNOWN_EVENT_VERSION
+  REORG_DETECTED
+  CONTRACT_REPLACEMENT
+  INVALID_TRANSITION
+}
+
+enum ReconciliationConflictStatus {
+  QUARANTINED
+  RESOLVED
+  IGNORED
+}
+
+/// Quarantine for reconciliation conflicts that cannot be resolved automatically.
+model ReconciliationConflict {
+  id                String                        @id @default(cuid())
+  /// Type of reconciliation (proof, issuer).
+  resourceType      String
+  /// Resource ID (proof ID, issuer ID).
+  resourceId        String
+  /// Contract address where conflict occurred.
+  contractId        String
+  /// Stellar network.
+  network           String
+  /// Type of conflict detected.
+  conflictType      ReconciliationConflictType
+  /// Current resolution status.
+  status            ReconciliationConflictStatus  @default(QUARANTINED)
+  /// Event/ledger position where conflict occurred.
+  eventPosition     String?
+  /// Observed contract state that conflicts.
+  contractState     Json?
+  /// Local state that conflicts.
+  localState        Json?
+  /// Additional context for debugging.
+  metadata          Json?
+  /// When conflict was detected.
+  detectedAt        DateTime                      @default(now())
+  /// When conflict was resolved (if resolved).
+  resolvedAt        DateTime?
+  /// Resolution method/reason.
+  resolutionReason  String?
+  /// Who resolved it (for audit).
+  resolvedBy        String?
+
+  @@index([resourceType, resourceId])
+  @@index([contractId, network])
+  @@index([status, detectedAt])
+  @@index([conflictType])
+}
+
+enum DisputeStatus {
+  OPEN
+  ASSIGNED
+  RESOLVED
+  WITHDRAWN
+}
+
+enum DisputeCategory {
+  ACCURACY
+  FRAUD
+  TECHNICAL
+  COMPLIANCE
+  OTHER
+}
+
+/// Proof dispute workflow for business/audit review process.
+/// This is separate from cryptographic verification - disputes are business workflow.
+model ProofDispute {
+  id                  String          @id @default(cuid())
+  /// Organization that owns this dispute (tenant isolation).
+  organizationId      String
+  organization        Organization    @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  /// Proof being disputed.
+  proofId             String
+  proof               Proof           @relation(fields: [proofId], references: [id], onDelete: Restrict)
+  /// Dispute category for classification.
+  category            DisputeCategory
+  /// Current lifecycle status.
+  status              DisputeStatus   @default(OPEN)
+  /// Hash/commitment of evidence (not raw evidence).
+  evidenceCommitment  String?
+  /// Actor who submitted the dispute.
+  submittedBy         String
+  /// Actor assigned to review (if assigned).
+  assignedTo          String?
+  /// Resolution outcome/reason.
+  resolutionOutcome   String?
+  /// Resolution details.
+  resolutionReason    String?
+  /// Actor who resolved the dispute.
+  resolvedBy          String?
+  /// When dispute was submitted.
+  submittedAt         DateTime        @default(now())
+  /// When dispute was assigned (if assigned).
+  assignedAt          DateTime?
+  /// When dispute was resolved (if resolved).
+  resolvedAt          DateTime?
+  /// When dispute was withdrawn (if withdrawn).
+  withdrawnAt         DateTime?
+  /// Additional metadata (bounded).
+  metadata            Json?
+
+  @@unique([proofId, category, status], name: "one_active_dispute_per_proof_category", map: "proof_dispute_unique_active")
+  @@index([organizationId])
+  @@index([proofId])
+  @@index([status])
+  @@index([submittedBy])
+  @@index([assignedTo])
+  @@index([submittedAt])
+}
+
+model Organization {
+  id          String          @id @default(cuid())
+  name        String
+  slug        String          @unique
+  website     String?
+  status      ResourceStatus  @default(PENDING)
+  revision    Int             @default(0)
+  createdById String
+  createdBy   User            @relation(fields: [createdById], references: [id])
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+  issuers     Issuer[]
+  apiKeys     ApiKey[]
+  webhooks    Webhook[]
+  members     OrganizationMember[]
+  idempotencyRecords IdempotencyRecord[]
+  disputes    ProofDispute[]
+
+  @@index([status])
+}
+
+model Proof {
+  id                      String              @id @default(cuid())
+  userId                  String
+  user                    User                @relation(fields: [userId], references: [id])
+  proofType               ProofType
+  schemaVersion           String
+  status                  ProofStatus         @default(ACTIVE)
+  network                 String
+  assetCode               String
+  assetIssuer             String?
+  periodStart             DateTime?
+  periodEnd               DateTime?
+  expiresAt               DateTime
+  commitment              String?
+  credentialHash          String              @unique
+  contractTransactionHash String?
+  revokedAt               DateTime?
+  createdAt               DateTime            @default(now())
+  updatedAt               DateTime            @updatedAt
+  claim                   ProofClaim?
+  verificationEvents      VerificationEvent[]
+  anchoringIntents        AnchoringIntent[]
+  disputes                ProofDispute[]
+
+  @@index([userId, status])
+  @@index([userId, createdAt, id])
+  @@index([proofType])
+  @@index([expiresAt])
+}
