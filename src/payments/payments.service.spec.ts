@@ -1,5 +1,6 @@
 import { PaymentClassification, ResourceStatus } from "@prisma/client";
 import { PaymentsService } from "./payments.service";
+import { unlimitedQuotas } from "../testing/quotas";
 
 describe("PaymentsService", () => {
   const config = {
@@ -45,6 +46,7 @@ describe("PaymentsService", () => {
       prisma as never,
       stellar as never,
       config as never,
+      unlimitedQuotas() as never,
     );
 
     await expect(
@@ -105,6 +107,7 @@ describe("PaymentsService", () => {
       prisma as never,
       stellar as never,
       config as never,
+      unlimitedQuotas() as never,
     );
 
     const result = await service.syncPayments({
@@ -151,6 +154,7 @@ describe("PaymentsService", () => {
       prisma as never,
       stellar as never,
       config as never,
+      unlimitedQuotas() as never,
     );
 
     await expect(
@@ -186,6 +190,7 @@ describe("PaymentsService", () => {
       prisma as never,
       {} as never,
       config as never,
+      unlimitedQuotas() as never,
     );
 
     await expect(
@@ -243,6 +248,7 @@ describe("PaymentsService", () => {
       prisma as never,
       {} as never,
       config as never,
+      unlimitedQuotas() as never,
     );
 
     const [listed] = await service.listPayments("user_1", {});
@@ -281,6 +287,7 @@ describe("PaymentsService", () => {
       prisma as never,
       {} as never,
       config as never,
+      unlimitedQuotas() as never,
     );
 
     const updated = await service.updateClassification(

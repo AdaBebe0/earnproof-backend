@@ -149,6 +149,9 @@ async function main(): Promise<void> {
           eventType: delivery.eventType,
           eventId: delivery.eventId,
           payload: delivery.payload as object,
+          // Synthetic demo rows: the stored body is what a retry would send.
+          schemaVersion: "1",
+          payloadBody: JSON.stringify(delivery.payload),
           attempt: delivery.attempt,
           status: delivery.status,
           statusCode: delivery.statusCode,

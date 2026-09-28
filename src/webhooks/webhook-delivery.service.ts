@@ -4,7 +4,11 @@ import { Prisma, WebhookDeliveryStatus } from "@prisma/client";
 import { randomUUID } from "crypto";
 import { decryptProtectedAmount } from "../common/crypto/protected-amount";
 import { PrismaService } from "../database/prisma.service";
-import { WebhookEnvelope, WebhookEventType } from "./webhook-event.types";
+import { WebhookEventSource, WebhookEventType } from "./webhook-event.types";
+import {
+  payloadDeprecation,
+  serializeWebhookEvent,
+} from "./webhook-payload.serializers";
 import { WebhookSigningService } from "./webhook-signing.service";
 import {
   SsrfBlockedError,
@@ -17,11 +21,29 @@ const MAX_RESPONSE_BODY_BYTES = 1024;
 /** Delivery timeout in milliseconds. */
 const DELIVERY_TIMEOUT_MS = 10_000;
 
-/** Maximum delivery attempts (1 initial + 4 retries = 5 total). */
-const MAX_ATTEMPTS = 5;
+/**
+ * Default maximum delivery attempts per chain (1 initial + 4 retries).
+ * Overridable with WEBHOOK_MAX_DELIVERY_ATTEMPTS.
+ */
+export const DEFAULT_MAX_DELIVERY_ATTEMPTS = 5;
 
 /** Exponential backoff base in milliseconds. */
 const BACKOFF_BASE_MS = 1_000;
+
+/**
+ * Stable reason codes recorded when a delivery chain ends without success.
+ * Codes, not messages: operators filter on them, and they never carry
+ * response content.
+ */
+export const DeadLetterReason = {
+  MAX_ATTEMPTS_EXHAUSTED: "max_attempts_exhausted",
+  DESTINATION_BLOCKED: "destination_blocked",
+  SIGNING_SECRET_UNAVAILABLE: "signing_secret_unavailable",
+  ENDPOINT_DISABLED: "endpoint_disabled",
+} as const;
+
+export type DeadLetterReasonValue =
+  (typeof DeadLetterReason)[keyof typeof DeadLetterReason];
 
 /**
  * Compute delay before attempt `n` (1-indexed).
@@ -46,6 +68,7 @@ type WebhookChain = { tail: Promise<void> };
 export class WebhookDeliveryService implements OnModuleInit {
   private readonly logger = new Logger(WebhookDeliveryService.name);
   private readonly encryptionKey: string;
+  private readonly maxAttempts: number;
 
   /**
    * Per-webhook serialization chains.
@@ -59,6 +82,14 @@ export class WebhookDeliveryService implements OnModuleInit {
     configService: ConfigService,
   ) {
     this.encryptionKey = configService.getOrThrow<string>("paymentEncryptionKey");
+    this.maxAttempts =
+      configService.get<number>("webhooks.maxDeliveryAttempts") ??
+      DEFAULT_MAX_DELIVERY_ATTEMPTS;
+  }
+
+  /** The configured retry threshold: attempts allowed per delivery chain. */
+  get maxDeliveryAttempts(): number {
+    return this.maxAttempts;
   }
 
   /**
@@ -90,15 +121,18 @@ export class WebhookDeliveryService implements OnModuleInit {
   }
 
   /**
-   * Enqueue a new webhook event for all active, subscribing endpoints
-   * belonging to the organisations the user is a member of.
+   * Enqueue a domain event for all active, subscribing endpoints belonging to
+   * the organisations the user is a member of.
+   *
+   * The event gets one identifier and one occurrence time, shared by every
+   * endpoint and every later retry. Each endpoint receives the payload version
+   * it is pinned to, serialized once and persisted as exact bytes.
    *
    * Called by ProofsService after each lifecycle event.
    */
   async enqueueForUser(
     userId: string,
-    eventType: WebhookEventType,
-    envelope: Omit<WebhookEnvelope, "id" | "specVersion" | "createdAt">,
+    domainEvent: WebhookEventSource,
   ): Promise<void> {
     // Resolve which organisations the user belongs to
     const user = await this.prisma.user.findUnique({
@@ -119,39 +153,63 @@ export class WebhookDeliveryService implements OnModuleInit {
       },
       select: {
         id: true,
-        url: true,
-        secretEncrypted: true,
         events: true,
+        payloadVersion: true,
       },
     });
 
+    const eventId = randomUUID();
+    const occurredAt = new Date();
+
     for (const hook of webhooks) {
       const subscribedEvents = this.parseEvents(hook.events);
-      if (!subscribedEvents.includes(eventType)) continue;
+      if (!subscribedEvents.includes(domainEvent.event)) continue;
 
-      const eventId = randomUUID();
-      const fullEnvelope: WebhookEnvelope = {
-        specVersion: "1",
-        id: eventId,
-        event: eventType,
-        createdAt: new Date().toISOString(),
-        data: envelope.data,
-      };
+      let serialized: ReturnType<typeof serializeWebhookEvent>;
+      try {
+        serialized = serializeWebhookEvent({
+          event: domainEvent.event,
+          source: domainEvent.source as never,
+          eventId,
+          occurredAt,
+          version: hook.payloadVersion,
+        });
+      } catch (err) {
+        // Fail closed: an event that cannot be serialized to the endpoint's
+        // declared contract is not delivered at all.
+        this.logger.error(
+          `Webhook ${hook.id}: cannot serialize ${domainEvent.event} for payload version ${hook.payloadVersion}: ${String(err)}`,
+        );
+        continue;
+      }
 
       const delivery = await this.prisma.webhookDelivery.create({
         data: {
           webhookId: hook.id,
-          eventType,
+          eventType: domainEvent.event,
           eventId,
-          payload: fullEnvelope as unknown as Prisma.InputJsonValue,
+          payload: serialized.envelope as unknown as Prisma.InputJsonValue,
+          schemaVersion: serialized.schemaVersion,
+          payloadBody: serialized.body,
           attempt: 1,
           status: WebhookDeliveryStatus.PENDING,
         },
         select: { id: true },
       });
 
-      this.scheduleDelivery(delivery.id, hook.id, 0, fullEnvelope);
+      this.scheduleDelivery(delivery.id, hook.id, 0);
     }
+  }
+
+  /**
+   * Schedule an already-persisted PENDING delivery for immediate dispatch,
+   * serialised behind any in-flight delivery for the same endpoint.
+   *
+   * Used by redrive, which creates its delivery row inside a transaction and
+   * must dispatch only after that transaction has committed.
+   */
+  dispatch(deliveryId: string, webhookId: string): void {
+    this.scheduleDelivery(deliveryId, webhookId, 0);
   }
 
   /**
@@ -202,6 +260,9 @@ export class WebhookDeliveryService implements OnModuleInit {
         webhookId: original.webhookId,
         eventType: original.eventType,
         payload: original.payload as Prisma.InputJsonValue,
+        // Original version and bytes: a replay is the same event, not a new one.
+        schemaVersion: original.schemaVersion,
+        payloadBody: original.payloadBody,
         eventId: original.eventId, // same eventId → integrator deduplicates
         attempt: 1,
         status: WebhookDeliveryStatus.PENDING,
@@ -225,15 +286,13 @@ export class WebhookDeliveryService implements OnModuleInit {
    * Schedule a delivery to run after `delayMs` milliseconds, serialised
    * behind any already-running delivery for the same webhook.
    *
-   * `envelope`, `url`, and `secretEncrypted` are optional: if omitted the
-   * worker will re-fetch from the database.  They are passed on the first
-   * attempt (from `enqueueForUser`) to avoid an extra round-trip.
+   * The worker always re-reads the delivery row: the persisted body is the
+   * single source of truth for what is signed and sent.
    */
   private scheduleDelivery(
     deliveryId: string,
     webhookId: string,
     delayMs: number,
-    envelope?: WebhookEnvelope,
   ): void {
     const existing = this.chains.get(webhookId);
     const tail = existing?.tail ?? Promise.resolve();
@@ -243,13 +302,7 @@ export class WebhookDeliveryService implements OnModuleInit {
         new Promise<void>((resolve) => {
           setTimeout(async () => {
             try {
-              await this.runDelivery(
-                deliveryId,
-                envelope,
-                undefined,
-                undefined,
-                true,
-              );
+              await this.runDelivery(deliveryId, true);
             } catch {
               // runDelivery swallows its own errors and logs them;
               // we must not let an uncaught rejection break the chain.
@@ -263,14 +316,11 @@ export class WebhookDeliveryService implements OnModuleInit {
   }
 
   /**
-   * Execute one delivery attempt.  On failure, either schedules a retry
-   * (if attempts remain) or marks the delivery FAILED permanently.
+   * Execute one delivery attempt. On failure, either schedules a retry (while
+   * the retry threshold has not been reached) or dead-letters the attempt.
    */
   private async runDelivery(
     deliveryId: string,
-    cachedEnvelope?: WebhookEnvelope,
-    _cachedUrl?: string,
-    _cachedSecretEncrypted?: string,
     holdAggregateQueue = false,
   ): Promise<void> {
     const delivery = await this.prisma.webhookDelivery.findUnique({
@@ -292,15 +342,32 @@ export class WebhookDeliveryService implements OnModuleInit {
       return;
     }
 
-    // If the endpoint was disabled between scheduling and execution, bail.
+    // A delivery row is attempted at most once. Crash recovery and redrive can
+    // both schedule the same row; only a PENDING row is ever dispatched.
+    if (delivery.status !== WebhookDeliveryStatus.PENDING) {
+      this.logger.warn(
+        `Delivery ${deliveryId} is ${delivery.status}, not PENDING; skipping`,
+      );
+      return;
+    }
+
+    // If the endpoint was disabled or deleted between scheduling and
+    // execution, stop the chain without sending.
     if (delivery.webhook.status !== "ACTIVE") {
-      await this.prisma.webhookDelivery.update({
-        where: { id: deliveryId },
-        data: {
-          status: WebhookDeliveryStatus.FAILED,
-          failureReason: "webhook endpoint disabled before delivery",
-        },
+      await this.deadLetter(deliveryId, DeadLetterReason.ENDPOINT_DISABLED, {
+        failureReason: "webhook endpoint disabled before delivery",
       });
+      return;
+    }
+
+    // Respect the configured threshold even for rows created under a higher
+    // one (e.g. after WEBHOOK_MAX_DELIVERY_ATTEMPTS was lowered).
+    if (delivery.attempt > this.maxAttempts) {
+      await this.deadLetter(
+        deliveryId,
+        DeadLetterReason.MAX_ATTEMPTS_EXHAUSTED,
+        { failureReason: "retry threshold reached before dispatch" },
+      );
       return;
     }
 
@@ -315,24 +382,40 @@ export class WebhookDeliveryService implements OnModuleInit {
       this.logger.error(
         `Failed to decrypt signing secret for webhook ${delivery.webhook.id}: ${String(err)}`,
       );
-      await this.prisma.webhookDelivery.update({
-        where: { id: deliveryId },
-        data: {
-          status: WebhookDeliveryStatus.FAILED,
-          failureReason: "signing secret decryption failure",
-        },
-      });
+      await this.deadLetter(
+        deliveryId,
+        DeadLetterReason.SIGNING_SECRET_UNAVAILABLE,
+        { failureReason: "signing secret decryption failure" },
+      );
       return;
     }
 
-    // The full public payload is persisted, so retries and crash recovery
-    // deliver exactly the same signed event rather than an empty envelope.
-    const envelope = (cachedEnvelope ?? delivery.payload) as WebhookEnvelope;
-
-    const body = JSON.stringify(envelope);
+    // The persisted bytes are exactly what was serialized when the event
+    // occurred. Every attempt signs and sends these bytes, never a
+    // re-serialization of `payload`.
+    const body = delivery.payloadBody;
     const timestamp = Math.floor(Date.now() / 1000);
 
     const signature = this.signing.sign(signingSecret, timestamp, delivery.eventId, body);
+
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      "X-EarnProof-Timestamp": String(timestamp),
+      "X-EarnProof-Delivery": delivery.eventId,
+      "X-EarnProof-Event": delivery.eventType,
+      "X-EarnProof-Schema-Version": delivery.schemaVersion,
+      "X-EarnProof-Signature": signature,
+    };
+    // Deprecation is announced in delivery metadata, never in the body: the
+    // body is the contract under discussion (docs/versioning.md).
+    const deprecation = payloadDeprecation(
+      delivery.eventType,
+      delivery.schemaVersion,
+    );
+    if (deprecation) {
+      headers["Deprecation"] = "true";
+      headers["Sunset"] = new Date(deprecation.sunsetAt).toUTCString();
+    }
 
     let statusCode: number | undefined;
     let responseBody: string | undefined;
@@ -346,13 +429,7 @@ export class WebhookDeliveryService implements OnModuleInit {
 
       const response = await fetch(url, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-EarnProof-Timestamp": String(timestamp),
-          "X-EarnProof-Delivery": delivery.eventId,
-          "X-EarnProof-Event": delivery.eventType,
-          "X-EarnProof-Signature": signature,
-        },
+        headers,
         body,
         // Do NOT follow redirects — prevents an open redirect from
         // forwarding a signed payload to an internal address.
@@ -378,14 +455,10 @@ export class WebhookDeliveryService implements OnModuleInit {
       if (err instanceof SsrfBlockedError) {
         failureReason = err.message;
         // SSRF block is permanent — do not retry.
-        await this.prisma.webhookDelivery.update({
-          where: { id: deliveryId },
-          data: {
-            status: WebhookDeliveryStatus.FAILED,
-            durationMs,
-            failureReason,
-            deliveredAt: new Date(),
-          },
+        await this.deadLetter(deliveryId, DeadLetterReason.DESTINATION_BLOCKED, {
+          durationMs,
+          failureReason,
+          deliveredAt: new Date(),
         });
         this.logger.warn(`Delivery ${deliveryId} blocked by SSRF guard: ${failureReason}`);
         return;
@@ -414,21 +487,17 @@ export class WebhookDeliveryService implements OnModuleInit {
       return;
     }
 
-    // Failed attempt — decide whether to retry.
-    if (delivery.attempt >= MAX_ATTEMPTS) {
-      await this.prisma.webhookDelivery.update({
-        where: { id: deliveryId },
-        data: {
-          status: WebhookDeliveryStatus.FAILED,
-          statusCode,
-          responseBody,
-          durationMs,
-          failureReason,
-          deliveredAt: new Date(),
-        },
+    // Failed attempt — the retry threshold decides whether the chain ends.
+    if (delivery.attempt >= this.maxAttempts) {
+      await this.deadLetter(deliveryId, DeadLetterReason.MAX_ATTEMPTS_EXHAUSTED, {
+        statusCode,
+        responseBody,
+        durationMs,
+        failureReason,
+        deliveredAt: new Date(),
       });
       this.logger.warn(
-        `Delivery ${deliveryId} permanently failed after ${delivery.attempt} attempt(s): ${failureReason}`,
+        `Delivery ${deliveryId} dead-lettered after ${delivery.attempt} attempt(s): ${failureReason}`,
       );
       return;
     }
@@ -457,6 +526,8 @@ export class WebhookDeliveryService implements OnModuleInit {
         webhookId: delivery.webhookId,
         eventType: delivery.eventType,
         payload: delivery.payload as Prisma.InputJsonValue,
+        schemaVersion: delivery.schemaVersion, // original version
+        payloadBody: delivery.payloadBody, // original bytes
         eventId: delivery.eventId, // same eventId across all retries
         attempt: nextAttempt,
         status: WebhookDeliveryStatus.PENDING,
@@ -474,16 +545,36 @@ export class WebhookDeliveryService implements OnModuleInit {
       // Keep the production queue occupied through the retry so later events
       // cannot silently overtake an earlier event for the same aggregate.
       await new Promise<void>((resolve) => setTimeout(resolve, delay));
-      await this.runDelivery(
-        retryDelivery.id,
-        envelope,
-        undefined,
-        undefined,
-        true,
-      );
+      await this.runDelivery(retryDelivery.id, true);
     } else {
-      this.scheduleDelivery(retryDelivery.id, delivery.webhookId, delay, envelope);
+      this.scheduleDelivery(retryDelivery.id, delivery.webhookId, delay);
     }
+  }
+
+  /**
+   * Terminal failure: the chain stops here and the attempt is marked
+   * dead-lettered so an operator can inspect and, if appropriate, redrive it.
+   */
+  private async deadLetter(
+    deliveryId: string,
+    reason: DeadLetterReasonValue,
+    attempt: {
+      statusCode?: number;
+      responseBody?: string;
+      durationMs?: number;
+      failureReason: string | undefined;
+      deliveredAt?: Date;
+    },
+  ): Promise<void> {
+    await this.prisma.webhookDelivery.update({
+      where: { id: deliveryId },
+      data: {
+        status: WebhookDeliveryStatus.FAILED,
+        ...attempt,
+        deadLetteredAt: new Date(),
+        deadLetterReason: reason,
+      },
+    });
   }
 
   private parseEvents(events: unknown): WebhookEventType[] {

@@ -168,6 +168,7 @@ model Organization {
   issuers     Issuer[]
   apiKeys     ApiKey[]
   webhooks    Webhook[]
+  quotaUsage  OrganizationQuotaUsage[]
 
   @@index([status])
 }
@@ -273,6 +274,7 @@ model Proof {
   claim                   ProofClaim?
   verificationEvents      VerificationEvent[]
   anchoringIntents        AnchoringIntent[]
+  shareTokens             ProofShareToken[]
 
   @@index([userId, status])
   @@index([userId, createdAt, id])
@@ -330,12 +332,18 @@ model VerificationEventLog {
   proofId      String
   metadataHash String
   saltVersion  Int
+  /// Share token that authorised this verification, when it arrived through a
+  /// share link. Only the token row id is recorded — never the raw token or its
+  /// hash — so the owner can see how often a link was used without the event
+  /// identifying the verifier.
+  shareTokenId String?
   createdAt    DateTime            @default(now())
   retainUntil  DateTime
 
   @@index([proofId, createdAt])
   @@index([outcome])
   @@index([retainUntil])
+  @@index([shareTokenId])
 }
 
 model ApiKey {
@@ -375,6 +383,10 @@ model Webhook {
   url              String
   secretEncrypted  String
   events           Json
+  /// Webhook payload schema version this endpoint is pinned to. Existing
+  /// endpoints keep receiving the version they subscribed with until they opt
+  /// in to a newer one; see docs/webhook-payloads.md.
+  payloadVersion   String            @default("1")
   status           ResourceStatus    @default(ACTIVE)
   createdAt        DateTime          @default(now())
   updatedAt        DateTime          @updatedAt
@@ -396,6 +408,13 @@ model WebhookDelivery {
   eventType      String
   eventId        String
   payload        Json
+  /// Payload schema version the body was serialized with. Copied verbatim to
+  /// every retry, replay, and redrive of the same event.
+  schemaVersion  String
+  /// Exact serialized request body. Signed and sent byte-for-byte on every
+  /// attempt; `payload` (JSONB) does not preserve key order, so it is never
+  /// re-serialized for delivery.
+  payloadBody    String
   attempt        Int                   @default(1)
   status         WebhookDeliveryStatus @default(PENDING)
   statusCode     Int?
@@ -407,11 +426,23 @@ model WebhookDelivery {
   replayKey      String?               @unique
   deliveredAt    DateTime?
   nextRetryAt    DateTime?
+  /// Set when this attempt ended the automatic retry chain without success.
+  /// Only the terminal attempt of a chain is dead-lettered.
+  deadLetteredAt   DateTime?
+  /// Stable reason code, e.g. `max_attempts_exhausted`. Never free-form text.
+  deadLetterReason String?
+  /// Set once an operator has redriven this dead letter. The redrive itself is
+  /// a new delivery row (`replayOf` = this id); this row is never re-sent.
+  redrivenAt       DateTime?
+  redrivenBy       String?
+  /// Operator-supplied justification, recorded on the new delivery row.
+  redriveReason    String?
   createdAt      DateTime              @default(now())
 
   @@index([webhookId, createdAt])
   @@index([eventId])
   @@index([status, nextRetryAt])
+  @@index([deadLetteredAt])
 }
 
 model AuditLog {
@@ -448,4 +479,55 @@ model AnchoringIntent {
   @@unique([proofId, operation])
   @@index([nextRetryAt])
   @@index([proofId])
+}
+
+
+enum ProofShareScope {
+  /// Verification result and public proof metadata only.
+  VERIFY_STATUS
+  /// Verification result plus the signed credential.
+  VERIFY_CREDENTIAL
+}
+
+/// Time-limited, scoped share link for a single proof.
+/// Only a SHA-256 hash of the raw token is stored; the raw token is returned
+/// once at creation. Scope, proof, owner, expiry and use limit are immutable
+/// after issuance (enforced by a database trigger as well as by the service).
+model ProofShareToken {
+  id             String          @id @default(cuid())
+  proofId        String
+  proof          Proof           @relation(fields: [proofId], references: [id])
+  /// Proof owner at issuance — the tenant boundary for list/revoke/use.
+  ownerId        String
+  tokenHash      String          @unique
+  scope          ProofShareScope
+  label          String?
+  maxUses        Int?
+  useCount       Int             @default(0)
+  expiresAt      DateTime
+  revokedAt      DateTime?
+  /// Set when a newer token for the same proof and scope replaced this one.
+  supersededAt   DateTime?
+  supersededById String?
+  lastUsedAt     DateTime?
+  createdAt      DateTime        @default(now())
+
+  @@index([proofId, ownerId])
+  @@index([ownerId])
+  @@index([expiresAt])
+}
+
+/// Fixed-window usage counters for rate-style organization quotas
+/// (proof requests per day, payment syncs per hour). Count-style quotas
+/// (active API keys, webhooks) are computed from the owning tables instead.
+model OrganizationQuotaUsage {
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  quota          String
+  windowStart    DateTime
+  count          Int          @default(0)
+  updatedAt      DateTime     @updatedAt
+
+  @@id([organizationId, quota, windowStart])
+  @@index([windowStart])
 }

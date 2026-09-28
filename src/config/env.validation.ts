@@ -13,6 +13,10 @@ const encryptionKey = z.string().refine((value) => {
   return key.length === 32;
 }, "PAYMENT_ENCRYPTION_KEY must be 32 bytes encoded as base64 or hex");
 
+/** Optional bounded integer with a default, for operational limits. */
+const positiveInt = (min: number, max: number, fallback: number) =>
+  z.coerce.number().int().min(min).max(max).optional().default(fallback);
+
 const envSchema = z.object({
   NODE_ENV: z
     .enum(["development", "test", "production"])
@@ -56,6 +60,14 @@ const envSchema = z.object({
     .positive()
     .optional()
     .default(90),
+  WEBHOOK_MAX_DELIVERY_ATTEMPTS: positiveInt(1, 20, 5),
+  WEBHOOK_REDRIVE_MAX_BATCH: positiveInt(1, 100, 25),
+  PROOF_SHARE_TOKEN_MAX_TTL_MINUTES: positiveInt(5, 525_600, 10_080),
+  PROOF_SHARE_TOKEN_DEFAULT_TTL_MINUTES: positiveInt(5, 525_600, 1_440),
+  QUOTA_MAX_ACTIVE_API_KEYS: positiveInt(1, 10_000, 25),
+  QUOTA_MAX_WEBHOOKS: positiveInt(1, 1_000, 10),
+  QUOTA_PROOF_REQUESTS_PER_DAY: positiveInt(1, 10_000_000, 1_000),
+  QUOTA_SYNCS_PER_HOUR: positiveInt(1, 3_600, 12),
   VERIFICATION_HASH_SALT_VERSION: z.coerce
     .number()
     .int()
@@ -69,6 +81,15 @@ export function validateEnv(config: Record<string, unknown>) {
 
   if (!parsed.success) {
     throw new Error(`Invalid environment: ${parsed.error.message}`);
+  }
+
+  if (
+    parsed.data.PROOF_SHARE_TOKEN_DEFAULT_TTL_MINUTES >
+    parsed.data.PROOF_SHARE_TOKEN_MAX_TTL_MINUTES
+  ) {
+    throw new Error(
+      "Invalid environment: PROOF_SHARE_TOKEN_DEFAULT_TTL_MINUTES must not exceed PROOF_SHARE_TOKEN_MAX_TTL_MINUTES",
+    );
   }
 
   return parsed.data;

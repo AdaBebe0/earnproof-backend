@@ -98,12 +98,16 @@ export class VerificationEventService {
    * @param outcome - The verification result (VALID, EXPIRED, REVOKED, etc.)
    * @param proofId - The proof being verified
    * @param metadata - Metadata to hash (requestId, timestamp, outcome)
+   * @param context - Optional access context. `shareTokenId` is the share
+   *   token row id (never the raw token or its hash) when the verification
+   *   arrived through a share link.
    * @returns Promise that always resolves (never rejects)
    */
   async recordEvent(
     outcome: VerificationOutcome,
     proofId: string,
     metadata: { requestId?: string; timestamp?: Date; outcome: string },
+    context: { shareTokenId?: string } = {},
   ): Promise<void> {
     try {
       const saltVersion = this.currentSaltVersion;
@@ -119,6 +123,7 @@ export class VerificationEventService {
           metadataHash,
           saltVersion,
           retainUntil,
+          shareTokenId: context.shareTokenId ?? null,
           createdAt: new Date(),
         },
       });

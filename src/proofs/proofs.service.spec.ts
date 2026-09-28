@@ -9,6 +9,7 @@ import {
 import { sha256 } from "../common/crypto/hash";
 import { ProofsService } from "./proofs.service";
 import { VerificationEventService } from "../audit/verification-event.service";
+import { unlimitedQuotas } from "../testing/quotas";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -142,7 +143,7 @@ describe("ProofsService", () => {
       },
       $transaction: jest.fn(),
     };
-    const service = new ProofsService(prisma as never, config as never, mockVerificationEventService);
+    const service = new ProofsService(prisma as never, config as never, mockVerificationEventService, unlimitedQuotas() as never);
 
     await expect(
       service.createMinimumIncomeProof(user, {
@@ -164,7 +165,7 @@ describe("ProofsService", () => {
         create: jest.fn().mockResolvedValue({ id: "event_1" }),
       },
     };
-    const service = new ProofsService(prisma as never, config as never, mockVerificationEventService);
+    const service = new ProofsService(prisma as never, config as never, mockVerificationEventService, unlimitedQuotas() as never);
 
     await expect(service.verifyProof("missing")).resolves.toEqual({
       result: VerificationResult.UNKNOWN_PROOF,
@@ -220,7 +221,7 @@ describe("ProofsService", () => {
         create: jest.fn().mockResolvedValue({ id: "event_1" }),
       },
     };
-    const service = new ProofsService(prisma as never, config as never, mockVerificationEventService);
+    const service = new ProofsService(prisma as never, config as never, mockVerificationEventService, unlimitedQuotas() as never);
 
     const result = await service.verifyProof("proof_1");
 
@@ -266,7 +267,7 @@ describe("ProofsService", () => {
     const service = new ProofsService(
       prisma as never,
       makeConfig(true) as never, // anchoring enabled
-      mockVerificationEventService,
+      mockVerificationEventService, unlimitedQuotas() as never,
     );
 
     const result = await service.revokeProof("user_1", "proof_anchored");
@@ -341,6 +342,7 @@ describe("ProofsService", () => {
       prisma as never,
       config as never,
       mockVerificationEventService,
+      unlimitedQuotas() as never,
       anchoring as never,
     );
 
@@ -366,7 +368,7 @@ describe("ProofsService", () => {
       const service = new ProofsService(
         prisma as never,
         makeConfig(true) as never, // anchoring enabled
-        mockVerificationEventService,
+        mockVerificationEventService, unlimitedQuotas() as never,
       );
 
       await service.createMinimumIncomeProof(user, {
@@ -390,7 +392,7 @@ describe("ProofsService", () => {
       const service = new ProofsService(
         prisma as never,
         makeConfig(false) as never, // anchoring disabled
-        mockVerificationEventService,
+        mockVerificationEventService, unlimitedQuotas() as never,
       );
 
       await service.createMinimumIncomeProof(user, {
@@ -410,6 +412,7 @@ describe("ProofsService", () => {
         prisma as never,
         makeConfig(true) as never,
         mockVerificationEventService,
+        unlimitedQuotas() as never,
       );
 
       const result = await service.createMinimumIncomeProof(user, {
@@ -429,6 +432,7 @@ describe("ProofsService", () => {
         prisma as never,
         makeConfig(false) as never,
         mockVerificationEventService,
+        unlimitedQuotas() as never,
       );
 
       const result = await service.createMinimumIncomeProof(user, {
@@ -501,7 +505,7 @@ describe("ProofsService", () => {
       const service = new ProofsService(
         prisma as never,
         makeConfig(true, true) as never, // enabled + required
-        mockVerificationEventService,
+        mockVerificationEventService, unlimitedQuotas() as never,
       );
 
       const result = await service.verifyProof("proof_req");
@@ -515,6 +519,7 @@ describe("ProofsService", () => {
         prisma as never,
         makeConfig(true, true) as never,
         mockVerificationEventService,
+        unlimitedQuotas() as never,
       );
 
       const result = await service.verifyProof("proof_req");
@@ -529,6 +534,7 @@ describe("ProofsService", () => {
         prisma as never,
         makeConfig(true, false) as never,
         mockVerificationEventService,
+        unlimitedQuotas() as never,
       );
 
       const result = await service.verifyProof("proof_req");
@@ -542,6 +548,7 @@ describe("ProofsService", () => {
         prisma as never,
         makeConfig(false, false) as never,
         mockVerificationEventService,
+        unlimitedQuotas() as never,
       );
 
       const result = await service.verifyProof("proof_req");

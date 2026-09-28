@@ -40,11 +40,19 @@ export enum ApiErrorCode {
   PAYMENT_NOT_ELIGIBLE = "PAYMENT_NOT_ELIGIBLE",
   PAYMENT_EXCLUDED = "PAYMENT_EXCLUDED",
 
+  // 422 - proof cannot be shared in its current state
+  PROOF_NOT_SHAREABLE = "PROOF_NOT_SHAREABLE",
+
   // 409 – request conflicts with current state
   CONFLICT = "CONFLICT",
 
-  // 429 – rate limiting
+  // 429 – rate limiting (short-window request throttling)
   TOO_MANY_REQUESTS = "TOO_MANY_REQUESTS",
+
+  // 429 – an organization operational quota is exhausted. Distinct from
+  // TOO_MANY_REQUESTS: retrying immediately will not succeed; the quota
+  // resets at the window boundary or when usage is reduced.
+  QUOTA_EXCEEDED = "QUOTA_EXCEEDED",
 
   // 503 – a required dependency is unavailable
   DEPENDENCY_UNAVAILABLE = "DEPENDENCY_UNAVAILABLE",

@@ -10,6 +10,7 @@ import {
 } from "@prisma/client";
 import { ApiErrorCode } from "../common/dto/api-error.dto";
 import { ProofsService } from "./proofs.service";
+import { unlimitedQuotas } from "../testing/quotas";
 
 describe("ProofsService payment-receipt proofs", () => {
   const user = {
@@ -104,6 +105,7 @@ describe("ProofsService payment-receipt proofs", () => {
       prisma as never,
       harnessConfig as never,
       events as never,
+      unlimitedQuotas() as never,
       contract as never,
     );
     return { service, prisma, getStoredProof: () => storedProof };

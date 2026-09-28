@@ -1,6 +1,7 @@
 import { BadRequestException, NotFoundException } from "@nestjs/common";
 import { ProofStatus, ProofType } from "@prisma/client";
 import { ProofsService } from "./proofs.service";
+import { unlimitedQuotas } from "../testing/quotas";
 
 describe("ProofsService proof history", () => {
   const config = {
@@ -58,6 +59,7 @@ describe("ProofsService proof history", () => {
       prisma as never,
       config as never,
       events as never,
+      unlimitedQuotas() as never,
     );
 
     const result = await service.listProofs("user_1", {
@@ -102,6 +104,7 @@ describe("ProofsService proof history", () => {
       prisma as never,
       config as never,
       events as never,
+      unlimitedQuotas() as never,
     );
 
     await expect(
@@ -116,6 +119,7 @@ describe("ProofsService proof history", () => {
       prisma as never,
       config as never,
       events as never,
+      unlimitedQuotas() as never,
     );
 
     for (const id of ["unknown", "owned-by-someone-else"]) {
@@ -151,6 +155,7 @@ describe("ProofsService proof history", () => {
       prisma as never,
       config as never,
       events as never,
+      unlimitedQuotas() as never,
     );
 
     const result = await service.listProofs("user_1", { limit: 20 });
@@ -196,6 +201,7 @@ describe("ProofsService proof history", () => {
       prisma as never,
       config as never,
       events as never,
+      unlimitedQuotas() as never,
       contract as never,
     );
 

@@ -13,7 +13,9 @@ import {
 import { PrismaService } from "../database/prisma.service";
 import { CreateWebhookDto } from "./dto/create-webhook.dto";
 import { UpdateWebhookEventsDto } from "./dto/update-webhook-events.dto";
+import { OrganizationQuotaService } from "../quotas/organization-quota.service";
 import { WebhookDeliveryService } from "./webhook-delivery.service";
+import { CURRENT_WEBHOOK_PAYLOAD_VERSION } from "./webhook-event.types";
 
 /** Signing secret length in bytes (produces a 64-char hex string). */
 const SECRET_BYTES = 32;
@@ -26,6 +28,7 @@ export class WebhooksService {
     private readonly prisma: PrismaService,
     private readonly deliveryService: WebhookDeliveryService,
     configService: ConfigService,
+    private readonly quotas: OrganizationQuotaService,
   ) {
     this.encryptionKey = configService.getOrThrow<string>("paymentEncryptionKey");
   }
@@ -43,21 +46,27 @@ export class WebhooksService {
     // De-duplicate events list
     const events = [...new Set(dto.events)];
 
-    const webhook = await this.prisma.webhook.create({
-      data: {
-        organizationId,
-        url: dto.url,
-        secretEncrypted,
-        events,
-        status: ResourceStatus.ACTIVE,
-      },
-      select: {
-        id: true,
-        url: true,
-        events: true,
-        status: true,
-        createdAt: true,
-      },
+    // Quota check and creation commit together; see OrganizationQuotaService.
+    const webhook = await this.prisma.$transaction(async (tx) => {
+      await this.quotas.assertCapacity(tx, organizationId, "webhooks");
+      return tx.webhook.create({
+        data: {
+          organizationId,
+          url: dto.url,
+          secretEncrypted,
+          events,
+          payloadVersion: dto.payloadVersion ?? CURRENT_WEBHOOK_PAYLOAD_VERSION,
+          status: ResourceStatus.ACTIVE,
+        },
+        select: {
+          id: true,
+          url: true,
+          events: true,
+          payloadVersion: true,
+          status: true,
+          createdAt: true,
+        },
+      });
     });
 
     return {
@@ -76,6 +85,7 @@ export class WebhooksService {
         id: true,
         url: true,
         events: true,
+        payloadVersion: true,
         status: true,
         createdAt: true,
         updatedAt: true,
@@ -92,6 +102,7 @@ export class WebhooksService {
         organizationId: true,
         url: true,
         events: true,
+        payloadVersion: true,
         status: true,
         createdAt: true,
         updatedAt: true,
@@ -250,6 +261,7 @@ export class WebhooksService {
         id: true,
         eventType: true,
         eventId: true,
+        schemaVersion: true,
         attempt: true,
         status: true,
         statusCode: true,
@@ -261,6 +273,9 @@ export class WebhooksService {
         replayedBy: true,
         deliveredAt: true,
         nextRetryAt: true,
+        deadLetteredAt: true,
+        deadLetterReason: true,
+        redrivenAt: true,
         createdAt: true,
       },
     });

@@ -8,6 +8,7 @@ import {
 } from "@prisma/client";
 import { encryptProtectedAmount } from "../common/crypto/protected-amount";
 import { PrismaService } from "../database/prisma.service";
+import { OrganizationQuotaService } from "../quotas/organization-quota.service";
 import { StellarService } from "../stellar/stellar.service";
 import { normalizeMemo } from "../stellar/memo-normalizer";
 import { NormalizedMemo } from "../stellar/stellar.types";
@@ -20,6 +21,7 @@ export class PaymentsService {
     private readonly prisma: PrismaService,
     private readonly stellarService: StellarService,
     configService: ConfigService,
+    private readonly quotas: OrganizationQuotaService,
   ) {
     this.paymentEncryptionKey = configService.getOrThrow<string>(
       "paymentEncryptionKey",
@@ -27,6 +29,11 @@ export class PaymentsService {
   }
 
   async syncPayments(user: { id: string; walletAddress: string }) {
+    // Sync frequency is charged before Horizon is contacted. The consume is a
+    // single atomic statement; a rejection changes nothing. An attempted sync
+    // counts even if Horizon later fails, because it still cost a Horizon call.
+    await this.quotas.consumeForUser(this.prisma, user.id, "sync_frequency");
+
     const incomingPayments = await this.stellarService.fetchIncomingPayments(
       user.walletAddress,
     );

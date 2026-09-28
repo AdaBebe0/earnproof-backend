@@ -6,6 +6,7 @@ import {
 } from "@prisma/client";
 import { ProofsService } from "./proofs.service";
 import { VerificationEventService } from "../audit/verification-event.service";
+import { unlimitedQuotas } from "../testing/quotas";
 
 describe("ProofsService lifecycle", () => {
   it("creates, verifies, revokes, and re-verifies a minimum income proof", async () => {
@@ -31,7 +32,7 @@ describe("ProofsService lifecycle", () => {
         };
         return values[key];
       }),
-    } as never, mockVerificationEventService);
+    } as never, mockVerificationEventService, unlimitedQuotas() as never);
     const user = {
       id: "user_lifecycle",
       walletAddress: "GB_TEST",
@@ -144,6 +145,7 @@ function createRecurringService(store: ReturnType<typeof createRecurringProofSto
       get: jest.fn(() => false),
     } as never,
     { recordEvent: jest.fn().mockResolvedValue(undefined) } as never,
+    unlimitedQuotas() as never,
   );
 }
 
@@ -289,7 +291,7 @@ describe("ProofsService lifecycle – recurring-income", () => {
         return values[key];
       }),
       get: jest.fn(() => false),
-    } as never, mockVerificationEventService);
+    } as never, mockVerificationEventService, unlimitedQuotas() as never);
     const user = {
       id: "user_ri_lifecycle",
       walletAddress: "GB_TEST",
