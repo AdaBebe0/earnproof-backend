@@ -92,6 +92,11 @@ export const configuration = () => ({
     source: process.env.STELLAR_CLI_SOURCE,
     contractId: process.env.ISSUER_REGISTRY_CONTRACT_ID,
   },
+  deployment: {
+    // Raw JSON; parsed and validated by config/deployment-manifest.ts, which
+    // also checks it against `stellar` and the contract IDs above.
+    manifest: process.env.DEPLOYMENT_MANIFEST,
+  },
   retention: {
     walletChallengeDays: Number(
       process.env.RETENTION_WALLET_CHALLENGE_DAYS ?? 7,

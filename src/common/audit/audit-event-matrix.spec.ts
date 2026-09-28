@@ -462,7 +462,7 @@ const scenarios: Scenario[] = [
       };
       const prisma = {
         organization: {
-          findUnique: jest.fn().mockResolvedValue(org),
+          findFirst: jest.fn().mockResolvedValue(org),
           update: jest.fn().mockResolvedValue({ ...org, name: "Acme Payroll" }),
         },
         auditLog: sink.auditLog,

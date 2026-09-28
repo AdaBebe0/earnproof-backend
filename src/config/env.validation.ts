@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { DEPLOYMENT_MANIFEST_MAX_BYTES } from "./deployment-manifest";
 
 /**
  * ──────────────────────────────────────────────────────────────────────────
@@ -289,6 +290,26 @@ const envSchema = z.object({
 
   /** Stellar contract ID for issuer registry */
   ISSUER_REGISTRY_CONTRACT_ID: optionalString(stellarContractId),
+
+  // ──────────────────────────────────────────────────────────────────────
+  // DEPLOYMENT MANIFEST (Optional)
+  // ──────────────────────────────────────────────────────────────────────
+
+  /**
+   * Deployment manifest JSON (network, contract addresses, artifact hashes).
+   * Only bounded here; its structure and consistency with the Stellar and
+   * contract variables are validated by deployment-manifest.ts and reported
+   * through readiness, so a bad manifest takes the replica out of rotation
+   * with a stable reason code instead of crash-looping it.
+   */
+  DEPLOYMENT_MANIFEST: optionalString(
+    z
+      .string()
+      .max(
+        DEPLOYMENT_MANIFEST_MAX_BYTES,
+        `DEPLOYMENT_MANIFEST must not exceed ${DEPLOYMENT_MANIFEST_MAX_BYTES} characters`,
+      ),
+  ),
 
   // ──────────────────────────────────────────────────────────────────────
   // EARNPROOF INTEGRATION (Optional, used when anchoring is enabled)

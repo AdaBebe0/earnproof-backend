@@ -1,6 +1,10 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { Injectable, Logger, Optional } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { PrismaService } from "../database/prisma.service";
+import {
+  DeploymentMetadataService,
+  DeploymentMetadataState,
+} from "./deployment-metadata.service";
 import {
   DependencyKind,
   DependencyResult,
@@ -57,10 +61,15 @@ export class HealthService {
    */
   private readonly inFlight = new Map<string, Promise<DependencyResult>>();
 
+  private readonly deployment: DeploymentMetadataService;
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
-  ) {}
+    @Optional() deployment?: DeploymentMetadataService,
+  ) {
+    this.deployment = deployment ?? new DeploymentMetadataService(config);
+  }
 
   /**
    * Liveness: does this process exist and can it answer?
@@ -112,6 +121,18 @@ export class HealthService {
       this.probeCached("configuration", DependencyKind.REQUIRED, () =>
         Promise.resolve(this.probeConfiguration()),
       ),
+      // Required only once an operator has supplied a manifest: deployments
+      // that have not adopted one keep their existing readiness contract, but
+      // a manifest that is present and wrong must never be served.
+      ...(this.deployment.isConfigured()
+        ? [
+            this.probeCached(
+              "deployment_manifest",
+              DependencyKind.REQUIRED,
+              () => Promise.resolve(this.probeDeploymentManifest()),
+            ),
+          ]
+        : []),
     ]);
 
     const blocked = dependencies.some(
@@ -124,6 +145,15 @@ export class HealthService {
       status: blocked ? "not_ready" : "ready",
       dependencies,
     };
+  }
+
+  /**
+   * The validated deployment metadata, or why it cannot be served. Shares its
+   * source with the `deployment_manifest` readiness probe, so the endpoint and
+   * readiness can never disagree about whether the manifest is valid.
+   */
+  deploymentMetadata(): DeploymentMetadataState {
+    return this.deployment.state();
   }
 
   /**
@@ -160,6 +190,13 @@ export class HealthService {
       ),
       this.probeCached("webhook_delivery", DependencyKind.OPTIONAL, () =>
         this.probeWebhookDelivery(),
+      ),
+      this.probeCached(
+        "deployment_manifest",
+        this.deployment.isConfigured()
+          ? DependencyKind.REQUIRED
+          : DependencyKind.OPTIONAL,
+        () => Promise.resolve(this.probeDeploymentManifest()),
       ),
     ]);
 
@@ -289,6 +326,39 @@ export class HealthService {
         throw new ProbeFailure(`upstream_status_${response.status}`);
       }
     });
+  }
+
+  /**
+   * Validate the deployment manifest. Reasons are the manifest loader's stable
+   * codes, which name fixed fields and contract names but never manifest
+   * values.
+   */
+  private probeDeploymentManifest(): DependencyResult {
+    const state = this.deployment.state();
+    const base = {
+      name: "deployment_manifest",
+      kind: DependencyKind.REQUIRED,
+      durationMs: 0,
+    };
+
+    if (state.status === "absent") {
+      return {
+        ...base,
+        kind: DependencyKind.OPTIONAL,
+        status: DependencyStatus.NOT_CONFIGURED,
+        reason: "deployment_manifest_absent",
+      };
+    }
+
+    if (state.status === "invalid") {
+      return {
+        ...base,
+        status: DependencyStatus.ERROR,
+        reason: state.reasons.join(","),
+      };
+    }
+
+    return { ...base, status: DependencyStatus.OK };
   }
 
   /** Report whether contract anchoring is switched on and fully configured. */

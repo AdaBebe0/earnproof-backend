@@ -277,6 +277,16 @@ model Proof {
   credentialHash          String              @unique
   contractTransactionHash String?
   revokedAt               DateTime?
+  // Renewal / supersession chain. `supersedesId` is unique so a predecessor
+  // can have at most one successor: concurrent renewals race on this
+  // constraint and exactly one wins, which is what prevents forks.
+  supersedesId            String?             @unique
+  supersedes              Proof?              @relation("ProofSupersession", fields: [supersedesId], references: [id])
+  supersededBy            Proof?              @relation("ProofSupersession")
+  supersededAt            DateTime?
+  // Hash of the renewal request that produced this successor, so a retried
+  // identical request returns the same successor instead of a conflict.
+  renewalRequestHash      String?
   createdAt               DateTime            @default(now())
   updatedAt               DateTime            @updatedAt
   claim                   ProofClaim?

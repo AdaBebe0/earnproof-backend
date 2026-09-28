@@ -4,6 +4,7 @@ import {
   Delete,
   ForbiddenException,
   Get,
+  HttpCode,
   HttpStatus,
   Param,
   Patch,
@@ -20,6 +21,7 @@ import {
   ApiTags,
   ApiUnauthorizedResponse,
 } from "@nestjs/swagger";
+import { SkipThrottle, Throttle } from "@nestjs/throttler";
 import { AuthenticatedUser } from "../auth/auth.types";
 import { CurrentUser } from "../common/decorators/current-user.decorator";
 import { AuthGuard } from "../common/guards/auth.guard";
@@ -28,6 +30,7 @@ import { ApiErrorDto } from "../common/dto/api-error.dto";
 import { SESSION_AUTH_SCHEME } from "../common/swagger/security-schemes";
 import { CreateWebhookDto } from "./dto/create-webhook.dto";
 import { UpdateWebhookEventsDto } from "./dto/update-webhook-events.dto";
+import { WebhookTestDeliveryResponseDto } from "./dto/webhook-test-delivery-response.dto";
 import { WebhooksService } from "./webhooks.service";
 
 /**
@@ -427,6 +430,67 @@ export class WebhooksController {
   }
 
   // ---------------------------------------------------------------------------
+  // Synthetic test delivery
+  // ---------------------------------------------------------------------------
+
+  @Post(":id/test")
+  @HttpCode(HttpStatus.OK)
+  // Same limiter as other expensive, outbound-triggering operations: each call
+  // makes a synchronous HTTP request to a caller-chosen destination.
+  @SkipThrottle({ default: true, verification: true })
+  @Throttle({ strict: {} })
+  @ApiOperation({
+    summary: "Send a synthetic test event (DEVELOPER or ADMIN only)",
+    description:
+      "Signs a versioned synthetic `webhook.test` event with the endpoint's " +
+      "current secret through the production signing path and POSTs it once, " +
+      "under the same destination policy, no-redirect rule, and timeout as a " +
+      "real delivery. The event is marked `synthetic: true`, its id is prefixed " +
+      "`test_`, and it is never stored as a delivery or retried. Returns the " +
+      "delivery timing, a status class, and the receiver response, redacted and " +
+      "bounded exactly as stored delivery responses are. A non-2xx receiver " +
+      "answer is reported in the body, not as an error status.",
+  })
+  @ApiParam({
+    name: "id",
+    description: "Webhook endpoint identifier.",
+    example: "ckv8v6h2b0002qzrm7t4k9xza",
+  })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: "Test delivery attempted; see `statusClass` for the outcome.",
+    type: WebhookTestDeliveryResponseDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.BAD_REQUEST,
+    description: "The endpoint is disabled.",
+    type: ApiErrorDto,
+  })
+  @ApiForbiddenResponse({
+    description:
+      "The caller is not a DEVELOPER or ADMIN, or the endpoint belongs to " +
+      "another organisation.",
+    type: ApiErrorDto,
+  })
+  @ApiNotFoundResponse({
+    description: "No such endpoint.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.TOO_MANY_REQUESTS,
+    description: "Rate limit exceeded (strict limiter).",
+    type: ApiErrorDto,
+  })
+  async sendTestDelivery(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("id") id: string,
+  ): Promise<WebhookTestDeliveryResponseDto> {
+    this.requirePrivilegedRole(user, "send webhook test deliveries");
+    const orgId = await this.requireOrgId(user);
+    return this.webhooksService.sendTestDelivery(orgId, id);
+  }
+
+  // ---------------------------------------------------------------------------
   // Internal helpers
   // ---------------------------------------------------------------------------
 
@@ -450,10 +514,13 @@ export class WebhooksController {
     return userWithOrgs.organizations[0].id;
   }
 
-  private requirePrivilegedRole(user: AuthenticatedUser): void {
+  private requirePrivilegedRole(
+    user: AuthenticatedUser,
+    action = "replay webhook deliveries",
+  ): void {
     if (user.role !== "DEVELOPER" && user.role !== "ADMIN") {
       throw new ForbiddenException(
-        "Only DEVELOPER or ADMIN users may replay webhook deliveries",
+        `Only DEVELOPER or ADMIN users may ${action}`,
       );
     }
   }

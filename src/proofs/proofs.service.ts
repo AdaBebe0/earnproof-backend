@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Injectable,
   NotFoundException,
@@ -36,6 +37,16 @@ import {
   IntervalUnit,
 } from "./dto/create-recurring-income-proof.dto";
 import { ListProofsDto } from "./dto/list-proofs.dto";
+import { RenewProofDto } from "./dto/renew-proof.dto";
+import {
+  evaluateRenewalEligibility,
+  evaluateSupersessionCompatibility,
+  MAX_IDEMPOTENCY_KEY_LENGTH,
+  RENEWAL_GRACE_PERIOD_DAYS,
+  renewalRequestHash,
+  SupersessionIncompatibility,
+  wouldCreateCycle,
+} from "./proof-renewal.policy";
 
 const SCHEMA_VERSION = "earnproof.minimum-income.v1";
 const PAYMENT_RECEIPT_SCHEMA_VERSION = "earnproof.payment-receipt.v1";
@@ -114,6 +125,19 @@ type EarnProofCredential =
   | MinimumIncomeCredential
   | PaymentReceiptCredential
   | RecurringIncomeCredential;
+
+type OwnedRenewableProof = Proof & {
+  claim: ProofClaim | null;
+  user: { walletHash: string };
+  supersededBy: { id: string } | null;
+};
+
+function isUniqueViolation(error: unknown): boolean {
+  return (
+    error instanceof Prisma.PrismaClientKnownRequestError &&
+    error.code === "P2002"
+  );
+}
 
 @Injectable()
 export class ProofsService {
@@ -793,46 +817,7 @@ export class ProofsService {
       };
     }
 
-    const policy = this.jsonPolicy(proof.claim.disclosurePolicy);
-    const cadence = this.revealCadence(proof.claim.frequency);
-    const credential =
-      proof.proofType === ProofType.RECURRING_INCOME
-        ? this.buildRecurringIncomeCredential({
-            id: proof.id,
-            walletHash: proof.user.walletHash,
-            cadence: proof.claim.frequency ?? "invalid",
-            intervalUnit: cadence?.intervalUnit ?? "month",
-            intervalCount: cadence?.intervalCount ?? 0,
-            assetCode: proof.assetCode,
-            assetIssuer: proof.assetIssuer,
-            periodStart: proof.periodStart ?? proof.createdAt,
-            periodEnd: proof.periodEnd ?? proof.createdAt,
-            qualifyingPaymentCount:
-              typeof policy["qualifyingPaymentCount"] === "number"
-                ? policy["qualifyingPaymentCount"]
-                : 0,
-            issuedAt: proof.createdAt,
-            expiresAt: proof.expiresAt,
-          })
-        : proof.proofType === ProofType.PAYMENT_RECEIPT
-          ? this.rebuildPaymentReceiptCredential({
-              ...proof,
-              claim: proof.claim!,
-            })
-          : this.buildCredential({
-            id: proof.id,
-            walletHash: proof.user.walletHash,
-            thresholdAmount: this.revealThreshold(
-              proof.claim.thresholdEncrypted,
-            ),
-            assetCode: proof.assetCode,
-            assetIssuer: proof.assetIssuer,
-            periodStart: proof.periodStart ?? proof.createdAt,
-            periodEnd: proof.periodEnd ?? proof.createdAt,
-            qualifyingPaymentCount: this.qualifyingPaymentCount(proof.claim),
-            issuedAt: proof.createdAt,
-            expiresAt: proof.expiresAt,
-          });
+    const credential = this.rebuildCredential({ ...proof, claim: proof.claim });
     const signedCredential = this.signCredential(credential);
     const expectedHash = `sha256:${sha256(canonicalize(credential))}`;
 
@@ -919,6 +904,415 @@ export class ProofsService {
         },
       },
     };
+  }
+
+  /**
+   * Whether the caller's proof can be renewed right now, with stable reason
+   * codes. Ownership is enforced exactly as for revocation.
+   */
+  async getRenewalEligibility(userId: string, proofId: string) {
+    const proof = await this.loadOwnedRenewableProof(userId, proofId);
+    const eligibility = evaluateRenewalEligibility(
+      proof,
+      new Date(),
+      Boolean(proof.supersededBy),
+    );
+
+    return {
+      proofId: proof.id,
+      eligible: eligibility.eligible,
+      reasons: eligibility.reasons,
+      renewableUntil: new Date(
+        proof.expiresAt.getTime() + RENEWAL_GRACE_PERIOD_DAYS * 86_400_000,
+      ).toISOString(),
+      supersession: {
+        supersedesId: proof.supersedesId,
+        supersededById: proof.supersededBy?.id ?? null,
+        supersededAt: proof.supersededAt?.toISOString() ?? null,
+      },
+    };
+  }
+
+  /**
+   * Renew a proof: either issue a successor carrying the same claim with a
+   * fresh validity window, or attach an existing compatible proof as its
+   * successor.
+   *
+   * Fork prevention does not depend on the pre-checks below — they only
+   * produce good error messages. The guarantee comes from the transaction:
+   * the predecessor is claimed with a conditional update on
+   * `supersededAt IS NULL`, and `supersedesId` is unique, so of N concurrent
+   * renewals exactly one commits. Losers are answered as replays when their
+   * request is identical to the winner's, and as conflicts otherwise.
+   */
+  async renewProof(
+    user: AuthenticatedUser,
+    proofId: string,
+    input: RenewProofDto,
+    idempotencyKey?: string,
+  ) {
+    if (
+      idempotencyKey !== undefined &&
+      (idempotencyKey.trim() === "" ||
+        idempotencyKey.length > MAX_IDEMPOTENCY_KEY_LENGTH)
+    ) {
+      throw new BadRequestException({
+        code: ApiErrorCode.INVALID_INPUT,
+        message: `Idempotency-Key must be 1-${MAX_IDEMPOTENCY_KEY_LENGTH} characters`,
+      });
+    }
+
+    const predecessor = await this.loadOwnedRenewableProof(user.id, proofId);
+    const requestHash = renewalRequestHash({
+      userId: user.id,
+      predecessorId: predecessor.id,
+      successorProofId: input.successorProofId,
+      expiresInDays: input.successorProofId ? null : input.expiresInDays,
+      idempotencyKey,
+    });
+
+    // The request hash covers successorProofId, so a replay always has the
+    // same mode as the request that created the successor.
+    const mode = input.successorProofId ? "linked" : "issued";
+
+    if (predecessor.supersededBy) {
+      return this.replayOrConflict(predecessor.id, requestHash, mode);
+    }
+
+    const now = new Date();
+    const eligibility = evaluateRenewalEligibility(predecessor, now, false);
+    if (!eligibility.eligible) {
+      throw new UnprocessableEntityException({
+        code: ApiErrorCode.INVALID_INPUT,
+        message: `Proof is not eligible for renewal: ${eligibility.reasons.join(",")}`,
+      });
+    }
+
+    try {
+      return input.successorProofId
+        ? await this.linkSuccessor(
+            user,
+            predecessor,
+            input.successorProofId,
+            requestHash,
+            now,
+          )
+        : await this.issueSuccessor(
+            user,
+            predecessor,
+            input.expiresInDays,
+            requestHash,
+            now,
+          );
+    } catch (error) {
+      if (error instanceof ConflictException || isUniqueViolation(error)) {
+        // Lost a race. If the winner was this same request, it's a replay.
+        return this.replayOrConflict(predecessor.id, requestHash, mode);
+      }
+      throw error;
+    }
+  }
+
+  private async issueSuccessor(
+    user: AuthenticatedUser,
+    predecessor: OwnedRenewableProof,
+    expiresInDays: number | undefined,
+    requestHash: string,
+    now: Date,
+  ) {
+    const claim = predecessor.claim;
+    if (!claim) {
+      // A proof without a claim cannot be rebuilt, so it cannot be renewed.
+      throw new UnprocessableEntityException({
+        code: ApiErrorCode.INVALID_INPUT,
+        message: "Proof is not eligible for renewal: invalid",
+      });
+    }
+
+    const successorId = randomUUID();
+    const expiresAt = new Date(
+      now.getTime() +
+        (expiresInDays ?? DEFAULT_EXPIRY_DAYS) * 24 * 60 * 60 * 1000,
+    );
+    const credential = this.rebuildCredential({
+      ...predecessor,
+      id: successorId,
+      createdAt: now,
+      expiresAt,
+      claim,
+    });
+    const credentialHash = `sha256:${sha256(canonicalize(credential))}`;
+    const commitment = `sha256:${sha256(credentialHash)}`;
+
+    const successor = await this.prisma.$transaction(async (tx) => {
+      await this.claimPredecessor(tx, predecessor, now);
+
+      const created = await tx.proof.create({
+        data: {
+          id: successorId,
+          userId: user.id,
+          proofType: predecessor.proofType,
+          schemaVersion: predecessor.schemaVersion,
+          status: ProofStatus.ACTIVE,
+          network: predecessor.network,
+          assetCode: predecessor.assetCode,
+          assetIssuer: predecessor.assetIssuer,
+          periodStart: predecessor.periodStart,
+          periodEnd: predecessor.periodEnd,
+          expiresAt,
+          createdAt: now,
+          credentialHash,
+          commitment,
+          supersedesId: predecessor.id,
+          renewalRequestHash: requestHash,
+          claim: {
+            create: {
+              operator: claim.operator,
+              thresholdEncrypted: claim.thresholdEncrypted,
+              frequency: claim.frequency,
+              result: claim.result,
+              disclosurePolicy: claim.disclosurePolicy ?? Prisma.JsonNull,
+            },
+          },
+        },
+      });
+
+      // The successor is anchored through the ordinary REGISTER path. The
+      // registry contract has no supersession entry point, so the link itself
+      // is recorded off-chain only.
+      if (this.anchoringEnabled) {
+        await tx.anchoringIntent.create({
+          data: {
+            proofId: created.id,
+            operation: AnchoringOperation.REGISTER,
+            status: AnchoringStatus.PENDING,
+          },
+        });
+      }
+
+      return created;
+    });
+
+    this.emitProofCreated(user.id, successor);
+    return this.renewalResponse({
+      predecessorId: predecessor.id,
+      supersededAt: now,
+      successor,
+      credential: this.signCredential(credential),
+      mode: "issued",
+      replayed: false,
+    });
+  }
+
+  private async linkSuccessor(
+    user: AuthenticatedUser,
+    predecessor: OwnedRenewableProof,
+    successorProofId: string,
+    requestHash: string,
+    now: Date,
+  ) {
+    const successor = await this.prisma.proof.findFirst({
+      where: { id: successorProofId, userId: user.id },
+      include: {
+        claim: true,
+        user: { select: { walletHash: true } },
+        supersededBy: { select: { id: true } },
+      },
+    });
+    if (!successor || !successor.claim) {
+      // Same response for unknown and non-owned: don't confirm existence.
+      throw new NotFoundException("Successor proof not found");
+    }
+
+    const incompatible = evaluateSupersessionCompatibility(
+      predecessor,
+      successor,
+      now,
+      Boolean(successor.supersededBy),
+    );
+    // Always checked, not only when everything else passes: a cycle is the
+    // one incompatibility that corrupts the chain for every later reader.
+    if (
+      !incompatible.includes(SupersessionIncompatibility.SAME_PROOF) &&
+      (await wouldCreateCycle(predecessor.id, successor.id, (id) =>
+        this.loadPredecessorId(id),
+      ))
+    ) {
+      incompatible.push(SupersessionIncompatibility.CYCLE);
+    }
+    if (incompatible.length > 0) {
+      throw new UnprocessableEntityException({
+        code: ApiErrorCode.INVALID_INPUT,
+        message: `Successor proof is incompatible: ${incompatible.join(",")}`,
+      });
+    }
+
+    const linked = await this.prisma.$transaction(async (tx) => {
+      await this.claimPredecessor(tx, predecessor, now);
+
+      // Conditional on the successor still being an unlinked, unsuperseded
+      // leaf. This is what stops two opposite links (A→B and B→A) racing
+      // into a cycle: whichever commits second finds its condition false.
+      const attached = await tx.proof.updateMany({
+        where: {
+          id: successor.id,
+          userId: user.id,
+          status: ProofStatus.ACTIVE,
+          supersedesId: null,
+          supersededAt: null,
+        },
+        data: { supersedesId: predecessor.id, renewalRequestHash: requestHash },
+      });
+      if (attached.count !== 1) {
+        throw new ConflictException({
+          code: ApiErrorCode.CONFLICT,
+          message: "Successor proof changed during renewal",
+        });
+      }
+
+      return tx.proof.findUniqueOrThrow({ where: { id: successor.id } });
+    });
+
+    return this.renewalResponse({
+      predecessorId: predecessor.id,
+      supersededAt: now,
+      successor: linked,
+      credential: this.signCredential(
+        this.rebuildCredential({ ...successor, claim: successor.claim }),
+      ),
+      mode: "linked",
+      replayed: false,
+    });
+  }
+
+  /**
+   * Mark the predecessor superseded, but only if nobody else already has.
+   * A zero count means a concurrent renewal won.
+   */
+  private async claimPredecessor(
+    tx: Prisma.TransactionClient,
+    predecessor: OwnedRenewableProof,
+    now: Date,
+  ) {
+    const claimed = await tx.proof.updateMany({
+      where: {
+        id: predecessor.id,
+        userId: predecessor.userId,
+        supersededAt: null,
+        status: { notIn: [ProofStatus.REVOKED, ProofStatus.INVALID] },
+      },
+      data: { supersededAt: now },
+    });
+    if (claimed.count !== 1) {
+      throw new ConflictException({
+        code: ApiErrorCode.CONFLICT,
+        message: "Proof was renewed or changed concurrently",
+      });
+    }
+  }
+
+  /**
+   * Answer a request for an already-superseded predecessor: the stored
+   * successor when the request is identical to the one that created it,
+   * otherwise a conflict. Never a second successor.
+   */
+  private async replayOrConflict(
+    predecessorId: string,
+    requestHash: string,
+    mode: "issued" | "linked",
+  ) {
+    const predecessor = await this.prisma.proof.findUnique({
+      where: { id: predecessorId },
+      select: {
+        supersededAt: true,
+        supersededBy: {
+          include: { claim: true, user: { select: { walletHash: true } } },
+        },
+      },
+    });
+    const successor = predecessor?.supersededBy;
+
+    if (
+      !successor ||
+      !successor.claim ||
+      successor.renewalRequestHash !== requestHash
+    ) {
+      throw new ConflictException({
+        code: ApiErrorCode.CONFLICT,
+        message: "Proof has already been superseded",
+      });
+    }
+
+    return this.renewalResponse({
+      predecessorId,
+      supersededAt: predecessor.supersededAt ?? successor.createdAt,
+      successor,
+      credential: this.signCredential(
+        this.rebuildCredential({ ...successor, claim: successor.claim }),
+      ),
+      mode,
+      replayed: true,
+    });
+  }
+
+  private renewalResponse(input: {
+    predecessorId: string;
+    supersededAt: Date;
+    successor: {
+      id: string;
+      status: ProofStatus;
+      contractTransactionHash: string | null;
+    };
+    credential: ReturnType<ProofsService["signCredential"]>;
+    mode: "issued" | "linked";
+    replayed: boolean;
+  }) {
+    const transactionHash = input.successor.contractTransactionHash;
+    return {
+      predecessorId: input.predecessorId,
+      proofId: input.successor.id,
+      status: input.successor.status,
+      mode: input.mode,
+      replayed: input.replayed,
+      verificationUrl: `/api/v1/proofs/${input.successor.id}/verify`,
+      supersededAt: input.supersededAt.toISOString(),
+      credential: input.credential,
+      anchoring: transactionHash
+        ? { anchored: true as const, transactionHash }
+        : this.anchoringEnabled
+          ? { anchored: false as const, reason: "pending" as const }
+          : { anchored: false as const, reason: "disabled" as const },
+    };
+  }
+
+  private async loadOwnedRenewableProof(
+    userId: string,
+    proofId: string,
+  ): Promise<OwnedRenewableProof> {
+    const proof = await this.prisma.proof.findUnique({
+      where: { id: proofId },
+      include: {
+        claim: true,
+        user: { select: { walletHash: true } },
+        supersededBy: { select: { id: true } },
+      },
+    });
+
+    if (!proof) {
+      throw new NotFoundException("Proof not found");
+    }
+    if (proof.userId !== userId) {
+      throw new ForbiddenException("Proof does not belong to this user");
+    }
+    return proof;
+  }
+
+  private async loadPredecessorId(proofId: string): Promise<string | null> {
+    const proof = await this.prisma.proof.findUnique({
+      where: { id: proofId },
+      select: { supersedesId: true },
+    });
+    return proof?.supersedesId ?? null;
   }
 
   private emitProofCreated(
@@ -1132,6 +1526,65 @@ export class ProofsService {
       intervalUnit: match[1] as IntervalUnit,
       intervalCount,
     };
+  }
+
+  /**
+   * Reconstruct a stored proof's credential body from its row and claim.
+   * Shared by verification and renewal so a renewed successor is rebuilt by
+   * exactly the code that will later verify it.
+   */
+  private rebuildCredential(proof: {
+    id: string;
+    proofType: ProofType;
+    assetCode: string;
+    assetIssuer: string | null;
+    createdAt: Date;
+    expiresAt: Date;
+    periodStart: Date | null;
+    periodEnd: Date | null;
+    user: { walletHash: string };
+    claim: {
+      thresholdEncrypted: string | null;
+      frequency: string | null;
+      disclosurePolicy: Prisma.JsonValue;
+    };
+  }): EarnProofCredential {
+    const policy = this.jsonPolicy(proof.claim.disclosurePolicy);
+    const cadence = this.revealCadence(proof.claim.frequency);
+    return proof.proofType === ProofType.RECURRING_INCOME
+      ? this.buildRecurringIncomeCredential({
+          id: proof.id,
+          walletHash: proof.user.walletHash,
+          cadence: proof.claim.frequency ?? "invalid",
+          intervalUnit: cadence?.intervalUnit ?? "month",
+          intervalCount: cadence?.intervalCount ?? 0,
+          assetCode: proof.assetCode,
+          assetIssuer: proof.assetIssuer,
+          periodStart: proof.periodStart ?? proof.createdAt,
+          periodEnd: proof.periodEnd ?? proof.createdAt,
+          qualifyingPaymentCount:
+            typeof policy["qualifyingPaymentCount"] === "number"
+              ? policy["qualifyingPaymentCount"]
+              : 0,
+          issuedAt: proof.createdAt,
+          expiresAt: proof.expiresAt,
+        })
+      : proof.proofType === ProofType.PAYMENT_RECEIPT
+        ? this.rebuildPaymentReceiptCredential(proof)
+        : this.buildCredential({
+            id: proof.id,
+            walletHash: proof.user.walletHash,
+            thresholdAmount: this.revealThreshold(
+              proof.claim.thresholdEncrypted,
+            ),
+            assetCode: proof.assetCode,
+            assetIssuer: proof.assetIssuer,
+            periodStart: proof.periodStart ?? proof.createdAt,
+            periodEnd: proof.periodEnd ?? proof.createdAt,
+            qualifyingPaymentCount: this.qualifyingPaymentCount(proof.claim),
+            issuedAt: proof.createdAt,
+            expiresAt: proof.expiresAt,
+          });
   }
 
   private rebuildPaymentReceiptCredential(proof: {
