@@ -63,6 +63,12 @@ export class HealthService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
+    /**
+     * Optional so the many unit tests that construct the service with just
+     * (prisma, config) keep working. When present, its circuit states are
+     * surfaced in diagnostics.
+     */
+    @Optional() private readonly circuits?: CircuitBreakerRegistry,
     private readonly contractDrift: ContractDriftService,
     private readonly migrationLease: MigrationLeaseService,
   ) {}
@@ -171,6 +177,9 @@ export class HealthService {
       ),
       this.probeCached("webhook_delivery", DependencyKind.OPTIONAL, () =>
         this.probeWebhookDelivery(),
+      ),
+      this.probeCached("circuit_breakers", DependencyKind.OPTIONAL, () =>
+        Promise.resolve(this.probeCircuitBreakers()),
       ),
     ]);
 
@@ -422,6 +431,52 @@ export class HealthService {
         }
       },
     );
+  }
+
+  /**
+   * Report the state of every dependency circuit breaker.
+   *
+   * Optional, and never gates readiness: an open circuit is the breaker working
+   * as designed — shedding load from a failing dependency — not the service
+   * itself being unready. It is surfaced as DEGRADED so an operator can see the
+   * dependency is being protected, and the per-circuit detail is counts and
+   * states only, so this authorized endpoint never becomes a channel for
+   * transaction payloads or addresses.
+   */
+  private probeCircuitBreakers(): DependencyResult {
+    if (!this.circuits) {
+      return {
+        name: "circuit_breakers",
+        kind: DependencyKind.OPTIONAL,
+        status: DependencyStatus.NOT_CONFIGURED,
+        reason: "registry_absent",
+      };
+    }
+
+    const snapshots = this.circuits.snapshotAll();
+    const circuits = snapshots.map((snapshot) => ({
+      name: snapshot.name,
+      state: snapshot.state,
+      consecutiveFailures: snapshot.consecutiveFailures,
+      probeSuccesses: snapshot.probeSuccesses,
+      probesInFlight: snapshot.probesInFlight,
+      openCount: snapshot.openCount,
+      cooldownRemainingMs: snapshot.cooldownRemainingMs,
+    }));
+
+    const tripped = circuits.filter((circuit) => circuit.state !== "closed");
+
+    return {
+      name: "circuit_breakers",
+      kind: DependencyKind.OPTIONAL,
+      status:
+        tripped.length > 0 ? DependencyStatus.DEGRADED : DependencyStatus.OK,
+      reason:
+        tripped.length > 0
+          ? `tripped:${tripped.map((circuit) => circuit.name).sort().join(",")}`
+          : undefined,
+      circuits,
+    };
   }
 
   /**
