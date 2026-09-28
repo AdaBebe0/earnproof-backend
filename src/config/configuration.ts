@@ -152,6 +152,7 @@ export const configuration = () => ({
   ),
 });
 
+//Configuration addition
 apiDeprecation: {
   allowedDocumentationOrigins: (
     process.env.API_DEPRECATION_ALLOWED_DOCUMENTATION_ORIGINS ??
