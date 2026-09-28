@@ -8,6 +8,7 @@ import { ProofStatus } from "@prisma/client";
 import { createHmac } from "crypto";
 import { z } from "zod";
 import { canonicalize } from "../common/crypto/canonicalize";
+import { CredentialVerificationKeyService } from "../common/crypto/credential-verification-key.service";
 import { sha256 } from "../common/crypto/hash";
 import { safeEqual } from "../common/crypto/timing-safe";
 import { StructuredLogger } from "../common/logger";
@@ -65,11 +66,20 @@ const MinimumIncomeCredentialSchema = z.object({
   issuedAt: z.string().datetime({ offset: true }),
   expiresAt: z.string().datetime({ offset: true }),
   // The signature proof block appended when a credential is issued
-  proof: z.object({
-    type: z.literal("HMAC-SHA256"),
-    credentialHash: z.string().min(1),
-    signature: z.string().min(1),
-  }).strict(),
+  proof: z.union([
+    z.object({
+      type: z.literal("HMAC-SHA256"),
+      credentialHash: z.string().min(1),
+      signature: z.string().min(1),
+    }).strict(),
+    z.object({
+      type: z.literal("Ed25519"),
+      algorithm: z.literal("EdDSA"),
+      keyId: z.string().min(1),
+      credentialHash: z.string().min(1),
+      signature: z.string().startsWith("ed25519:"),
+    }).strict(),
+  ]),
 }).strict();
 
 type MinimumIncomeCredential = z.infer<typeof MinimumIncomeCredentialSchema>;
@@ -103,6 +113,8 @@ export class CredentialsService {
     configService: ConfigService,
     @Optional()
     private readonly anchoring?: ContractAnchoringService,
+    @Optional()
+    private readonly credentialVerificationKeyService?: CredentialVerificationKeyService,
   ) {
     this.signingSecret = configService.getOrThrow<string>(
       "credentialSigningSecret",
@@ -142,7 +154,9 @@ export class CredentialsService {
     if (
       submittedProof !== null &&
       typeof submittedProof === "object" &&
-      (submittedProof as Record<string, unknown>)["type"] !== "HMAC-SHA256"
+      !["HMAC-SHA256", "Ed25519"].includes(
+        (submittedProof as Record<string, unknown>)["type"] as string,
+      )
     ) {
       return { result: "unsupported_key" };
     }
@@ -176,16 +190,40 @@ export class CredentialsService {
     // ------------------------------------------------------------------
     // 5. Signature check — recompute HMAC and compare timing-safely
     // ------------------------------------------------------------------
-    const expectedSignature = `hmac-sha256:${createHmac("sha256", this.signingSecret)
-      .update(canonicalPayload)
-      .digest("base64url")}`;
+    const isEd25519Proof = proof.type === "Ed25519";
+    const signatureValid = isEd25519Proof
+      ? this.credentialVerificationKeyService?.hasKey(proof.keyId) === true &&
+        this.credentialVerificationKeyService.verifyCredential(
+          credentialBody,
+          proof,
+        )
+      : safeEqual(
+          `hmac-sha256:${createHmac("sha256", this.signingSecret)
+            .update(canonicalPayload)
+            .digest("base64url")}`,
+          proof.signature,
+        );
 
+    if (!signatureValid) {
+      this.logger.log({
+        event: "credential_verify",
+        result:
+          isEd25519Proof &&
+          this.credentialVerificationKeyService?.hasKey(proof.keyId) !== true
+            ? "unsupported_key"
+            : "invalid_signature",
     if (!safeEqual(expectedSignature, proof.signature)) {
       this.logger.warn("Credential verification failed", {
         outcome: "invalid_signature",
         credentialHash,
       });
-      return { result: "invalid_signature" };
+      return {
+        result:
+          isEd25519Proof &&
+          this.credentialVerificationKeyService?.hasKey(proof.keyId) !== true
+            ? "unsupported_key"
+            : "invalid_signature",
+      };
     }
 
     // ------------------------------------------------------------------

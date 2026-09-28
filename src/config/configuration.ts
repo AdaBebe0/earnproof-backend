@@ -33,6 +33,13 @@ export const configuration = () => ({
   },
   sessionSecret: process.env.SESSION_SECRET,
   credentialSigningSecret: process.env.CREDENTIAL_SIGNING_SECRET,
+  credentialSigningSecretPrevious: process.env.CREDENTIAL_SIGNING_SECRET_PREVIOUS,
+  credentialSigningKeyId:
+    process.env.CREDENTIAL_SIGNING_KEY_ID ?? "credential-key-0",
+  credentialSigningPreviousKeyId: process.env.CREDENTIAL_SIGNING_PREVIOUS_KEY_ID,
+  credentialSigningKeyOverlapDays: Number(
+    process.env.CREDENTIAL_SIGNING_KEY_OVERLAP_DAYS ?? 30,
+  ),
   paymentEncryptionKey: process.env.PAYMENT_ENCRYPTION_KEY,
   paymentEncryptionKeyVersions: loadPaymentEncryptionKeyVersions(),
   paymentEncryptionKeyVersion: Number(
@@ -124,5 +131,23 @@ export const configuration = () => ({
     authenticatedMultiplier: Number(
       process.env.RATE_LIMIT_AUTHENTICATED_MULTIPLIER ?? 3,
     ),
+    proofVerificationWindowMs: Number(
+      process.env.PROOF_VERIFICATION_ABUSE_WINDOW_MS ?? 900000,
+    ),
+    proofVerificationUnknownLimit: Number(
+      process.env.PROOF_VERIFICATION_UNKNOWN_LIMIT ?? 10,
+    ),
+    proofVerificationRepeatedLimit: Number(
+      process.env.PROOF_VERIFICATION_REPEATED_LIMIT ?? 60,
+    ),
+    proofVerificationDistinctClientLimit: Number(
+      process.env.PROOF_VERIFICATION_DISTINCT_CLIENT_LIMIT ?? 100,
+    ),
   },
+  verificationMetadataBudgetPerProof: Number(
+    process.env.VERIFICATION_METADATA_BUDGET_PER_PROOF ?? 100,
+  ),
+  verificationMetadataBudgetWindowMs: Number(
+    process.env.VERIFICATION_METADATA_BUDGET_WINDOW_MS ?? 86400000,
+  ),
 });

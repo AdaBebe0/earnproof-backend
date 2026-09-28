@@ -170,6 +170,21 @@ export const RETENTION_CLASSES: readonly RetentionClass[] = [
     disposal: DisposalMethod.DELETE,
     sweep: SweepMode.AUTOMATED,
   },
+  {
+    key: "idempotency_records",
+    model: "IdempotencyRecord",
+    purpose:
+      "Request deduplication and response replay for idempotent mutations. " +
+      "Cached responses prevent duplicate mutations when client retries are lost. " +
+      "Expired records have no value and are deleted.",
+    owner: "Platform engineering",
+    defaultDays: 1,
+    envVar: "RETENTION_IDEMPOTENCY_RECORD_DAYS",
+    cutoffColumn: "expiresAt",
+    backingIndex: "@@index([organizationId, expiresAt])",
+    disposal: DisposalMethod.DELETE,
+    sweep: SweepMode.AUTOMATED,
+  },
 
   // ─── Preserved: never swept by the automated job ─────────────────────────
   {
