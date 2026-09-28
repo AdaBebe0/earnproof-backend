@@ -24,6 +24,7 @@ import {
 import { SkipThrottle, Throttle } from "@nestjs/throttler";
 import { AuthenticatedUser } from "../auth/auth.types";
 import { CurrentUser } from "../common/decorators/current-user.decorator";
+import { AuthenticatedRoute } from "../common/decorators/authorization-policy.decorator";
 import { AuthGuard } from "../common/guards/auth.guard";
 import { PrismaService } from "../database/prisma.service";
 import { ApiErrorDto } from "../common/dto/api-error.dto";
@@ -41,6 +42,7 @@ import { WebhooksService } from "./webhooks.service";
  * as a path or query param — kept simple here per scope constraints.
  */
 @ApiTags("webhooks")
+@AuthenticatedRoute({ ownership: "user" })
 @ApiBearerAuth(SESSION_AUTH_SCHEME)
 @ApiUnauthorizedResponse({
   description: "Missing, invalid, or expired session token.",

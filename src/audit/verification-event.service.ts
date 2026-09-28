@@ -1,8 +1,8 @@
-import { Injectable, Logger, Optional } from "@nestjs/common";
+import { Injectable } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { VerificationOutcome } from "@prisma/client";
 import { createHmac } from "crypto";
-import { Clock, SystemClock } from "../common/time/clock";
+import { StructuredLogger } from "../common/logger";
 import { PrismaService } from "../database/prisma.service";
 import type { RetentionImpactReport } from "../jobs/retention/retention-report";
 
@@ -53,10 +53,13 @@ export interface ExpiredEventCleanupOptions {
  */
 @Injectable()
 export class VerificationEventService {
-  private readonly logger = new Logger(VerificationEventService.name);
+  private readonly logger = new StructuredLogger(VerificationEventService.name);
   private readonly retentionDays: number;
   private readonly currentSaltVersion: number;
   private readonly salts: Map<number, string>;
+  private readonly metadataBudgetPerProof: number;
+  private readonly metadataBudgetWindowMs: number;
+  private readonly budgetUsage = new Map<string, number[]>();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -67,6 +70,14 @@ export class VerificationEventService {
   ) {
     this.retentionDays =
       configService.get<number>("verificationEventRetentionDays") || 90;
+    this.metadataBudgetPerProof = configService.get<number>(
+      "verificationMetadataBudgetPerProof",
+      100,
+    );
+    this.metadataBudgetWindowMs = configService.get<number>(
+      "verificationMetadataBudgetWindowMs",
+      24 * 60 * 60 * 1000,
+    );
 
     // Use explicitly configured salt version
     // Operators control rotation by incrementing VERIFICATION_HASH_SALT_VERSION env var
@@ -90,25 +101,23 @@ export class VerificationEventService {
     }
 
     if (this.salts.size === 0) {
-      this.logger.warn(
-        "No verification hash salts configured. Using default temporary salt.",
-      );
+      this.logger.warn("No verification hash salts configured. Using default temporary salt.");
       // Fallback: create a temporary salt from env
       const fallbackSalt = configService.get<string>("credentialSigningSecret");
       if (fallbackSalt) {
         this.salts.set(0, fallbackSalt);
         this.logger.warn(
-          "Using credentialSigningSecret as fallback salt V0. Configure VERIFICATION_HASH_SALT_V* for production.",
+          "Using credentialSigningSecret as fallback salt V0",
+          { context: "Configure VERIFICATION_HASH_SALT_V* for production" }
         );
       }
     }
 
     if (!this.salts.has(this.currentSaltVersion)) {
-      this.logger.warn(
-        `Configured salt version ${this.currentSaltVersion} is not available. ` +
-          `Available versions: 0-${this.salts.size - 1}. ` +
-          `Adjust VERIFICATION_HASH_SALT_VERSION or configure VERIFICATION_HASH_SALT_V${this.currentSaltVersion}.`,
-      );
+      this.logger.warn("Configured salt version is not available", {
+        configuredVersion: this.currentSaltVersion,
+        availableVersions: this.salts.size - 1,
+      });
     }
   }
 
@@ -150,12 +159,31 @@ export class VerificationEventService {
       });
     } catch (error) {
       // Fail-open: log but do not throw
-      this.logger.warn(
-        `Failed to record verification event for proof ${proofId}: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
+      this.logger.warn("Failed to record verification event", {
+        proofId,
+        errorMessage: error instanceof Error ? error.message : String(error),
+      });
     }
+  }
+
+  /**
+   * Consume one bounded metadata slot for a proof. The key is an HMAC held
+   * only in memory, so this budget does not create another identifying store.
+   */
+  tryConsumePrivacyBudget(proofId: string, now = Date.now()): boolean {
+    const budgetKey = this.hashBudgetKey(proofId);
+    const usage = (this.budgetUsage.get(budgetKey) ?? []).filter(
+      (timestamp) => timestamp + this.metadataBudgetWindowMs > now,
+    );
+    if (usage.length >= this.metadataBudgetPerProof) return false;
+    usage.push(now);
+    this.budgetUsage.set(budgetKey, usage);
+    return true;
+  }
+
+  private hashBudgetKey(proofId: string): string {
+    const salt = this.salts.get(this.currentSaltVersion) ?? "temporary";
+    return createHmac("sha256", salt).update(proofId).digest("hex");
   }
 
   /**
@@ -220,30 +248,22 @@ export class VerificationEventService {
    *
    * @returns Number of records deleted (or, in a dry run, that would be)
    */
-  async cleanupExpiredEvents(
-    options: ExpiredEventCleanupOptions = {},
-  ): Promise<number> {
-    const report = await this.runExpiredEventsCleanup(options);
-    return report.mode === "dry_run"
-      ? report.totals.selected
-      : report.totals.affected;
-  }
+  async cleanupExpiredEvents(): Promise<number> {
+    try {
+      const now = new Date();
+      this.prunePrivacyBudget(now.getTime());
+      const result = await this.prisma.verificationEventLog.deleteMany({
+        where: {
+          retainUntil: {
+            lt: now,
+          },
+        },
+      });
 
-  /**
-   * The expired-event cleanup with its full impact report.
-   *
-   * Dry run and execution share {@link expiredEventsFilter}, so under the same
-   * evaluation instant they select the same rows. The report carries counts,
-   * the cutoff, and the policy version only — never event content, proof ids,
-   * or metadata hashes. Verification events carry no organization, so they are
-   * reported under a `null` organization.
-   */
-  async runExpiredEventsCleanup(
-    options: ExpiredEventCleanupOptions = {},
-  ): Promise<RetentionImpactReport> {
-    const dryRun = options.dryRun ?? false;
-    const now = options.now ?? this.clock.now();
-    const where = expiredEventsFilter(now);
+      this.logger.log("Verification event cleanup completed", {
+        count: result.count,
+        timestamp: now.toISOString(),
+      });
 
     let selected = 0;
     let affected = 0;
@@ -266,12 +286,10 @@ export class VerificationEventService {
         );
       }
     } catch (error) {
-      failed = true;
-      this.logger.error(
-        `Verification event cleanup failed: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
+      this.logger.error("Verification event cleanup failed", error, {
+        errorMessage: error instanceof Error ? error.message : String(error),
+      });
+      return 0;
     }
 
     return {
@@ -294,6 +312,16 @@ export class VerificationEventService {
       ],
       totals: { selected, affected },
     };
+  }
+
+  private prunePrivacyBudget(now: number): void {
+    for (const [key, timestamps] of this.budgetUsage) {
+      const active = timestamps.filter(
+        (timestamp) => timestamp + this.metadataBudgetWindowMs > now,
+      );
+      if (active.length === 0) this.budgetUsage.delete(key);
+      else this.budgetUsage.set(key, active);
+    }
   }
 
   /**
@@ -336,11 +364,7 @@ export class VerificationEventService {
 
       return stats as Record<VerificationOutcome, number>;
     } catch (error) {
-      this.logger.error(
-        `Failed to get verification stats for proof ${proofId}: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
+      this.logger.error("Failed to get verification stats", error, { proofId });
       // Return empty stats on error
       const empty: Record<string, number> = {};
       for (const outcome of Object.values(VerificationOutcome)) {

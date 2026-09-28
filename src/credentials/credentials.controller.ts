@@ -1,20 +1,31 @@
 import {
   Body,
   Controller,
+  Get,
+  Headers,
   HttpCode,
   HttpStatus,
   Post,
   UseInterceptors,
+  Res,
+  Optional,
 } from "@nestjs/common";
 import {
+  ApiBadRequestResponse,
   ApiBody,
+  ApiOkResponse,
   ApiOperation,
-  ApiResponse,
+  ApiPayloadTooLargeResponse,
+  ApiRequestTimeoutResponse,
   ApiTags,
+  ApiTooManyRequestsResponse,
 } from "@nestjs/swagger";
 import { Throttle } from "@nestjs/throttler";
 import { ApiErrorDto } from "../common/dto/api-error.dto";
+import { PublicRoute } from "../common/decorators/authorization-policy.decorator";
 import { RequestTimeoutInterceptor } from "../common/interceptors/request-timeout.interceptor";
+import { CredentialVerificationKeyService } from "../common/crypto/credential-verification-key.service";
+import { Response } from "express";
 import { CredentialsService } from "./credentials.service";
 import { VerifyCredentialResponseDto } from "./dto/verify-credential-response.dto";
 import { VerifyCredentialDto } from "./dto/verify-credential.dto";
@@ -70,10 +81,46 @@ const EXAMPLE_CREDENTIAL = {
 @ApiTags("credentials")
 @Controller("credentials")
 export class CredentialsController {
-  constructor(private readonly credentialsService: CredentialsService) {}
+  constructor(
+    private readonly credentialsService: CredentialsService,
+    @Optional()
+    private readonly credentialVerificationKeyService?: CredentialVerificationKeyService,
+  ) {}
+
+  @Get("keys")
+  @ApiOperation({
+    summary: "Discover credential verification keys",
+    description:
+      "Returns the public Ed25519 keys used to verify EarnProof credentials. " +
+      "Active and overlap keys are published; private key material is never exposed.",
+  })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: "Deterministically ordered public verification keys.",
+  })
+  getVerificationKeys(
+    @Headers("if-none-match") ifNoneMatch: string | undefined,
+    @Res({ passthrough: true }) response: Response,
+  ) {
+    if (!this.credentialVerificationKeyService) {
+      throw new Error("Credential verification keys are not configured");
+    }
+
+    const etag = this.credentialVerificationKeyService.getEtag();
+    response.setHeader("Cache-Control", "public, max-age=300, must-revalidate");
+    response.setHeader("ETag", etag);
+
+    if (ifNoneMatch === etag) {
+      response.status(HttpStatus.NOT_MODIFIED);
+      return;
+    }
+
+    return this.credentialVerificationKeyService.getPublicKeySet();
+  }
 
   /** Verify a portable credential submitted by a third party. */
   @Post("verify")
+  @PublicRoute()
   @ApiOperation({
     summary: "Verify a portable EarnProof credential",
     description:
@@ -115,35 +162,30 @@ export class CredentialsController {
       },
     },
   })
-  @ApiResponse({
-    status: HttpStatus.OK,
+  @ApiOkResponse({
     description:
       "The credential was processed. Read `result` for the verdict — success " +
       "here means the check ran, not that the credential is valid.",
     type: VerifyCredentialResponseDto,
   })
-  @ApiResponse({
-    status: HttpStatus.BAD_REQUEST,
+  @ApiBadRequestResponse({
     description:
       "The submission could not be verified: not an object, larger than 32 KB, " +
       "nested deeper than 5 levels, or structurally malformed for its declared " +
       "schema version.",
     type: ApiErrorDto,
   })
-  @ApiResponse({
-    status: HttpStatus.REQUEST_TIMEOUT,
+  @ApiRequestTimeoutResponse({
     description: "Verification did not complete within the request deadline.",
     type: ApiErrorDto,
   })
-  @ApiResponse({
-    status: HttpStatus.PAYLOAD_TOO_LARGE,
+  @ApiPayloadTooLargeResponse({
     description:
       "The request body exceeded the transport limit for this route and was " +
       "refused before it was parsed.",
     type: ApiErrorDto,
   })
-  @ApiResponse({
-    status: HttpStatus.TOO_MANY_REQUESTS,
+  @ApiTooManyRequestsResponse({
     description: "Rate limit exceeded: more than 10 verifications in a minute.",
     type: ApiErrorDto,
   })

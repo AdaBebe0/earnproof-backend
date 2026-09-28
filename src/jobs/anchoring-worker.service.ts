@@ -1,6 +1,5 @@
 import {
   Injectable,
-  Logger,
   OnApplicationShutdown,
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
@@ -8,6 +7,7 @@ import { Interval } from "@nestjs/schedule";
 import { AnchoringOperation, AnchoringStatus } from "@prisma/client";
 import { PrismaService } from "../database/prisma.service";
 import { redactError } from "../common/observability/redaction";
+import { StructuredLogger } from "../common/logger";
 import {
   AnchorProofInput,
   ContractAnchoringService,
@@ -82,7 +82,7 @@ function computeNextRetryAt(attemptCount: number): Date {
 
 @Injectable()
 export class AnchoringWorkerService implements OnApplicationShutdown {
-  private readonly logger = new Logger(AnchoringWorkerService.name);
+  private readonly logger = new StructuredLogger(AnchoringWorkerService.name);
 
   /** Set once shutdown begins — `poll()` becomes a no-op after this. */
   private draining = false;

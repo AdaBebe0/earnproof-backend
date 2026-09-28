@@ -121,15 +121,21 @@ image and do not pass them as build arguments: both end up in the image history.
 
 ## Database migrations
 
-Migrations are not applied at startup. A replica that migrates on boot races
-every other replica in the same rollout, and a failed migration becomes a crash
-loop instead of a failed job. Run them as a separate step from the same image:
+For hosted Node deployments that use `npm run start`, the `prestart` lifecycle
+applies committed migrations with `npm run prisma:migrate:deploy` before Nest
+boots. This prevents a newly deployed Prisma client from querying a schema that
+has not been upgraded yet.
+
+Container deployments bypass npm with `CMD ["node", "dist/main.js"]`. Run
+migrations as a separate pre-deploy job from the same image so replicas do not
+race each other and a failed migration stops the rollout instead of creating a
+crash loop:
 
 ```bash
 docker run --rm \
   -e DATABASE_URL="$DATABASE_URL" \
   earnproof-api:local \
-  npx prisma migrate deploy
+  npm run prisma:migrate:deploy
 ```
 
 ## Health checks

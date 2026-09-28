@@ -2,7 +2,7 @@
 
 EarnProof is an open-source, privacy-focused income and payment verification protocol built on Stellar.
 
-This repository contains the NestJS API for wallet authentication, Stellar payment indexing, payment classification, minimum-income proof issuance, public proof verification, proof revocation, optional contract anchoring, and operational health. Issuer management, webhooks, API keys, and audit-log expansion are planned but not yet wired into the application.
+This repository contains the NestJS API for wallet authentication, Stellar payment indexing, payment classification, minimum-income proof issuance, public proof verification, proof revocation, optional contract anchoring, and operational health. Issuer management, webhooks, API keys, and audit-log expansion are implemented. API keys are ready for production machine-to-machine integrations.
 
 ## Product Role
 
@@ -27,7 +27,8 @@ Implemented:
 - Minimum-income proof creation at `/api/v1/proofs/minimum-income`
 - Public proof verification at `/api/v1/proofs/:id/verify`
 - Authenticated proof revocation at `/api/v1/proofs/:id/revoke`
-- Deterministic credential canonicalization, hashing, and HMAC signing
+- Deterministic credential canonicalization, hashing, Ed25519 signing, and legacy HMAC verification
+- Public credential verification-key discovery with overlap-key rotation support
 - AES-256-GCM protection for indexed payment amounts
 - Optional Stellar CLI proof commitment anchoring, revocation, and public status checks for deployed proof registry contracts
 - PostgreSQL and Redis Docker Compose services
@@ -177,6 +178,10 @@ and connection strings; `-e` flags work equally well.
 and its default, how to run the image against the Compose services, how to apply
 migrations from the same artefact, which probe an orchestrator should use, and
 the security properties of the image.
+
+Hosted Node services that start with `npm run start` apply pending Prisma
+migrations through the npm `prestart` lifecycle before accepting traffic.
+Container deployments continue to use a separate pre-deploy migration job.
 
 Note that `docker compose up -d` starts PostgreSQL and Redis for local
 development only. It does not build or run the API.

@@ -1,4 +1,6 @@
-import { Injectable, Logger, Optional } from "@nestjs/common";
+﻿import { Injectable, Logger } from "@nestjs/common";
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+import { ContractDriftService } from "./contract-drift.service";
 import { ConfigService } from "@nestjs/config";
 import { PrismaService } from "../database/prisma.service";
 import {
@@ -66,10 +68,8 @@ export class HealthService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
-    @Optional() deployment?: DeploymentMetadataService,
-  ) {
-    this.deployment = deployment ?? new DeploymentMetadataService(config);
-  }
+    private readonly contractDrift: ContractDriftService,
+  ) {}
 
   /**
    * Liveness: does this process exist and can it answer?
