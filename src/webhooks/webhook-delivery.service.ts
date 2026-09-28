@@ -120,6 +120,32 @@ export class WebhookDeliveryService implements OnModuleInit {
     if (!user || user.organizations.length === 0) return;
 
     const orgIds = user.organizations.map((o) => o.id);
+    await this.enqueueForOrganizations(orgIds, eventType, envelope);
+  }
+
+  /**
+   * Enqueue an event for every active, subscribing endpoint of a single
+   * organisation.
+   *
+   * Used by producers whose event belongs to an organisation directly rather
+   * than to a user — the attestation reconciler, whose attestations are owned by
+   * an issuer's organisation, not by any one user.
+   */
+  async enqueueForOrganization(
+    organizationId: string,
+    eventType: WebhookEventType,
+    envelope: Omit<WebhookEnvelope, "id" | "specVersion" | "createdAt">,
+  ): Promise<void> {
+    await this.enqueueForOrganizations([organizationId], eventType, envelope);
+  }
+
+  private async enqueueForOrganizations(
+    orgIds: string[],
+    eventType: WebhookEventType,
+    envelope: Omit<WebhookEnvelope, "id" | "specVersion" | "createdAt">,
+  ): Promise<void> {
+    if (orgIds.length === 0) return;
+
     const webhooks = await this.prisma.webhook.findMany({
       where: {
         organizationId: { in: orgIds },

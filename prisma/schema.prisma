@@ -20,6 +20,9 @@ enum ResourceStatus {
   SUSPENDED
   REVOKED
   DELETED
+  // Reached only by attestations, when the expiration reconciler moves an
+  // ACTIVE attestation past its expiry. Other resources never take this value.
+  EXPIRED
 }
 
 enum PaymentClassification {
@@ -290,9 +293,11 @@ model SupportedAsset {
 model Payment {
   id                     String                @id @default(cuid())
   userId                 String
-  user                   User                  @relation(fields: [userId], references: [id])
+  user                   User                   @relation(fields: [userId], references: [id])
+  network                String?
   stellarTransactionHash String
-  operationId            String                @unique
+  operationId            String                 @unique
+  operationIndex         Int?
   sourceAddress          String
   destinationAddress     String
   assetCode              String
@@ -305,6 +310,13 @@ model Payment {
   createdAt              DateTime              @default(now())
   updatedAt              DateTime              @updatedAt
 
+  // Canonical identity of an indexed payment. A transaction hash alone is not
+  // enough — one transaction can hold several payment operations — so network,
+  // hash, and operation index together identify a payment. Nullable columns
+  // plus a composite unique let existing rows be backfilled deterministically
+  // before the identity is enforced; see the migration and
+  // scripts/backfill-payment-identity.ts.
+  @@unique([network, stellarTransactionHash, operationIndex], name: "payment_network_tx_op")
   @@index([userId, occurredAt])
   @@index([sourceAddress])
   @@index([assetCode, assetIssuer])
@@ -383,6 +395,10 @@ model Attestation {
   signedPayload        Json
   expiresAt            DateTime?
   revokedAt            DateTime?
+  // Last time the expiration reconciler evaluated this attestation. The signed
+  // payload and expiresAt are historical evidence and never mutated; only the
+  // derived `status` and this marker move when an attestation expires.
+  reconciledAt         DateTime?
   revokedBy            String?
   revocationReason     String?
   createdAt            DateTime        @default(now())
@@ -390,6 +406,8 @@ model Attestation {
 
   @@index([issuerId, status])
   @@index([subjectWalletHash])
+  // Drives the reconciliation job: find ACTIVE attestations past their
+  // expiry cheaply, without scanning the whole table.
   @@index([issuerId, expiresAt])
   @@index([status, expiresAt])
 }
