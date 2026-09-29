@@ -9,6 +9,7 @@ export const WEBHOOK_EVENT_TYPES = [
   "proof.created",
   "proof.revoked",
   "proof.verified",
+  "attestation.expired",
 ] as const;
 
 export type WebhookEventType = (typeof WEBHOOK_EVENT_TYPES)[number];
@@ -112,11 +113,24 @@ export interface ProofVerifiedPayload {
   verifiedAt: string;
 }
 
-export interface WebhookPayloadsV1 {
-  "proof.created": ProofCreatedPayload;
-  "proof.revoked": ProofRevokedPayload;
-  "proof.verified": ProofVerifiedPayload;
+export interface AttestationExpiredPayload {
+  attestationId: string;
+  issuerId: string;
+  /** Hashed subject identifier — never a raw wallet address. */
+  subjectWalletHash: string;
+  /** Stored status before reconciliation moved it. */
+  previousStatus: string;
+  /** Effective status after reconciliation — "EXPIRED". */
+  effectiveStatus: string;
+  expiresAt: string;
+  reconciledAt: string;
 }
+
+export type WebhookEventPayload =
+  | { event: "proof.created"; data: ProofCreatedPayload }
+  | { event: "proof.revoked"; data: ProofRevokedPayload }
+  | { event: "proof.verified"; data: ProofVerifiedPayload }
+  | { event: "attestation.expired"; data: AttestationExpiredPayload };
 
 /**
  * The versioned envelope sent to every webhook endpoint.
@@ -130,9 +144,12 @@ export interface WebhookPayloadsV1 {
  */
 export interface WebhookEnvelope<E extends WebhookEventType = WebhookEventType> {
   specVersion: "1";
-  id: string;
-  event: E;
-  schemaVersion: WebhookPayloadVersion;
-  createdAt: string; // ISO-8601, when the domain event occurred
-  data: WebhookPayloadsV1[E];
+  id: string; // delivery eventId — idempotency key for the integrator
+  event: WebhookEventType;
+  createdAt: string; // ISO-8601
+  data:
+    | ProofCreatedPayload
+    | ProofRevokedPayload
+    | ProofVerifiedPayload
+    | AttestationExpiredPayload;
 }

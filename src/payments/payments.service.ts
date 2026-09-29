@@ -11,7 +11,9 @@ import { PrismaService } from "../database/prisma.service";
 import { OrganizationQuotaService } from "../quotas/organization-quota.service";
 import { StellarService } from "../stellar/stellar.service";
 import { normalizeMemo } from "../stellar/memo-normalizer";
+import { operationIndexFromToid } from "../stellar/operation-identity";
 import { NormalizedMemo } from "../stellar/stellar.types";
+import { PaymentClassificationHistoryService } from "./payment-classification-history.service";
 
 @Injectable()
 export class PaymentsService {
@@ -20,8 +22,8 @@ export class PaymentsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly stellarService: StellarService,
-    configService: ConfigService,
-    private readonly quotas: OrganizationQuotaService,
+    private readonly configService: ConfigService,
+    private readonly classificationHistoryService: PaymentClassificationHistoryService,
   ) {
     this.paymentEncryptionKeyring = new PaymentEncryptionKeyringService(
       configService,
@@ -29,11 +31,10 @@ export class PaymentsService {
   }
 
   async syncPayments(user: { id: string; walletAddress: string }) {
-    // Sync frequency is charged before Horizon is contacted. The consume is a
-    // single atomic statement; a rejection changes nothing. An attempted sync
-    // counts even if Horizon later fails, because it still cost a Horizon call.
-    await this.quotas.consumeForUser(this.prisma, user.id, "sync_frequency");
-
+    // Resolved here rather than in the constructor: the network stamps every
+    // synced payment's canonical identity, but classification-only call paths
+    // never touch it, so requiring it at construction would over-couple them.
+    const network = this.configService.getOrThrow<string>("stellar.network");
     const incomingPayments = await this.stellarService.fetchIncomingPayments(
       user.walletAddress,
     );
@@ -55,6 +56,7 @@ export class PaymentsService {
     let updated = 0;
     let skipped = 0;
     let enrichmentErrors = 0;
+    let conflicts = 0;
     const memoCache = new Map<string, NormalizedMemo>();
 
     // Batch the "does this payment already exist" check into a single query
@@ -104,30 +106,61 @@ export class PaymentsService {
 
       const existing = existingOperationIds.has(payment.operationId);
 
-      await this.prisma.payment.upsert({
-        where: {
-          operationId: payment.operationId,
-        },
-        update: {
-          isEligible,
-          occurredAt: payment.occurredAt,
-          memo: memoContext as Prisma.InputJsonValue,
-        },
-        create: {
-          userId: user.id,
-          operationId: payment.operationId,
-          stellarTransactionHash: payment.stellarTransactionHash,
-          sourceAddress: payment.sourceAddress,
-          destinationAddress: payment.destinationAddress,
-          assetCode: payment.assetCode,
-          assetIssuer: payment.assetIssuer,
-          amountEncrypted: this.protectAmount(payment.amount),
-          occurredAt: payment.occurredAt,
-          memo: memoContext as Prisma.InputJsonValue,
-          classification: PaymentClassification.UNKNOWN,
-          isEligible,
-        },
-      });
+      // The operation index comes from the operation id (a Horizon TOID) and,
+      // with the network and transaction hash, forms the payment's canonical
+      // identity. Persisting it lets two payment operations in the same
+      // transaction remain distinct, and lets a reorg replay or a backfill key
+      // on the same identity as the live sync.
+      const operationIndex =
+        payment.operationIndex ??
+        operationIndexFromToid(payment.operationId);
+
+      try {
+        // Reprocessing the same operation is idempotent: the upsert keys on the
+        // globally-unique operationId, so a replayed page updates the row in
+        // place. The composite unique on (network, txHash, operationIndex)
+        // rejects a genuinely conflicting duplicate — a different operationId
+        // claiming an identity that already belongs to another row — which
+        // surfaces here as P2002 and is counted rather than allowed to corrupt
+        // the ledger or fail the whole sync.
+        await this.prisma.payment.upsert({
+          where: {
+            operationId: payment.operationId,
+          },
+          update: {
+            isEligible,
+            occurredAt: payment.occurredAt,
+            memo: memoContext as Prisma.InputJsonValue,
+            network,
+            operationIndex,
+          },
+          create: {
+            userId: user.id,
+            network,
+            operationId: payment.operationId,
+            operationIndex,
+            stellarTransactionHash: payment.stellarTransactionHash,
+            sourceAddress: payment.sourceAddress,
+            destinationAddress: payment.destinationAddress,
+            assetCode: payment.assetCode,
+            assetIssuer: payment.assetIssuer,
+            amountEncrypted: this.protectAmount(payment.amount),
+            occurredAt: payment.occurredAt,
+            memo: memoContext as Prisma.InputJsonValue,
+            classification: PaymentClassification.UNKNOWN,
+            isEligible,
+          },
+        });
+      } catch (error) {
+        if (
+          error instanceof Prisma.PrismaClientKnownRequestError &&
+          error.code === "P2002"
+        ) {
+          conflicts += 1;
+          continue;
+        }
+        throw error;
+      }
 
       if (existing) {
         updated += 1;
@@ -142,6 +175,7 @@ export class PaymentsService {
       updated,
       skipped,
       enrichmentErrors,
+      conflicts,
     };
   }
 
@@ -183,6 +217,7 @@ export class PaymentsService {
     user: { id: string },
     paymentId: string,
     classification: PaymentClassification,
+    reasonCode: string = "USER_RECLASSIFICATION",
   ) {
     const payment = await this.prisma.payment.findFirst({
       where: {
@@ -192,6 +227,7 @@ export class PaymentsService {
       select: {
         id: true,
         classification: true,
+        classificationRevision: true,
         assetCode: true,
         assetIssuer: true,
         isEligible: true,
@@ -202,15 +238,44 @@ export class PaymentsService {
       throw new NotFoundException("Payment not found");
     }
 
-    const updated = await this.prisma.payment.update({
-      where: {
-        id: payment.id,
-      },
-      data: {
-        classification,
-      },
+    // Skip update if classification is the same (no-op change)
+    if (payment.classification === classification) {
+      return this.toPaymentDto(
+        await this.prisma.payment.findUniqueOrThrow({
+          where: { id: paymentId },
+        }),
+      );
+    }
+
+    // Atomic transaction: update payment and create history record
+    const result = await this.prisma.$transaction(async (tx) => {
+      const newRevision = payment.classificationRevision + 1;
+
+      // Update the payment with new classification and incremented revision
+      const updatedPayment = await tx.payment.update({
+        where: { id: payment.id },
+        data: {
+          classification,
+          classificationRevision: newRevision,
+        },
+      });
+
+      // Create immutable history record
+      await tx.paymentClassificationHistory.create({
+        data: {
+          paymentId: payment.id,
+          actorId: user.id,
+          previousClassification: payment.classification,
+          newClassification: classification,
+          reasonCode,
+          classificationRevision: newRevision,
+        },
+      });
+
+      return updatedPayment;
     });
 
+    // Create audit log entry (outside transaction to avoid coupling)
     await this.prisma.auditLog.create({
       data: {
         actorType: "user",
@@ -221,6 +286,8 @@ export class PaymentsService {
         metadata: {
           previousClassification: payment.classification,
           nextClassification: classification,
+          classificationRevision: result.classificationRevision,
+          reasonCode,
           assetCode: payment.assetCode,
           assetIssuer: payment.assetIssuer,
           isEligible: payment.isEligible,
@@ -228,7 +295,7 @@ export class PaymentsService {
       },
     });
 
-    return this.toPaymentDto(updated);
+    return this.toPaymentDto(result);
   }
 
   private assetKey(code: string, issuer: string | null) {
@@ -242,7 +309,9 @@ export class PaymentsService {
   private toPaymentDto(payment: Payment) {
     return {
       id: payment.id,
+      network: payment.network,
       operationId: payment.operationId,
+      operationIndex: payment.operationIndex,
       stellarTransactionHash: payment.stellarTransactionHash,
       sourceAddress: payment.sourceAddress,
       destinationAddress: payment.destinationAddress,
@@ -250,6 +319,7 @@ export class PaymentsService {
       assetIssuer: payment.assetIssuer,
       occurredAt: payment.occurredAt,
       classification: payment.classification,
+      classificationRevision: payment.classificationRevision,
       isEligible: payment.isEligible,
       createdAt: payment.createdAt,
       updatedAt: payment.updatedAt,

@@ -8,21 +8,7 @@ import { CredentialVerificationKeyService } from "../common/crypto/credential-ve
 import { ContractAnchoringService } from "./contract-anchoring.service";
 import { ProofsController } from "./proofs.controller";
 import { ProofsService } from "./proofs.service";
-import {
-  ProofShareTokensController,
-  ProofSharesController,
-} from "./share-tokens/proof-share-tokens.controller";
-import { ProofShareTokensService } from "./share-tokens/proof-share-tokens.service";
-
-@Module({
-  imports: [AuthModule, AuditModule, WebhooksModule, QuotasModule],
-  controllers: [
-    ProofShareTokensController,
-    ProofSharesController,
-    ProofsController,
-  ],
-  providers: [ContractAnchoringService, ProofsService, ProofShareTokensService],
-  exports: [ContractAnchoringService],
+import { ProofReconciliationService } from "./proof-reconciliation.service";
 import { ProofVerificationAbuseService } from "../common/rate-limit/proof-verification-abuse.service";
 
 @Module({
@@ -32,7 +18,8 @@ import { ProofVerificationAbuseService } from "../common/rate-limit/proof-verifi
     ContractAnchoringService,
     CredentialVerificationKeyService,
     ProofsService,
+    ProofReconciliationService,
   ],
-  exports: [ContractAnchoringService, CredentialVerificationKeyService],
+  exports: [ContractAnchoringService, CredentialVerificationKeyService, ProofReconciliationService],
 })
 export class ProofsModule {}
