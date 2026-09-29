@@ -28,15 +28,21 @@ import {
  * written by a test is indistinguishable from a row written by the service.
  */
 
-/** The key the worker environment configures. Read lazily so a test may override it. */
-function encryptionKey(): string {
+/**
+ * The key the worker environment configures, as a version-0 keyring. Read
+ * lazily so a test may override it. Only PAYMENT_ENCRYPTION_KEY (implicit
+ * version 0) is configured in the integration environment, matching what
+ * PaymentEncryptionKeyringService resolves to when no versioned
+ * PAYMENT_ENCRYPTION_KEY_V* vars are set.
+ */
+function encryptionKeyring(): Map<number, string> {
   const key = process.env.PAYMENT_ENCRYPTION_KEY;
   if (!key) {
     throw new Error(
       "PAYMENT_ENCRYPTION_KEY is not set; the integration environment should have defaulted it",
     );
   }
-  return key;
+  return new Map([[0, key]]);
 }
 
 export async function seedUser(
@@ -98,7 +104,7 @@ export async function seedPayment(
       destinationAddress: payment.destinationAddress,
       assetCode: payment.assetCode,
       assetIssuer: payment.assetIssuer,
-      amountEncrypted: encryptProtectedAmount(payment.amount, encryptionKey()),
+      amountEncrypted: encryptProtectedAmount(payment.amount, encryptionKeyring(), 0),
       occurredAt: payment.occurredAt,
       classification: payment.classification,
       isEligible: payment.isEligible,
@@ -148,7 +154,7 @@ export async function seedWebhook(
       url: webhook.url,
       // The application stores the signing secret encrypted, never in plain
       // text, and the delivery worker decrypts it with the same key.
-      secretEncrypted: encryptProtectedAmount(webhook.secret, encryptionKey()),
+      secretEncrypted: encryptProtectedAmount(webhook.secret, encryptionKeyring(), 0),
       events: events as unknown as Prisma.InputJsonValue,
     },
   });

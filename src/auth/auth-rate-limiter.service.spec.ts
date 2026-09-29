@@ -1,23 +1,7 @@
-import { HttpException, HttpStatus } from "@nestjs/common";
+import { HttpException } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { AuthEventType } from "@prisma/client";
 import { AuthRateLimiterService } from "./auth-rate-limiter.service";
-
-/**
- * Custom exception for rate limiting (for tests).
- */
-class TooManyRequestsException extends HttpException {
-  constructor(message: string, retryAfter: number) {
-    super(
-      {
-        statusCode: HttpStatus.TOO_MANY_REQUESTS,
-        message,
-        retryAfter,
-      },
-      HttpStatus.TOO_MANY_REQUESTS,
-    );
-  }
-}
 
 describe("AuthRateLimiterService", () => {
   const walletAddress = "GABC123...";

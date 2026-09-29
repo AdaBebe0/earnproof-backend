@@ -317,7 +317,7 @@ describe("delivery integrity", () => {
       SELECT "secretEncrypted" FROM "Webhook" WHERE id = ${webhook.id}
     `;
 
-    expect(raw[0].secretEncrypted.startsWith("enc:v1:")).toBe(true);
+    expect(raw[0].secretEncrypted.startsWith("enc:v0:")).toBe(true);
     expect(raw[0].secretEncrypted).not.toContain("synthetic-not-a-real-secret");
   });
 });

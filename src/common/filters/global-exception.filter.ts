@@ -65,7 +65,7 @@ export class GlobalExceptionFilter implements ExceptionFilter {
     const res = ctx.getResponse<Response>();
 
     const requestId = this.resolveRequestId(req);
-    const { statusCode, code, message, violations } = this.classify(exception);
+    const { statusCode, code, message, violations, currentRevision } = this.classify(exception);
 
     // Log internal detail only server-side, never in the response.
     if (statusCode >= 500) {
@@ -81,6 +81,9 @@ export class GlobalExceptionFilter implements ExceptionFilter {
     if (violations?.length) {
       body.violations = violations;
     }
+    if (currentRevision !== undefined) {
+      body.currentRevision = currentRevision;
+    }
 
     // Always echo the request-ID back so clients correlate even on errors that
     // arrive before the interceptor has had a chance to set the header.
@@ -95,10 +98,21 @@ export class GlobalExceptionFilter implements ExceptionFilter {
     code: ApiErrorCode;
     message: string;
     violations?: FieldViolationDto[];
+    currentRevision?: number;
   } {
     // ── NestJS HTTP exceptions ───────────────────────────────────────────────
     if (exception instanceof HttpException) {
       return this.classifyHttpException(exception);
+    }
+
+    // ── Body-parser failures ─────────────────────────────────────────────────
+    // These arrive as plain errors from express middleware, not as
+    // HttpExceptions, so without this branch an oversized body would be
+    // reported as an internal error — telling the client nothing actionable and
+    // logging a 500 for what is ordinary, expected input.
+    const parserFailure = this.classifyBodyParserError(exception);
+    if (parserFailure) {
+      return parserFailure;
     }
 
     // ── Prisma errors ────────────────────────────────────────────────────────
@@ -149,6 +163,7 @@ export class GlobalExceptionFilter implements ExceptionFilter {
     code: ApiErrorCode;
     message: string;
     violations?: FieldViolationDto[];
+    currentRevision?: number;
   } {
     const status = exception.getStatus();
     const raw = exception.getResponse();
@@ -158,6 +173,16 @@ export class GlobalExceptionFilter implements ExceptionFilter {
         statusCode: status,
         code: raw.code,
         message: raw.message,
+      };
+    }
+
+    // Check for ConflictException with currentRevision
+    if (status === HttpStatus.CONFLICT && this.isConflictErrorResponse(raw)) {
+      return {
+        statusCode: status,
+        code: raw.code,
+        message: raw.message,
+        currentRevision: raw.currentRevision,
       };
     }
 
@@ -205,6 +230,18 @@ export class GlobalExceptionFilter implements ExceptionFilter {
       };
     }
 
+    if (status === HttpStatus.PAYLOAD_TOO_LARGE) {
+      return {
+        statusCode: HttpStatus.PAYLOAD_TOO_LARGE,
+        code: ApiErrorCode.PAYLOAD_TOO_LARGE,
+        // The exception's own message names the limit and never the payload;
+        // anything else is replaced rather than forwarded.
+        message:
+          this.extractSafeMessage(raw) ??
+          "The request exceeds the maximum permitted size.",
+      };
+    }
+
     if (status === HttpStatus.TOO_MANY_REQUESTS) {
       return {
         statusCode: HttpStatus.TOO_MANY_REQUESTS,
@@ -247,6 +284,51 @@ export class GlobalExceptionFilter implements ExceptionFilter {
     };
   }
 
+  /**
+   * Classifies an error thrown by the body parser.
+   *
+   * `body-parser` tags its failures with a `type`, which is the only stable way
+   * to tell "the client sent 4 MB" from "the client sent malformed JSON" — the
+   * messages are not contractual. Neither response quotes the body: an error
+   * that echoes an oversized payload puts it into the log, which is the problem
+   * this whole boundary exists to avoid.
+   */
+  private classifyBodyParserError(exception: unknown):
+    | {
+        statusCode: number;
+        code: ApiErrorCode;
+        message: string;
+      }
+    | undefined {
+    if (!exception || typeof exception !== "object") return undefined;
+
+    const type = (exception as { type?: unknown }).type;
+    if (typeof type !== "string") return undefined;
+
+    if (type === "entity.too.large") {
+      return {
+        statusCode: HttpStatus.PAYLOAD_TOO_LARGE,
+        code: ApiErrorCode.PAYLOAD_TOO_LARGE,
+        message: "The request exceeds the maximum permitted size.",
+      };
+    }
+
+    if (
+      type === "entity.parse.failed" ||
+      type === "encoding.unsupported" ||
+      type === "charset.unsupported" ||
+      type === "request.aborted"
+    ) {
+      return {
+        statusCode: HttpStatus.BAD_REQUEST,
+        code: ApiErrorCode.INVALID_INPUT,
+        message: "The request body could not be read as JSON.",
+      };
+    }
+
+    return undefined;
+  }
+
   private isStableErrorResponse(
     value: unknown,
   ): value is { code: ApiErrorCode; message: string } {
@@ -256,6 +338,19 @@ export class GlobalExceptionFilter implements ExceptionFilter {
       typeof response.message === "string" &&
       typeof response.code === "string" &&
       Object.values(ApiErrorCode).includes(response.code as ApiErrorCode)
+    );
+  }
+
+  private isConflictErrorResponse(
+    value: unknown,
+  ): value is { code: ApiErrorCode; message: string; currentRevision: number } {
+    if (!value || typeof value !== "object") return false;
+    const response = value as Record<string, unknown>;
+    return (
+      typeof response.message === "string" &&
+      typeof response.code === "string" &&
+      response.code === ApiErrorCode.CONFLICT &&
+      typeof response.currentRevision === "number"
     );
   }
 

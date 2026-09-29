@@ -50,6 +50,19 @@ export class AuthTokenService {
     return payload;
   }
 
+  /**
+   * Best-effort verification for legacy callers that still need this
+   * deprecated token format. New production code should prefer persisted
+   * sessions through `SessionService`.
+   */
+  tryVerify(token: string): AuthTokenPayload | undefined {
+    try {
+      return this.verify(token);
+    } catch {
+      return undefined;
+    }
+  }
+
   private signPayload(encodedPayload: string) {
     return createHmac("sha256", this.secret)
       .update(encodedPayload)

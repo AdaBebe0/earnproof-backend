@@ -1,6 +1,7 @@
 import { UnauthorizedException } from "@nestjs/common";
 import { AuthenticatedUser } from "../../src/auth/auth.types";
 import { SessionService } from "../../src/auth/session.service";
+import { Clock, SystemClock } from "../../src/common/time/clock";
 import { integrationDatabase } from "./harness/database";
 import { integrationModule } from "./harness/nest";
 import { isUniqueViolation, race, seedUser, violatedTarget } from "./harness/fixtures";
@@ -17,7 +18,14 @@ import { isUniqueViolation, race, seedUser, violatedTarget } from "./harness/fix
  */
 
 const db = integrationDatabase();
-const injector = integrationModule([SessionService]);
+// SessionService's constructor takes `clock: Clock = new SystemClock()` as its
+// third parameter. Nest's DI container resolves every constructor parameter's
+// declared TYPE regardless of default values, so a `Clock` provider must be
+// registered explicitly here.
+const injector = integrationModule([
+  SessionService,
+  { provide: Clock, useClass: SystemClock },
+]);
 
 function sessions(): SessionService {
   return injector.get(SessionService);

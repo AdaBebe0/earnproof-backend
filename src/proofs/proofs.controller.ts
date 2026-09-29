@@ -2,25 +2,36 @@ import {
   Body,
   Controller,
   Get,
+  HttpCode,
   HttpStatus,
   Param,
   Patch,
   Post,
+  Req,
   Query,
   UseGuards,
 } from "@nestjs/common";
 import {
   ApiBearerAuth,
+  ApiBody,
   ApiOperation,
   ApiParam,
   ApiResponse,
   ApiTags,
 } from "@nestjs/swagger";
+import { SkipThrottle, Throttle } from "@nestjs/throttler";
+import { Request } from "express";
 import { AuthenticatedUser } from "../auth/auth.types";
 import { CurrentUser } from "../common/decorators/current-user.decorator";
+import {
+  AuthenticatedRoute,
+  PublicRoute,
+} from "../common/decorators/authorization-policy.decorator";
+import { Idempotent } from "../common/decorators/idempotent.decorator";
 import { ApiErrorDto } from "../common/dto/api-error.dto";
 import { AuthGuard } from "../common/guards/auth.guard";
 import { CreateIncomeRangeProofDto } from "./dto/create-income-range-proof.dto";
+import { ThrottleCost } from "../common/rate-limit/throttle-cost.decorator";
 import { CreateMinimumIncomeProofDto } from "./dto/create-minimum-income-proof.dto";
 import { CreatePaymentReceiptProofDto } from "./dto/create-payment-receipt-proof.dto";
 import { CreateRecurringIncomeProofDto } from "./dto/create-recurring-income-proof.dto";
@@ -32,8 +43,11 @@ import {
 } from "./dto/proof-history-response.dto";
 import { RevokeProofResponseDto } from "./dto/revoke-proof-response.dto";
 import { VerifyProofResponseDto } from "./dto/verify-proof-response.dto";
+import { VerifyProofsBatchResponseDto } from "./dto/verify-proofs-batch-response.dto";
+import { VerifyProofsBatchDto } from "./dto/verify-proofs-batch.dto";
 import { VerificationStatsDto } from "./dto/verification-stats.dto";
 import { ProofsService } from "./proofs.service";
+import type { Request } from "express";
 
 @ApiTags("proofs")
 @Controller("proofs")
@@ -63,6 +77,7 @@ export class ProofsController {
   })
   @UseGuards(AuthGuard)
   @Get()
+  @AuthenticatedRoute({ ownership: "user" })
   listProofs(
     @CurrentUser() user: AuthenticatedUser,
     @Query() query: ListProofsDto,
@@ -94,6 +109,7 @@ export class ProofsController {
   })
   @UseGuards(AuthGuard)
   @Get(":id")
+  @AuthenticatedRoute({ ownership: "user" })
   getProofDetail(
     @CurrentUser() user: AuthenticatedUser,
     @Param("id") id: string,
@@ -128,8 +144,20 @@ export class ProofsController {
     description: "Bearer token is missing, malformed, invalid, or expired.",
     type: ApiErrorDto,
   })
+  @ApiResponse({
+    status: HttpStatus.CONFLICT,
+    description: "Idempotency key was used with a different request payload.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.REQUEST_TIMEOUT,
+    description: "Previous idempotent request is still being processed.",
+    type: ApiErrorDto,
+  })
   @UseGuards(AuthGuard)
+  @Idempotent({ headerName: "idempotency-key", required: true })
   @Post("payment-receipt")
+  @AuthenticatedRoute({ ownership: "user" })
   createPaymentReceiptProof(
     @CurrentUser() user: AuthenticatedUser,
     @Body() body: CreatePaymentReceiptProofDto,
@@ -169,8 +197,26 @@ export class ProofsController {
     description: "Bearer token is missing, malformed, invalid, or expired.",
     type: ApiErrorDto,
   })
+  @ApiResponse({
+    status: HttpStatus.CONFLICT,
+    description: "Idempotency key was used with a different request payload.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.REQUEST_TIMEOUT,
+    description: "Previous idempotent request is still being processed.",
+    type: ApiErrorDto,
+  })
   @UseGuards(AuthGuard)
+  // Proof creation is expensive (Stellar reads, contract anchoring) — the
+  // "strict" tier, not "default". SkipThrottle excludes the OTHER named
+  // throttlers so this route is judged against exactly one budget, not all
+  // three simultaneously (see rate-limit.module.ts's doc comment).
+  @SkipThrottle({ default: true, verification: true })
+  @Throttle({ strict: {} })
+  @Idempotent({ headerName: "idempotency-key", required: true })
   @Post("minimum-income")
+  @AuthenticatedRoute({ ownership: "user" })
   createMinimumIncomeProof(
     @CurrentUser() user: AuthenticatedUser,
     @Body() body: CreateMinimumIncomeProofDto,
@@ -242,8 +288,20 @@ export class ProofsController {
     description: "Bearer token is missing, malformed, invalid, or expired.",
     type: ApiErrorDto,
   })
+  @ApiResponse({
+    status: HttpStatus.CONFLICT,
+    description: "Idempotency key was used with a different request payload.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.REQUEST_TIMEOUT,
+    description: "Previous idempotent request is still being processed.",
+    type: ApiErrorDto,
+  })
   @UseGuards(AuthGuard)
+  @Idempotent({ headerName: "idempotency-key", required: true })
   @Post("recurring-income")
+  @AuthenticatedRoute({ ownership: "user" })
   createRecurringIncomeProof(
     @CurrentUser() user: AuthenticatedUser,
     @Body() body: CreateRecurringIncomeProofDto,
@@ -286,6 +344,7 @@ export class ProofsController {
   })
   @UseGuards(AuthGuard)
   @Patch(":id/revoke")
+  @AuthenticatedRoute({ ownership: "user" })
   revokeProof(@CurrentUser() user: AuthenticatedUser, @Param("id") id: string) {
     return this.proofsService.revokeProof(user.id, id);
   }
@@ -307,9 +366,63 @@ export class ProofsController {
     description: "Verification result and the signed credential.",
     type: VerifyProofResponseDto,
   })
+  @SkipThrottle({ default: true, strict: true })
+  @Throttle({ verification: {} })
   @Get(":id/verify")
+  @PublicRoute()
   verifyProof(@Param("id") id: string) {
     return this.proofsService.verifyProof(id);
+  verifyProof(@Param("id") id: string, @Req() request: Request) {
+    return this.proofsService.verifyProof(id, { ip: request.ip });
+  }
+
+  @ApiOperation({
+    summary: "Verify a batch of proofs (public)",
+    description:
+      "Public endpoint. Verifies up to a configured maximum of proof IDs in one " +
+      "request and returns one result per submitted ID, in order. Authorization " +
+      "and privacy match the single verification endpoint exactly — no " +
+      "authentication, and no underlying payment data is disclosed.\n\n" +
+      "Missing, revoked, expired, and dependency-unavailable outcomes stay " +
+      "distinguishable per item. Duplicate IDs are coalesced into a single " +
+      "lookup and share a verdict.\n\n" +
+      "The batch is rate limited by total item cost: N IDs consume N of the same " +
+      "verification budget a single lookup uses, so a batch cannot exceed the " +
+      "throughput of the same requests made individually.",
+  })
+  @ApiBody({
+    type: VerifyProofsBatchDto,
+    description: "The proof IDs to verify. Results are returned in the same order.",
+  })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: "Ordered verification results, one per submitted proof ID.",
+    type: VerifyProofsBatchResponseDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.BAD_REQUEST,
+    description:
+      "The batch itself could not be accepted: empty or more IDs than the cap.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.TOO_MANY_REQUESTS,
+    description:
+      "Rate limit exceeded: the batch's item cost exhausted the verification budget.",
+    type: ApiErrorDto,
+  })
+  @SkipThrottle({ default: true, strict: true })
+  @Throttle({ verification: {} })
+  @ThrottleCost((request: Request) => {
+    const proofIds = (request.body as { proofIds?: unknown[] })?.proofIds;
+    return Array.isArray(proofIds) ? proofIds.length : 1;
+  })
+  @HttpCode(HttpStatus.OK)
+  @Post("verify/batch")
+  verifyProofsBatch(
+    @Body() body: VerifyProofsBatchDto,
+  ): Promise<VerifyProofsBatchResponseDto> {
+    return this.proofsService.verifyProofsBatch(body.proofIds);
   }
 
   @ApiBearerAuth()
@@ -341,6 +454,7 @@ export class ProofsController {
   })
   @UseGuards(AuthGuard)
   @Get(":id/verification-stats")
+  @AuthenticatedRoute({ ownership: "user" })
   getVerificationStats(
     @CurrentUser() user: AuthenticatedUser,
     @Param("id") id: string,

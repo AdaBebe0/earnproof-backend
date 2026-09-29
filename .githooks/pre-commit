@@ -1,0 +1,16 @@
+#!/bin/sh
+set -eu
+
+staged_files="$(git diff --cached --name-only --diff-filter=ACMRD)"
+
+if [ -z "$staged_files" ]; then
+  exit 0
+fi
+
+if ! printf '%s\n' "$staged_files" | grep -Eq '\.(cjs|js|jsx|json|mjs|prisma|ts|tsx)$'; then
+  echo "pre-commit: no backend code, schema, or configuration changes; skipping tests."
+  exit 0
+fi
+
+echo "pre-commit: running backend unit tests..."
+npm test -- --runInBand

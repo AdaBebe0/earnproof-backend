@@ -15,7 +15,7 @@
  * reader needs — the line structure showing which field differs — and clip the
  * tail of any diff longer than a few rows. The rules here therefore preserve
  * layout and length, and cover the shapes this repository actually stores:
- * `enc:v1:` protected amounts, `sha256:` credential hashes, opaque session
+ * `enc:v<N>:` protected amounts, `sha256:` credential hashes, opaque session
  * tokens, and `postgresql://` connection strings.
  *
  * Redaction is by pattern AND by field name. Pattern alone misses a value whose
@@ -118,9 +118,12 @@ const RULES: ReadonlyArray<{ pattern: RegExp; mask: string }> = [
     mask: `$1'${MASK.field}'`,
   },
 
-  // AES-256-GCM protected amount, and the legacy form it replaced.
+  // AES-256-GCM protected amount, and the legacy form it replaced. The
+  // number after "v" is the payment-encryption key version (see
+  // docs/key-rotation.md), not a wire-format marker, so it must match any
+  // version — not just the key that happens to be active today.
   {
-    pattern: /\benc:v1:[A-Za-z0-9_-]+:[A-Za-z0-9_-]+:[A-Za-z0-9_-]+/g,
+    pattern: /\benc:v\d+:[A-Za-z0-9_-]+:[A-Za-z0-9_-]+:[A-Za-z0-9_-]+/g,
     mask: MASK.protectedAmount,
   },
   { pattern: /\bredacted:[A-Za-z0-9_-]{8,}/g, mask: MASK.protectedAmount },

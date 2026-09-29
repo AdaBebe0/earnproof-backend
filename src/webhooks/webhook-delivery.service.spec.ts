@@ -10,10 +10,11 @@ import { WebhookEnvelope } from "./webhook-event.types";
 // ---------------------------------------------------------------------------
 
 const ENCRYPTION_KEY = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=";
+const ENCRYPTION_KEYRING = new Map([[0, ENCRYPTION_KEY]]);
 const RAW_SECRET = "test-raw-signing-secret-32bytes!";
 
 function makeEncryptedSecret() {
-  return encryptProtectedAmount(RAW_SECRET, ENCRYPTION_KEY);
+  return encryptProtectedAmount(RAW_SECRET, ENCRYPTION_KEYRING, 0);
 }
 
 function makeConfig() {
@@ -463,7 +464,11 @@ describe("WebhookDeliveryService", () => {
   // -------------------------------------------------------------------------
   describe("secret rotation", () => {
     it("uses the current encrypted secret at execution time, not at enqueue time", async () => {
-      const newSecret = encryptProtectedAmount("new-secret", ENCRYPTION_KEY);
+      const newSecret = encryptProtectedAmount(
+        "new-secret",
+        ENCRYPTION_KEYRING,
+        0,
+      );
 
       const deliveries = new Map<string, Record<string, unknown>>();
       const deliveryId = "delivery_rotated";

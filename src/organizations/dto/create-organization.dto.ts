@@ -4,8 +4,10 @@ import {
   IsUrl,
   IsOptional,
   Matches,
+  MaxLength,
   MinLength,
 } from "class-validator";
+import { FIELD_LIMITS } from "../../common/limits/request-limits";
 
 export class CreateOrganizationDto {
   @ApiProperty({
@@ -14,6 +16,7 @@ export class CreateOrganizationDto {
   })
   @IsString()
   @MinLength(1)
+  @MaxLength(FIELD_LIMITS.name)
   name: string;
 
   @ApiProperty({
@@ -21,6 +24,7 @@ export class CreateOrganizationDto {
     example: "acme-corp",
   })
   @IsString()
+  @MaxLength(FIELD_LIMITS.name)
   @Matches(/^[a-z0-9]+(?:-[a-z0-9]+)*$/, {
     message: "slug must be lowercase alphanumeric with hyphens only",
   })
@@ -32,5 +36,6 @@ export class CreateOrganizationDto {
   })
   @IsOptional()
   @IsUrl()
+  @MaxLength(FIELD_LIMITS.url)
   website?: string;
 }

@@ -1,0 +1,2 @@
+INSERT INTO "Payment" ("id", "userId", "stellarTransactionHash", "operationId", "sourceAddress", "destinationAddress", "assetCode", "amountEncrypted", "occurredAt", "memo", "classification", "isEligible", "createdAt", "updatedAt")
+VALUES ('synthetic_prior_payment', 'synthetic_prior_user', 'synthetic_tx', 'synthetic_operation', 'GSYNTHETIC_SOURCE', 'GSYNTHETIC_DESTINATION', 'USDC', 'encrypted:synthetic', NOW(), 'synthetic memo', 'INCOME', true, NOW(), NOW());
