@@ -17,17 +17,36 @@ import {
 } from "./exports/organization-exports.controller";
 import { OrganizationMembersService } from "./organization-members.service";
 import { OrganizationMemberGuard } from "./guards/organization-member.guard";
+import { MembershipImportService } from "./membership-import.service";
+import { MembershipImportController } from "./membership-import.controller";
+import { AccessReviewService } from "./access-review.service";
+import { AccessReviewController } from "./access-review.controller";
 
 /**
- * JobsModule is imported so the export worker can record its runs in the shared
- * job-execution history (issue #201); the artifact store is provided via a
- * factory so its base directory comes from configuration and so tests can swap
- * in an in-memory implementation against the same token.
+ * JobsModule is imported so the export worker and membership import jobs can record
+ * their runs in the shared job-execution history (issue #201); the artifact store
+ * is provided via a factory so its base directory comes from configuration and so
+ * tests can swap in an in-memory implementation against the same token.
  */
 @Module({
-  imports: [DatabaseModule, AuthModule],
-  controllers: [OrganizationsController],
-  providers: [OrganizationsService, OrganizationMembersService, OrganizationMemberGuard],
-  exports: [OrganizationsService, OrganizationMembersService],
+  imports: [DatabaseModule, AuthModule, JobsModule],
+  controllers: [
+    OrganizationsController, 
+    MembershipImportController,
+    AccessReviewController,
+  ],
+  providers: [
+    OrganizationsService,
+    OrganizationMembersService,
+    OrganizationMemberGuard,
+    MembershipImportService,
+    AccessReviewService,
+  ],
+  exports: [
+    OrganizationsService,
+    OrganizationMembersService,
+    MembershipImportService,
+    AccessReviewService,
+  ],
 })
 export class OrganizationsModule {}

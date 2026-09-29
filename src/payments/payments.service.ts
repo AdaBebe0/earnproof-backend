@@ -12,6 +12,7 @@ import { StellarService } from "../stellar/stellar.service";
 import { normalizeMemo } from "../stellar/memo-normalizer";
 import { operationIndexFromToid } from "../stellar/operation-identity";
 import { NormalizedMemo } from "../stellar/stellar.types";
+import { PaymentClassificationHistoryService } from "./payment-classification-history.service";
 
 @Injectable()
 export class PaymentsService {
@@ -21,6 +22,7 @@ export class PaymentsService {
     private readonly prisma: PrismaService,
     private readonly stellarService: StellarService,
     private readonly configService: ConfigService,
+    private readonly classificationHistoryService: PaymentClassificationHistoryService,
   ) {
     this.paymentEncryptionKeyring = new PaymentEncryptionKeyringService(
       configService,
@@ -214,6 +216,7 @@ export class PaymentsService {
     user: { id: string },
     paymentId: string,
     classification: PaymentClassification,
+    reasonCode: string = "USER_RECLASSIFICATION",
   ) {
     const payment = await this.prisma.payment.findFirst({
       where: {
@@ -223,6 +226,7 @@ export class PaymentsService {
       select: {
         id: true,
         classification: true,
+        classificationRevision: true,
         assetCode: true,
         assetIssuer: true,
         isEligible: true,
@@ -233,15 +237,44 @@ export class PaymentsService {
       throw new NotFoundException("Payment not found");
     }
 
-    const updated = await this.prisma.payment.update({
-      where: {
-        id: payment.id,
-      },
-      data: {
-        classification,
-      },
+    // Skip update if classification is the same (no-op change)
+    if (payment.classification === classification) {
+      return this.toPaymentDto(
+        await this.prisma.payment.findUniqueOrThrow({
+          where: { id: paymentId },
+        }),
+      );
+    }
+
+    // Atomic transaction: update payment and create history record
+    const result = await this.prisma.$transaction(async (tx) => {
+      const newRevision = payment.classificationRevision + 1;
+
+      // Update the payment with new classification and incremented revision
+      const updatedPayment = await tx.payment.update({
+        where: { id: payment.id },
+        data: {
+          classification,
+          classificationRevision: newRevision,
+        },
+      });
+
+      // Create immutable history record
+      await tx.paymentClassificationHistory.create({
+        data: {
+          paymentId: payment.id,
+          actorId: user.id,
+          previousClassification: payment.classification,
+          newClassification: classification,
+          reasonCode,
+          classificationRevision: newRevision,
+        },
+      });
+
+      return updatedPayment;
     });
 
+    // Create audit log entry (outside transaction to avoid coupling)
     await this.prisma.auditLog.create({
       data: {
         actorType: "user",
@@ -252,6 +285,8 @@ export class PaymentsService {
         metadata: {
           previousClassification: payment.classification,
           nextClassification: classification,
+          classificationRevision: result.classificationRevision,
+          reasonCode,
           assetCode: payment.assetCode,
           assetIssuer: payment.assetIssuer,
           isEligible: payment.isEligible,
@@ -259,7 +294,7 @@ export class PaymentsService {
       },
     });
 
-    return this.toPaymentDto(updated);
+    return this.toPaymentDto(result);
   }
 
   private assetKey(code: string, issuer: string | null) {
@@ -283,6 +318,7 @@ export class PaymentsService {
       assetIssuer: payment.assetIssuer,
       occurredAt: payment.occurredAt,
       classification: payment.classification,
+      classificationRevision: payment.classificationRevision,
       isEligible: payment.isEligible,
       createdAt: payment.createdAt,
       updatedAt: payment.updatedAt,
