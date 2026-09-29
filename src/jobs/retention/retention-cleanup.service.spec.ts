@@ -488,7 +488,7 @@ describe("RetentionCleanupService", () => {
 
       const result = await service.run({ now: NOW });
 
-      expect(result.results).toHaveLength(6);
+      expect(result.results).toHaveLength(7);
       expect(result.totalAffected).toBe(4);
     });
   });

@@ -4,10 +4,13 @@ import { StellarModule } from "../stellar/stellar.module";
 import { PaymentFinalityService } from "./payment-finality.service";
 import { PaymentsController } from "./payments.controller";
 import { PaymentsService } from "./payments.service";
+import { PaymentClassificationHistoryService } from "./payment-classification-history.service";
 
 @Module({
   imports: [AuthModule, StellarModule],
   controllers: [PaymentsController],
   providers: [PaymentsService, PaymentFinalityService],
+  providers: [PaymentsService, PaymentClassificationHistoryService],
+  exports: [PaymentsService, PaymentClassificationHistoryService],
 })
 export class PaymentsModule {}

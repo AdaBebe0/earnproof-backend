@@ -47,6 +47,12 @@ export type NormalizedPayment = {
   operationId: string;
   /** Horizon paging token (the operation's TOID). Encodes the ledger sequence. */
   pagingToken?: string;
+  /**
+   * Operation index within the transaction, recovered from the operation id
+   * (TOID). `null` when the id is not a well-formed TOID and the index cannot be
+   * derived deterministically.
+   */
+  operationIndex: number | null;
   stellarTransactionHash: string;
   sourceAddress: string;
   destinationAddress: string;

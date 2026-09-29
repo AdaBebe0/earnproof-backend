@@ -85,6 +85,7 @@ describe("PaymentsService", () => {
       skipped: 0,
       enrichmentErrors: 0,
       finality: { status: "unverified", heldPayments: 0, orphanedPayments: 0 },
+      conflicts: 0,
     });
 
     expect(prisma.supportedAsset.findMany).toHaveBeenCalledWith({

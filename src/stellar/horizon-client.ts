@@ -16,6 +16,8 @@ import {
   HorizonPaymentRecord,
   NormalizedPayment,
 } from "./stellar.types";
+import { operationIndexFromToid } from "./operation-identity";
+import { HorizonPaymentRecord, NormalizedPayment } from "./stellar.types";
 
 /**
  * Cursor-paginated, fault-classifying reader for a Horizon payments feed.
@@ -128,6 +130,12 @@ export interface HorizonClientOptions {
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   timeoutMs?: number;
   backoffMs?: number;
+  /**
+   * Source of [0, 1) for backoff jitter. Injected so a test can pin the delay;
+   * defaults to `Math.random` in production. See {@link HorizonClient} for why
+   * the retry delay is jittered rather than deterministic.
+   */
+  random?: () => number;
 }
 
 /** Raised when the caller's signal aborts the read. Never retried. */
@@ -144,6 +152,7 @@ export class HorizonClient {
   private readonly sleep: (ms: number, signal?: AbortSignal) => Promise<void>;
   private readonly timeoutMs: number;
   private readonly backoffMs: number;
+  private readonly random: () => number;
 
   /**
    * Reads already running, keyed by account and options.
@@ -162,6 +171,7 @@ export class HorizonClient {
     this.sleep = options.sleep ?? defaultSleep;
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.backoffMs = options.backoffMs ?? DEFAULT_BACKOFF_MS;
+    this.random = options.random ?? Math.random;
   }
 
   /**
@@ -454,10 +464,15 @@ export class HorizonClient {
 
       if (!isRetryable(fault.kind) || attempt === maxAttempts) break;
 
+      // Retry-After is obeyed exactly — Horizon told us how long to wait, and
+      // jittering a server-supplied delay would only disobey it. The client's
+      // own exponential backoff, by contrast, is jittered (full jitter, uniform
+      // in [0, cap]): without it, every worker that hit the same outage retries
+      // on the same ticks and stampedes the recovering dependency in lockstep.
       const delay =
         fault.retryAfterSeconds !== undefined
           ? fault.retryAfterSeconds * 1000
-          : this.backoffMs * Math.pow(2, attempt - 1);
+          : Math.floor(this.random() * this.backoffMs * Math.pow(2, attempt - 1));
 
       await this.sleep(delay, signal);
     }
@@ -632,6 +647,7 @@ export function normalizeRecord(record: unknown, address: string): RecordOutcome
   return {
     operationId: candidate.id,
     ...(pagingToken !== undefined ? { pagingToken } : {}),
+    operationIndex: operationIndexFromToid(candidate.id),
     stellarTransactionHash: candidate.transaction_hash,
     sourceAddress: candidate.from,
     destinationAddress: candidate.to as string,
