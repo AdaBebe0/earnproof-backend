@@ -8,6 +8,7 @@ import { ContractAnchoringService } from "./contract-anchoring.service";
 import { ProofsController } from "./proofs.controller";
 import { ProofsService } from "./proofs.service";
 import { ProofSharingService } from "./proof-sharing.service";
+import { ProofReconciliationService } from "./proof-reconciliation.service";
 import { ProofVerificationAbuseService } from "../common/rate-limit/proof-verification-abuse.service";
 
 @Module({
@@ -25,5 +26,8 @@ import { ProofVerificationAbuseService } from "../common/rate-limit/proof-verifi
     CredentialVerificationKeyService,
     ProofSharingService,
   ],
+    ProofReconciliationService,
+  ],
+  exports: [ContractAnchoringService, CredentialVerificationKeyService, ProofReconciliationService],
 })
 export class ProofsModule {}

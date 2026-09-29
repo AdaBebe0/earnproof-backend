@@ -14,10 +14,12 @@ import { configuration } from "./config/configuration";
 import { validateEnv } from "./config/env.validation";
 import { CredentialsModule } from "./credentials/credentials.module";
 import { DatabaseModule } from "./database/database.module";
+import { DisputesModule } from "./disputes/disputes.module";
 import { HealthModule } from "./health/health.module";
 import { HttpMetricsInterceptor } from "./common/interceptors/http-metrics.interceptor";
 import { IdempotentInterceptor } from "./common/interceptors/idempotent.interceptor";
 import { ObservabilityModule } from "./common/observability/observability.module";
+import { ResilienceModule } from "./common/resilience/resilience.module";
 import { JobsModule } from "./jobs/jobs.module";
 import { IssuersModule } from "./issuers/issuers.module";
 import { OrganizationsModule } from "./organizations/organizations.module";
@@ -36,6 +38,7 @@ import { WebhooksModule } from "./webhooks/webhooks.module";
     ScheduleModule.forRoot(),
     DiscoveryModule,
     ObservabilityModule,
+    ResilienceModule,
     DatabaseModule,
     CommonModule,
     ConsentModule,
@@ -44,6 +47,7 @@ import { WebhooksModule } from "./webhooks/webhooks.module";
     ApiKeysModule,
     AuthModule,
     RateLimitModule,
+    DisputesModule,
     HealthModule,
     OrganizationsModule,
     IssuersModule,
