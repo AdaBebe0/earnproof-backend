@@ -841,6 +841,19 @@ export class ProofsService {
       result = VerificationResult.INVALID_SIGNATURE;
     }
 
+    const contractStatus = proof.contractTransactionHash
+      ? await this.contractAnchoringService?.getProofStatus(proof.id)
+      : undefined;
+
+    // Fail closed: authoritative on-chain invalidity overrides stale local state
+    if (contractStatus?.checked) {
+      if (contractStatus.revoked) {
+        result = VerificationResult.REVOKED;
+      } else if (result === VerificationResult.VALID && !contractStatus.valid) {
+        result = VerificationResult.INVALID_SIGNATURE;
+      }
+    }
+
     // If required anchoring is enabled and this proof has not yet been
     // confirmed on-chain, return UNVERIFIED_ISSUER to signal that the proof
     // is not yet verifiable via the contract. Optional anchoring (or no
@@ -851,18 +864,6 @@ export class ProofsService {
       !proof.contractTransactionHash
     ) {
       result = VerificationResult.UNVERIFIED_ISSUER;
-    }
-
-    const contractStatus = proof.contractTransactionHash
-      ? await this.contractAnchoringService?.getProofStatus(proof.id)
-      : undefined;
-
-    if (contractStatus?.checked) {
-      if (contractStatus.revoked) {
-        result = VerificationResult.REVOKED;
-      } else if (result === VerificationResult.VALID && !contractStatus.valid) {
-        result = VerificationResult.INVALID_SIGNATURE;
-      }
     }
 
     // Convert VerificationResult to VerificationOutcome for event recording
@@ -921,412 +922,45 @@ export class ProofsService {
   }
 
   /**
-   * Whether the caller's proof can be renewed right now, with stable reason
-   * codes. Ownership is enforced exactly as for revocation.
-   */
-  async getRenewalEligibility(userId: string, proofId: string) {
-    const proof = await this.loadOwnedRenewableProof(userId, proofId);
-    const eligibility = evaluateRenewalEligibility(
-      proof,
-      new Date(),
-      Boolean(proof.supersededBy),
-    );
-
-    return {
-      proofId: proof.id,
-      eligible: eligibility.eligible,
-      reasons: eligibility.reasons,
-      renewableUntil: new Date(
-        proof.expiresAt.getTime() + RENEWAL_GRACE_PERIOD_DAYS * 86_400_000,
-      ).toISOString(),
-      supersession: {
-        supersedesId: proof.supersedesId,
-        supersededById: proof.supersededBy?.id ?? null,
-        supersededAt: proof.supersededAt?.toISOString() ?? null,
-      },
-    };
-  }
-
-  /**
-   * Renew a proof: either issue a successor carrying the same claim with a
-   * fresh validity window, or attach an existing compatible proof as its
-   * successor.
+   * Verify a bounded batch of proof IDs, returning one ordered result per
+   * submitted ID.
    *
-   * Fork prevention does not depend on the pre-checks below — they only
-   * produce good error messages. The guarantee comes from the transaction:
-   * the predecessor is claimed with a conditional update on
-   * `supersededAt IS NULL`, and `supersedesId` is unique, so of N concurrent
-   * renewals exactly one commits. Losers are answered as replays when their
-   * request is identical to the winner's, and as conflicts otherwise.
+   * Each distinct ID runs through the exact single-proof {@link verifyProof}
+   * path — same public (unauthenticated) access, same privacy envelope, same
+   * event recording — so a batch reveals nothing a sequence of single calls
+   * would not. Duplicate IDs are coalesced: the proof is looked up once (one
+   * storage read, one anchoring check) and its verdict is returned at every
+   * position it occupies, so a caller cannot multiply the fan-out by repeating
+   * an ID. The four outcomes a relying party must distinguish — missing,
+   * revoked, expired, and dependency-unavailable — are preserved per item via
+   * `result` and `contractStatus`.
    */
-  async renewProof(
-    user: AuthenticatedUser,
-    proofId: string,
-    input: RenewProofDto,
-    idempotencyKey?: string,
-  ) {
-    if (
-      idempotencyKey !== undefined &&
-      (idempotencyKey.trim() === "" ||
-        idempotencyKey.length > MAX_IDEMPOTENCY_KEY_LENGTH)
-    ) {
-      throw new BadRequestException({
-        code: ApiErrorCode.INVALID_INPUT,
-        message: `Idempotency-Key must be 1-${MAX_IDEMPOTENCY_KEY_LENGTH} characters`,
-      });
-    }
-
-    const predecessor = await this.loadOwnedRenewableProof(user.id, proofId);
-    const requestHash = renewalRequestHash({
-      userId: user.id,
-      predecessorId: predecessor.id,
-      successorProofId: input.successorProofId,
-      expiresInDays: input.successorProofId ? null : input.expiresInDays,
-      idempotencyKey,
-    });
-
-    // The request hash covers successorProofId, so a replay always has the
-    // same mode as the request that created the successor.
-    const mode = input.successorProofId ? "linked" : "issued";
-
-    if (predecessor.supersededBy) {
-      return this.replayOrConflict(predecessor.id, requestHash, mode);
-    }
-
-    const now = new Date();
-    const eligibility = evaluateRenewalEligibility(predecessor, now, false);
-    if (!eligibility.eligible) {
-      throw new UnprocessableEntityException({
-        code: ApiErrorCode.INVALID_INPUT,
-        message: `Proof is not eligible for renewal: ${eligibility.reasons.join(",")}`,
-      });
-    }
-
-    try {
-      return input.successorProofId
-        ? await this.linkSuccessor(
-            user,
-            predecessor,
-            input.successorProofId,
-            requestHash,
-            now,
-          )
-        : await this.issueSuccessor(
-            user,
-            predecessor,
-            input.expiresInDays,
-            requestHash,
-            now,
-          );
-    } catch (error) {
-      if (error instanceof ConflictException || isUniqueViolation(error)) {
-        // Lost a race. If the winner was this same request, it's a replay.
-        return this.replayOrConflict(predecessor.id, requestHash, mode);
-      }
-      throw error;
-    }
-  }
-
-  private async issueSuccessor(
-    user: AuthenticatedUser,
-    predecessor: OwnedRenewableProof,
-    expiresInDays: number | undefined,
-    requestHash: string,
-    now: Date,
-  ) {
-    const claim = predecessor.claim;
-    if (!claim) {
-      // A proof without a claim cannot be rebuilt, so it cannot be renewed.
-      throw new UnprocessableEntityException({
-        code: ApiErrorCode.INVALID_INPUT,
-        message: "Proof is not eligible for renewal: invalid",
-      });
-    }
-
-    const successorId = randomUUID();
-    const expiresAt = new Date(
-      now.getTime() +
-        (expiresInDays ?? DEFAULT_EXPIRY_DAYS) * 24 * 60 * 60 * 1000,
+  async verifyProofsBatch(proofIds: string[]) {
+    const distinct = [...new Set(proofIds)];
+    const byId = new Map<
+      string,
+      Awaited<ReturnType<ProofsService["verifyProof"]>>
+    >();
+    await Promise.all(
+      distinct.map(async (id) => {
+        byId.set(id, await this.verifyProof(id));
+      }),
     );
-    const credential = this.rebuildCredential({
-      ...predecessor,
-      id: successorId,
-      createdAt: now,
-      expiresAt,
-      claim,
-    });
-    const credentialHash = `sha256:${sha256(canonicalize(credential))}`;
-    const commitment = `sha256:${sha256(credentialHash)}`;
 
-    const successor = await this.prisma.$transaction(async (tx) => {
-      await this.claimPredecessor(tx, predecessor, now);
-
-      const created = await tx.proof.create({
-        data: {
-          id: successorId,
-          userId: user.id,
-          proofType: predecessor.proofType,
-          schemaVersion: predecessor.schemaVersion,
-          status: ProofStatus.ACTIVE,
-          network: predecessor.network,
-          assetCode: predecessor.assetCode,
-          assetIssuer: predecessor.assetIssuer,
-          periodStart: predecessor.periodStart,
-          periodEnd: predecessor.periodEnd,
-          expiresAt,
-          createdAt: now,
-          credentialHash,
-          commitment,
-          supersedesId: predecessor.id,
-          renewalRequestHash: requestHash,
-          claim: {
-            create: {
-              operator: claim.operator,
-              thresholdEncrypted: claim.thresholdEncrypted,
-              frequency: claim.frequency,
-              result: claim.result,
-              disclosurePolicy: claim.disclosurePolicy ?? Prisma.JsonNull,
-            },
-          },
-        },
-      });
-
-      // The successor is anchored through the ordinary REGISTER path. The
-      // registry contract has no supersession entry point, so the link itself
-      // is recorded off-chain only.
-      if (this.anchoringEnabled) {
-        await tx.anchoringIntent.create({
-          data: {
-            proofId: created.id,
-            operation: AnchoringOperation.REGISTER,
-            status: AnchoringStatus.PENDING,
-          },
-        });
-      }
-
-      return created;
-    });
-
-    this.emitProofCreated(user.id, successor);
-    return this.renewalResponse({
-      predecessorId: predecessor.id,
-      supersededAt: now,
-      successor,
-      credential: this.signCredential(credential),
-      mode: "issued",
-      replayed: false,
-    });
-  }
-
-  private async linkSuccessor(
-    user: AuthenticatedUser,
-    predecessor: OwnedRenewableProof,
-    successorProofId: string,
-    requestHash: string,
-    now: Date,
-  ) {
-    const successor = await this.prisma.proof.findFirst({
-      where: { id: successorProofId, userId: user.id },
-      include: {
-        claim: true,
-        user: { select: { walletHash: true } },
-        supersededBy: { select: { id: true } },
-      },
-    });
-    if (!successor || !successor.claim) {
-      // Same response for unknown and non-owned: don't confirm existence.
-      throw new NotFoundException("Successor proof not found");
-    }
-
-    const incompatible = evaluateSupersessionCompatibility(
-      predecessor,
-      successor,
-      now,
-      Boolean(successor.supersededBy),
-    );
-    // Always checked, not only when everything else passes: a cycle is the
-    // one incompatibility that corrupts the chain for every later reader.
-    if (
-      !incompatible.includes(SupersessionIncompatibility.SAME_PROOF) &&
-      (await wouldCreateCycle(predecessor.id, successor.id, (id) =>
-        this.loadPredecessorId(id),
-      ))
-    ) {
-      incompatible.push(SupersessionIncompatibility.CYCLE);
-    }
-    if (incompatible.length > 0) {
-      throw new UnprocessableEntityException({
-        code: ApiErrorCode.INVALID_INPUT,
-        message: `Successor proof is incompatible: ${incompatible.join(",")}`,
-      });
-    }
-
-    const linked = await this.prisma.$transaction(async (tx) => {
-      await this.claimPredecessor(tx, predecessor, now);
-
-      // Conditional on the successor still being an unlinked, unsuperseded
-      // leaf. This is what stops two opposite links (A→B and B→A) racing
-      // into a cycle: whichever commits second finds its condition false.
-      const attached = await tx.proof.updateMany({
-        where: {
-          id: successor.id,
-          userId: user.id,
-          status: ProofStatus.ACTIVE,
-          supersedesId: null,
-          supersededAt: null,
-        },
-        data: { supersedesId: predecessor.id, renewalRequestHash: requestHash },
-      });
-      if (attached.count !== 1) {
-        throw new ConflictException({
-          code: ApiErrorCode.CONFLICT,
-          message: "Successor proof changed during renewal",
-        });
-      }
-
-      return tx.proof.findUniqueOrThrow({ where: { id: successor.id } });
-    });
-
-    return this.renewalResponse({
-      predecessorId: predecessor.id,
-      supersededAt: now,
-      successor: linked,
-      credential: this.signCredential(
-        this.rebuildCredential({ ...successor, claim: successor.claim }),
-      ),
-      mode: "linked",
-      replayed: false,
-    });
-  }
-
-  /**
-   * Mark the predecessor superseded, but only if nobody else already has.
-   * A zero count means a concurrent renewal won.
-   */
-  private async claimPredecessor(
-    tx: Prisma.TransactionClient,
-    predecessor: OwnedRenewableProof,
-    now: Date,
-  ) {
-    const claimed = await tx.proof.updateMany({
-      where: {
-        id: predecessor.id,
-        userId: predecessor.userId,
-        supersededAt: null,
-        status: { notIn: [ProofStatus.REVOKED, ProofStatus.INVALID] },
-      },
-      data: { supersededAt: now },
-    });
-    if (claimed.count !== 1) {
-      throw new ConflictException({
-        code: ApiErrorCode.CONFLICT,
-        message: "Proof was renewed or changed concurrently",
-      });
-    }
-  }
-
-  /**
-   * Answer a request for an already-superseded predecessor: the stored
-   * successor when the request is identical to the one that created it,
-   * otherwise a conflict. Never a second successor.
-   */
-  private async replayOrConflict(
-    predecessorId: string,
-    requestHash: string,
-    mode: "issued" | "linked",
-  ) {
-    const predecessor = await this.prisma.proof.findUnique({
-      where: { id: predecessorId },
-      select: {
-        supersededAt: true,
-        supersededBy: {
-          include: { claim: true, user: { select: { walletHash: true } } },
-        },
-      },
-    });
-    const successor = predecessor?.supersededBy;
-
-    if (
-      !successor ||
-      !successor.claim ||
-      successor.renewalRequestHash !== requestHash
-    ) {
-      throw new ConflictException({
-        code: ApiErrorCode.CONFLICT,
-        message: "Proof has already been superseded",
-      });
-    }
-
-    return this.renewalResponse({
-      predecessorId,
-      supersededAt: predecessor.supersededAt ?? successor.createdAt,
-      successor,
-      credential: this.signCredential(
-        this.rebuildCredential({ ...successor, claim: successor.claim }),
-      ),
-      mode,
-      replayed: true,
-    });
-  }
-
-  private renewalResponse(input: {
-    predecessorId: string;
-    supersededAt: Date;
-    successor: {
-      id: string;
-      status: ProofStatus;
-      contractTransactionHash: string | null;
-    };
-    credential: ReturnType<ProofsService["signCredential"]>;
-    mode: "issued" | "linked";
-    replayed: boolean;
-  }) {
-    const transactionHash = input.successor.contractTransactionHash;
     return {
-      predecessorId: input.predecessorId,
-      proofId: input.successor.id,
-      status: input.successor.status,
-      mode: input.mode,
-      replayed: input.replayed,
-      verificationUrl: `/api/v1/proofs/${input.successor.id}/verify`,
-      supersededAt: input.supersededAt.toISOString(),
-      credential: input.credential,
-      anchoring: transactionHash
-        ? { anchored: true as const, transactionHash }
-        : this.anchoringEnabled
-          ? { anchored: false as const, reason: "pending" as const }
-          : { anchored: false as const, reason: "disabled" as const },
+      results: proofIds.map((id) => {
+        const verified = byId.get(id)!;
+        return {
+          id,
+          result: verified.result,
+          status: verified.status,
+          contractStatus: verified.proof?.contractStatus ?? {
+            checked: false,
+            reason: "unknown" as const,
+          },
+        };
+      }),
     };
-  }
-
-  private async loadOwnedRenewableProof(
-    userId: string,
-    proofId: string,
-  ): Promise<OwnedRenewableProof> {
-    const proof = await this.prisma.proof.findUnique({
-      where: { id: proofId },
-      include: {
-        claim: true,
-        user: { select: { walletHash: true } },
-        supersededBy: { select: { id: true } },
-      },
-    });
-
-    if (!proof) {
-      throw new NotFoundException("Proof not found");
-    }
-    if (proof.userId !== userId) {
-      throw new ForbiddenException("Proof does not belong to this user");
-    }
-    return proof;
-  }
-
-  private async loadPredecessorId(proofId: string): Promise<string | null> {
-    const proof = await this.prisma.proof.findUnique({
-      where: { id: proofId },
-      select: { supersedesId: true },
-    });
-    return proof?.supersedesId ?? null;
   }
 
   private emitProofCreated(

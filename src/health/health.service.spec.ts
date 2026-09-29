@@ -7,6 +7,7 @@ import {
   HealthService,
 } from "./health.service";
 import { DependencyResult, DependencyStatus } from "./health.types";
+import { CircuitBreakerRegistry } from "../common/resilience/circuit-breaker.registry";
 
 interface ConfigOverrides {
   [key: string]: unknown;
@@ -435,142 +436,52 @@ describe("HealthService", () => {
     });
   });
 
-  describe("deployment manifest", () => {
-    const TESTNET = "Test SDF Network ; September 2015";
-    const PROOF_REGISTRY = `C${"A".repeat(55)}`;
-
-    function manifestConfig(manifest: unknown): ConfigService {
-      return buildConfig({
-        "deployment.manifest":
-          typeof manifest === "string" ? manifest : JSON.stringify(manifest),
-        "stellar.network": "testnet",
-        "stellar.networkPassphrase": TESTNET,
-        "contractAnchoring.proofRegistryContractId": PROOF_REGISTRY,
-      });
-    }
-
-    const validManifest = {
-      schemaVersion: 1,
-      deploymentVersion: "2026.09.1",
-      network: "testnet",
-      networkPassphrase: TESTNET,
-      contracts: {
-        proof_registry: {
-          address: PROOF_REGISTRY,
-          network: "testnet",
-          wasmHash: "a".repeat(64),
-        },
-      },
-    };
-
-    it("leaves readiness unchanged when no manifest is configured", async () => {
+  describe("circuit breaker diagnostics", () => {
+    it("reports NOT_CONFIGURED when no registry is wired", async () => {
       const service = new HealthService(buildPrisma(), buildConfig());
+      const result = await service.checkDiagnostics();
+      const circuits = findDependency(result, "circuit_breakers");
+      expect(circuits.status).toBe(DependencyStatus.NOT_CONFIGURED);
+      expect(circuits.reason).toBe("registry_absent");
+    });
 
-      const readiness = await service.checkReadiness();
-      const diagnostics = await service.checkDiagnostics();
+    it("reports OK with per-circuit detail when every circuit is closed", async () => {
+      const registry = new CircuitBreakerRegistry();
+      registry.getOrCreate({ name: "horizon:testnet" });
+      const service = new HealthService(buildPrisma(), buildConfig(), registry);
 
-      expect(readiness.status).toBe("ready");
-      expect(readiness.dependencies.map((d) => d.name)).not.toContain(
-        "deployment_manifest",
-      );
-      expect(findDependency(diagnostics, "deployment_manifest")).toMatchObject({
-        kind: "optional",
-        status: DependencyStatus.NOT_CONFIGURED,
-        reason: "deployment_manifest_absent",
+      const result = await service.checkDiagnostics();
+      const circuits = findDependency(result, "circuit_breakers");
+
+      expect(circuits.status).toBe(DependencyStatus.OK);
+      expect(circuits.circuits).toEqual([
+        expect.objectContaining({ name: "horizon:testnet", state: "closed" }),
+      ]);
+    });
+
+    it("reports DEGRADED and names the tripped circuits, never a payload", async () => {
+      const registry = new CircuitBreakerRegistry();
+      const breaker = registry.getOrCreate({
+        name: "horizon:testnet",
+        failureThreshold: 1,
+        openDurationMs: 60_000,
       });
-    });
+      await breaker
+        .execute(() => Promise.reject(new Error("down")), () => "trip")
+        .catch(() => undefined);
 
-    it("gates readiness on a valid manifest once one is configured", async () => {
-      const service = new HealthService(
-        buildPrisma(),
-        manifestConfig(validManifest),
-      );
+      const service = new HealthService(buildPrisma(), buildConfig(), registry);
+      const result = await service.checkDiagnostics();
+      const circuits = findDependency(result, "circuit_breakers");
 
-      const result = await service.checkReadiness();
-
-      expect(result.status).toBe("ready");
-      expect(findDependency(result, "deployment_manifest")).toMatchObject({
-        kind: "required",
-        status: DependencyStatus.OK,
+      expect(circuits.status).toBe(DependencyStatus.DEGRADED);
+      expect(circuits.reason).toBe("tripped:horizon:testnet");
+      // Detail is counts and states only.
+      expect(circuits.circuits?.[0]).toMatchObject({
+        name: "horizon:testnet",
+        state: "open",
+        openCount: 1,
       });
-    });
-
-    it("fails readiness for a malformed manifest", async () => {
-      const service = new HealthService(
-        buildPrisma(),
-        manifestConfig("{ not json"),
-      );
-
-      const result = await service.checkReadiness();
-
-      expect(result.status).toBe("not_ready");
-      expect(findDependency(result, "deployment_manifest")).toMatchObject({
-        kind: "required",
-        status: DependencyStatus.ERROR,
-        reason: "manifest_malformed_json",
-      });
-    });
-
-    it("fails readiness for an incomplete manifest", async () => {
-      const incomplete: Record<string, unknown> = { ...validManifest };
-      delete incomplete.contracts;
-      const service = new HealthService(
-        buildPrisma(),
-        manifestConfig(incomplete),
-      );
-
-      const result = await service.checkReadiness();
-
-      expect(result.status).toBe("not_ready");
-      expect(findDependency(result, "deployment_manifest").reason).toBe(
-        "manifest_invalid_field:contracts",
-      );
-    });
-
-    it("fails readiness when the manifest mixes networks", async () => {
-      const service = new HealthService(
-        buildPrisma(),
-        manifestConfig({
-          ...validManifest,
-          contracts: {
-            proof_registry: validManifest.contracts.proof_registry,
-            issuer_registry: {
-              address: `C${"B".repeat(55)}`,
-              network: "mainnet",
-              wasmHash: "b".repeat(64),
-            },
-          },
-        }),
-      );
-
-      const result = await service.checkReadiness();
-
-      expect(result.status).toBe("not_ready");
-      expect(findDependency(result, "deployment_manifest").reason).toBe(
-        "manifest_contract_network_mismatch:issuer_registry",
-      );
-    });
-
-    it("never reports manifest values in readiness reasons", async () => {
-      const service = new HealthService(
-        buildPrisma(),
-        manifestConfig({ ...validManifest, operatorToken: "tok_live_123" }),
-      );
-
-      const result = await service.checkReadiness();
-
-      expect(result.status).toBe("not_ready");
-      expect(JSON.stringify(result)).not.toContain("tok_live_123");
-      expect(JSON.stringify(result)).not.toContain("operatorToken");
-    });
-
-    it("exposes the same state the readiness probe evaluated", () => {
-      const service = new HealthService(
-        buildPrisma(),
-        manifestConfig(validManifest),
-      );
-
-      expect(service.deploymentMetadata().status).toBe("valid");
     });
   });
 });

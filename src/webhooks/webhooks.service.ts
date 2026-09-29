@@ -13,6 +13,7 @@ import { ConflictException } from "../common/exceptions/domain.exceptions";
 import { CreateWebhookDto } from "./dto/create-webhook.dto";
 import { UpdateWebhookEventsDto } from "./dto/update-webhook-events.dto";
 import { WebhookDeliveryService } from "./webhook-delivery.service";
+import { WebhookCircuitBreakerService } from "./webhook-circuit-breaker.service";
 
 /** Signing secret length in bytes (produces a 64-char hex string). */
 const SECRET_BYTES = 32;
@@ -24,6 +25,7 @@ export class WebhooksService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly deliveryService: WebhookDeliveryService,
+    private readonly circuitBreaker: WebhookCircuitBreakerService,
     configService: ConfigService,
   ) {
     this.paymentEncryptionKeyring = new PaymentEncryptionKeyringService(
@@ -62,6 +64,9 @@ export class WebhooksService {
         createdAt: true,
       },
     });
+
+    // Initialize circuit breaker for new webhook
+    await this.circuitBreaker.initializeCircuit(webhook.id);
 
     return {
       ...webhook,
@@ -210,6 +215,9 @@ export class WebhooksService {
         revision: webhook.revision + 1,
       },
     });
+
+    // Clean up circuit breaker state
+    await this.circuitBreaker.deleteCircuitState(webhookId);
 
     return { deleted: true, webhookId };
   }
