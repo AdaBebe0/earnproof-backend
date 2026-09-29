@@ -1,7 +1,8 @@
 import { Module } from "@nestjs/common";
 import { ApiKeysModule } from "../api-keys/api-keys.module";
 import { ContractAnchoringService } from "../proofs/contract-anchoring.service";
-import { WebhooksModule } from "../webhooks/webhooks.module";
+import { ProofReconciliationService } from "../proofs/proof-reconciliation.service";
+import { IssuerReconciliationService } from "../issuers/issuer-reconciliation.service";
 import { AnchoringReconcilerService } from "./anchoring-reconciler.service";
 import { AnchoringWorkerService } from "./anchoring-worker.service";
 import { AttestationReconcilerService } from "./attestation-reconciler.service";
@@ -24,7 +25,8 @@ import { RetentionJob } from "./retention/retention.job";
     ContractAnchoringService,
     AnchoringWorkerService,
     AnchoringReconcilerService,
-    AttestationReconcilerService,
+    ProofReconciliationService,
+    IssuerReconciliationService,
     RetentionCleanupService,
     RetentionJob,
     JobExecutionService,
@@ -33,7 +35,8 @@ import { RetentionJob } from "./retention/retention.job";
   exports: [
     AnchoringWorkerService,
     AnchoringReconcilerService,
-    AttestationReconcilerService,
+    ProofReconciliationService,
+    IssuerReconciliationService,
     RetentionCleanupService,
     JobExecutionService,
   ],
