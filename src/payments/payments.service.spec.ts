@@ -59,6 +59,7 @@ describe("PaymentsService", () => {
       updated: 0,
       skipped: 0,
       enrichmentErrors: 0,
+      conflicts: 0,
     });
 
     expect(prisma.supportedAsset.findMany).toHaveBeenCalledWith({
