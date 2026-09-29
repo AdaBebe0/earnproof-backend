@@ -1,14 +1,27 @@
-import { ForbiddenException, BadRequestException } from "@nestjs/common";
+﻿import { BadRequestException, ForbiddenException } from "@nestjs/common";
 import { ApiKeyScope } from "@prisma/client";
-import { ApiKeysController } from "./api-keys.controller";
 import { AuthenticatedUser } from "../auth/auth.types";
+import { ApiKeysController } from "./api-keys.controller";
+
+type ApiKeyServiceMock = {
+  createKey: jest.Mock;
+  rotateKey: jest.Mock;
+  revokeKey: jest.Mock;
+  listKeysForOrganization: jest.Mock;
+};
+
+type PrismaServiceMock = {
+  organization: {
+    findFirst: jest.Mock;
+    findMany: jest.Mock;
+  };
+};
 
 describe("ApiKeysController - Authorization", () => {
   let controller: ApiKeysController;
-  let apiKeyService: any;
-  let prismaService: any;
+  let apiKeyService: ApiKeyServiceMock;
+  let prismaService: PrismaServiceMock;
 
-  // Mock authenticated users
   const adminUser: AuthenticatedUser = {
     id: "user_admin_123",
     walletAddress: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA1",
@@ -16,67 +29,136 @@ describe("ApiKeysController - Authorization", () => {
     role: "ADMIN",
   };
 
-  const nonAdminUser: AuthenticatedUser = {
-    id: "user_nonadmin_456",
+  const creatorUser: AuthenticatedUser = {
+    id: "user_creator_456",
     walletAddress: "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB2",
-    walletHash: "hash_nonadmin_456",
+    walletHash: "hash_creator_456",
+    role: "DEVELOPER",
+  };
+
+  const outsiderUser: AuthenticatedUser = {
+    id: "user_outsider_789",
+    walletAddress: "GCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC3",
+    walletHash: "hash_outsider_789",
     role: "WORKER",
   };
 
   const organizationId = "org_test_789";
 
-  const mockApiKeyService = () => ({
-    generateSecret: jest.fn(),
-    hashSecret: jest.fn(),
-    verifySecret: jest.fn(),
-    createKey: jest.fn(),
-    rotateKey: jest.fn(),
-    revokeKey: jest.fn(),
-    listKeysForOrganization: jest.fn(),
-    recordKeyUsage: jest.fn(),
-  });
-
-  const mockPrismaService = () => ({
-    organization: {
-      findFirst: jest.fn(),
-      create: jest.fn(),
-    },
-    apiKey: {
-      create: jest.fn(),
-      findMany: jest.fn(),
-      update: jest.fn(),
-    },
-    auditLog: {
-      create: jest.fn(),
-    },
-  });
-
   beforeEach(() => {
-    apiKeyService = mockApiKeyService();
-    prismaService = mockPrismaService();
-    controller = new ApiKeysController(apiKeyService, prismaService);
+    apiKeyService = {
+      createKey: jest.fn(),
+      rotateKey: jest.fn(),
+      revokeKey: jest.fn(),
+      listKeysForOrganization: jest.fn(),
+    };
+    prismaService = {
+      organization: {
+        findFirst: jest.fn(),
+        findMany: jest.fn(),
+      },
+    };
+    controller = new ApiKeysController(
+      apiKeyService as never,
+      {
+        getSummary: jest.fn().mockResolvedValue([]),
+        freezeOnRevocation: jest.fn().mockResolvedValue(undefined),
+        recordUsage: jest.fn().mockResolvedValue(undefined),
+      } as never,
+      { consume: jest.fn().mockResolvedValue({ userId: 'user_1' }), issue: jest.fn().mockResolvedValue({ token: 'tok', expiresAt: new Date() }) } as never,
+      prismaService as never,
+    );
   });
 
-  describe("createKey - Authorization", () => {
-    it("allows admin user to create API key", async () => {
-      // Mock organization lookup - admin user created this org
-      prismaService.organization.findFirst.mockResolvedValueOnce({
-        id: organizationId,
-      });
+  function allowSingleOrganization(id = organizationId) {
+    prismaService.organization.findMany.mockResolvedValueOnce([{ id }]);
+  }
 
-      // Mock service response
-      apiKeyService.createKey.mockResolvedValueOnce({
-        secret: "test_secret_key_123456789",
-        apiKey: {
-          id: "key_123",
-          prefix: "test_se",
-          name: "Test Key",
-          status: "ACTIVE",
-          scopes: [ApiKeyScope.PROOF_VERIFY],
-          createdAt: new Date(),
-          expiresAt: null,
+  function denyOrganizations() {
+    prismaService.organization.findMany.mockResolvedValueOnce([]);
+  }
+
+  function allowRequestedOrganization(id = organizationId) {
+    prismaService.organization.findFirst.mockResolvedValueOnce({ id });
+  }
+
+  function apiKeyResponse(prefix = "test_se") {
+    return {
+      secret: "test_secret_key_123456789",
+      apiKey: {
+        id: "key_123",
+        prefix,
+        name: "Test Key",
+        status: "ACTIVE",
+        scopes: [ApiKeyScope.PROOF_VERIFY],
+        createdAt: new Date("2027-01-01T00:00:00.000Z"),
+        expiresAt: null,
+      },
+    };
+  }
+
+  describe("organization authorization helper behavior", () => {
+    it("infers an organization only when exactly one manageable organization exists", async () => {
+      allowSingleOrganization();
+      apiKeyService.listKeysForOrganization.mockResolvedValueOnce([]);
+
+      await controller.listKeys(adminUser);
+
+      expect(apiKeyService.listKeysForOrganization).toHaveBeenCalledWith(
+        organizationId,
+      );
+    });
+
+    it("fails closed when organizationId is omitted and more than one organization is manageable", async () => {
+      prismaService.organization.findMany.mockResolvedValueOnce([
+        { id: "org_1" },
+        { id: "org_2" },
+      ]);
+
+      await expect(controller.listKeys(adminUser)).rejects.toThrow(
+        BadRequestException,
+      );
+      expect(apiKeyService.listKeysForOrganization).not.toHaveBeenCalled();
+    });
+
+    it("checks explicit organization ownership for non-admin callers", async () => {
+      allowRequestedOrganization();
+      apiKeyService.listKeysForOrganization.mockResolvedValueOnce([]);
+
+      await controller.listKeys(creatorUser, { organizationId });
+
+      expect(prismaService.organization.findFirst).toHaveBeenCalledWith({
+        where: {
+          id: organizationId,
+          createdById: creatorUser.id,
+        },
+        select: {
+          id: true,
         },
       });
+    });
+
+    it("checks explicit organization existence for global admins", async () => {
+      allowRequestedOrganization();
+      apiKeyService.listKeysForOrganization.mockResolvedValueOnce([]);
+
+      await controller.listKeys(adminUser, { organizationId });
+
+      expect(prismaService.organization.findFirst).toHaveBeenCalledWith({
+        where: {
+          id: organizationId,
+        },
+        select: {
+          id: true,
+        },
+      });
+    });
+  });
+
+  describe("createKey", () => {
+    it("allows an authorized user to create an API key", async () => {
+      allowSingleOrganization();
+      apiKeyService.createKey.mockResolvedValueOnce(apiKeyResponse());
 
       const result = await controller.createKey(adminUser, {
         name: "Test Key",
@@ -85,63 +167,55 @@ describe("ApiKeysController - Authorization", () => {
 
       expect(result.secret).toBeDefined();
       expect(result.apiKey.name).toBe("Test Key");
-      expect(apiKeyService.createKey).toHaveBeenCalled();
+      expect(apiKeyService.createKey).toHaveBeenCalledWith(
+        expect.objectContaining({
+          organizationId,
+          createdBy: adminUser.id,
+        }),
+      );
     });
 
-    it("rejects non-admin user with 403 Forbidden", async () => {
-      // Mock organization lookup - non-admin user did NOT create any org
-      prismaService.organization.findFirst.mockResolvedValueOnce(null);
+    it("rejects unauthorized users with 403 Forbidden", async () => {
+      denyOrganizations();
 
-      const request = controller.createKey(nonAdminUser, {
-        name: "Unauthorized Key",
-        scopes: [ApiKeyScope.PROOF_VERIFY],
-      });
-
-      expect(request).rejects.toThrow(ForbiddenException);
-      expect(request).rejects.toThrow(
-        /Only organization admins can create API keys/
-      );
-      // Verify service was NOT called
+      await expect(
+        controller.createKey(outsiderUser, {
+          name: "Unauthorized Key",
+          scopes: [ApiKeyScope.PROOF_VERIFY],
+        }),
+      ).rejects.toThrow(ForbiddenException);
       expect(apiKeyService.createKey).not.toHaveBeenCalled();
     });
 
-    it("authorization check happens BEFORE service call (fail-closed)", async () => {
-      prismaService.organization.findFirst.mockResolvedValueOnce(null);
+    it("checks authorization before calling the service", async () => {
+      denyOrganizations();
 
-      try {
-        await controller.createKey(nonAdminUser, {
+      await expect(
+        controller.createKey(outsiderUser, {
           name: "Test",
           scopes: [ApiKeyScope.PROOF_VERIFY],
-        });
-      } catch {
-        // Expected to throw
-      }
+        }),
+      ).rejects.toThrow(ForbiddenException);
 
-      // Verify createKey service was never called
       expect(apiKeyService.createKey).not.toHaveBeenCalled();
     });
 
-    it("validates scopes even for authorized admin", async () => {
-      prismaService.organization.findFirst.mockResolvedValueOnce({
-        id: organizationId,
-      });
+    it("validates scopes after authorization but before persistence", async () => {
+      allowSingleOrganization();
 
-      const request = controller.createKey(adminUser, {
-        name: "Test Key",
-        scopes: ["INVALID_SCOPE" as any],
-      });
-
-      expect(request).rejects.toThrow(BadRequestException);
+      await expect(
+        controller.createKey(adminUser, {
+          name: "Test Key",
+          scopes: ["INVALID_SCOPE" as ApiKeyScope],
+        }),
+      ).rejects.toThrow(BadRequestException);
       expect(apiKeyService.createKey).not.toHaveBeenCalled();
     });
   });
 
-  describe("listKeys - Authorization", () => {
-    it("allows admin user to list API keys", async () => {
-      prismaService.organization.findFirst.mockResolvedValueOnce({
-        id: organizationId,
-      });
-
+  describe("listKeys", () => {
+    it("allows an authorized user to list API keys", async () => {
+      allowSingleOrganization();
       apiKeyService.listKeysForOrganization.mockResolvedValueOnce([
         {
           id: "key_1",
@@ -149,7 +223,7 @@ describe("ApiKeysController - Authorization", () => {
           name: "Key 1",
           status: "ACTIVE",
           scopeAssignments: [{ scope: ApiKeyScope.PROOF_VERIFY }],
-          createdAt: new Date(),
+          createdAt: new Date("2027-01-01T00:00:00.000Z"),
           rotatedAt: null,
           revokedAt: null,
           expiresAt: null,
@@ -160,54 +234,26 @@ describe("ApiKeysController - Authorization", () => {
       const result = await controller.listKeys(adminUser);
 
       expect(result).toHaveLength(1);
-      expect(result[0].name).toBe("Key 1");
+      expect(result[0]?.name).toBe("Key 1");
       expect(apiKeyService.listKeysForOrganization).toHaveBeenCalledWith(
-        organizationId
+        organizationId,
       );
     });
 
-    it("rejects non-admin user with 403 Forbidden", async () => {
-      prismaService.organization.findFirst.mockResolvedValueOnce(null);
+    it("rejects unauthorized users before listing keys", async () => {
+      denyOrganizations();
 
-      const request = controller.listKeys(nonAdminUser);
-
-      expect(request).rejects.toThrow(ForbiddenException);
-      expect(request).rejects.toThrow(
-        /Only organization admins can list API keys/
+      await expect(controller.listKeys(outsiderUser)).rejects.toThrow(
+        ForbiddenException,
       );
-      expect(apiKeyService.listKeysForOrganization).not.toHaveBeenCalled();
-    });
-
-    it("authorization check happens BEFORE service call (fail-closed)", async () => {
-      prismaService.organization.findFirst.mockResolvedValueOnce(null);
-
-      try {
-        await controller.listKeys(nonAdminUser);
-      } catch {
-        // Expected to throw
-      }
-
       expect(apiKeyService.listKeysForOrganization).not.toHaveBeenCalled();
     });
   });
 
-  describe("rotateKey - Authorization", () => {
-    it("allows admin user to rotate API key", async () => {
-      prismaService.organization.findFirst.mockResolvedValueOnce({
-        id: organizationId,
-      });
-
-      apiKeyService.rotateKey.mockResolvedValueOnce({
-        secret: "new_secret_key_987654321",
-        apiKey: {
-          id: "key_123",
-          prefix: "new_se",
-          name: "Test Key",
-          status: "ACTIVE",
-          scopes: [ApiKeyScope.PROOF_VERIFY],
-          rotatedAt: new Date(),
-        },
-      });
+  describe("rotateKey", () => {
+    it("allows an authorized user to rotate an API key", async () => {
+      allowSingleOrganization();
+      apiKeyService.rotateKey.mockResolvedValueOnce(apiKeyResponse("new_se"));
 
       const result = await controller.rotateKey(adminUser, "key_123");
 
@@ -216,179 +262,106 @@ describe("ApiKeysController - Authorization", () => {
       expect(apiKeyService.rotateKey).toHaveBeenCalledWith(
         "key_123",
         organizationId,
-        adminUser.id
+        adminUser.id,
       );
     });
 
-    it("rejects non-admin user with 403 Forbidden", async () => {
-      prismaService.organization.findFirst.mockResolvedValueOnce(null);
+    it("rejects unauthorized users before rotating keys", async () => {
+      denyOrganizations();
 
-      const request = controller.rotateKey(nonAdminUser, "key_123");
-
-      expect(request).rejects.toThrow(ForbiddenException);
-      expect(request).rejects.toThrow(
-        /Only organization admins can rotate API keys/
-      );
+      await expect(
+        controller.rotateKey(outsiderUser, "key_123"),
+      ).rejects.toThrow(ForbiddenException);
       expect(apiKeyService.rotateKey).not.toHaveBeenCalled();
     });
 
-    it("authorization check happens BEFORE service call (fail-closed)", async () => {
-      prismaService.organization.findFirst.mockResolvedValueOnce(null);
-
-      try {
-        await controller.rotateKey(nonAdminUser, "key_123");
-      } catch {
-        // Expected to throw
-      }
-
-      expect(apiKeyService.rotateKey).not.toHaveBeenCalled();
-    });
-
-    it("handles service error when key not found", async () => {
-      prismaService.organization.findFirst.mockResolvedValueOnce({
-        id: organizationId,
-      });
-
+    it("maps cross-organization service errors to Forbidden", async () => {
+      allowSingleOrganization();
       apiKeyService.rotateKey.mockRejectedValueOnce(
-        new Error("Key not found")
+        new Error("Key does not belong to this organization"),
       );
 
       await expect(
-        controller.rotateKey(adminUser, "key_nonexistent")
-      ).rejects.toThrow();
-
-      expect(apiKeyService.rotateKey).toHaveBeenCalled();
+        controller.rotateKey(adminUser, "key_foreign"),
+      ).rejects.toThrow(ForbiddenException);
     });
   });
 
-  describe("revokeKey - Authorization", () => {
-    it("allows admin user to revoke API key", async () => {
-      prismaService.organization.findFirst.mockResolvedValueOnce({
-        id: organizationId,
-      });
-
+  describe("revokeKey", () => {
+    it("allows an authorized user to revoke an API key", async () => {
+      allowSingleOrganization();
       apiKeyService.revokeKey.mockResolvedValueOnce(undefined);
 
       const result = await controller.revokeKey(adminUser, "key_123");
 
-      expect(result.message).toBe("API key revoked successfully");
+      expect(result).toBeUndefined();
       expect(apiKeyService.revokeKey).toHaveBeenCalledWith(
         "key_123",
         organizationId,
-        adminUser.id
+        adminUser.id,
       );
     });
 
-    it("rejects non-admin user with 403 Forbidden", async () => {
-      prismaService.organization.findFirst.mockResolvedValueOnce(null);
-
-      const request = controller.revokeKey(nonAdminUser, "key_123");
-
-      expect(request).rejects.toThrow(ForbiddenException);
-      expect(request).rejects.toThrow(
-        /Only organization admins can revoke API keys/
-      );
-      expect(apiKeyService.revokeKey).not.toHaveBeenCalled();
-    });
-
-    it("authorization check happens BEFORE service call (fail-closed)", async () => {
-      prismaService.organization.findFirst.mockResolvedValueOnce(null);
-
-      try {
-        await controller.revokeKey(nonAdminUser, "key_123");
-      } catch {
-        // Expected to throw
-      }
-
-      expect(apiKeyService.revokeKey).not.toHaveBeenCalled();
-    });
-
-    it("handles service error when key not found", async () => {
-      prismaService.organization.findFirst.mockResolvedValueOnce({
-        id: organizationId,
-      });
-
-      apiKeyService.revokeKey.mockRejectedValueOnce(
-        new Error("Key not found")
-      );
+    it("rejects unauthorized users before revoking keys", async () => {
+      denyOrganizations();
 
       await expect(
-        controller.revokeKey(adminUser, "key_nonexistent")
-      ).rejects.toThrow();
+        controller.revokeKey(outsiderUser, "key_123"),
+      ).rejects.toThrow(ForbiddenException);
+      expect(apiKeyService.revokeKey).not.toHaveBeenCalled();
+    });
 
-      expect(apiKeyService.revokeKey).toHaveBeenCalled();
+    it("maps missing keys to Forbidden to avoid identifier discovery", async () => {
+      allowSingleOrganization();
+      apiKeyService.revokeKey.mockRejectedValueOnce(new Error("Key not found"));
+
+      await expect(
+        controller.revokeKey(adminUser, "key_nonexistent"),
+      ).rejects.toThrow(ForbiddenException);
     });
   });
 
-  describe("Authorization Summary - All Four Endpoints", () => {
-    it("admin user can execute all four operations", async () => {
-      prismaService.organization.findFirst.mockResolvedValue({
-        id: organizationId,
-      });
-
-      apiKeyService.createKey.mockResolvedValueOnce({
-        secret: "secret_1",
-        apiKey: { id: "key_1", prefix: "prefix1", name: "Key 1" },
-      });
-
+  describe("all operations", () => {
+    it("authorized users can execute create, list, rotate, and revoke", async () => {
+      prismaService.organization.findMany.mockResolvedValue([{ id: organizationId }]);
+      apiKeyService.createKey.mockResolvedValueOnce(apiKeyResponse("prefix1"));
       apiKeyService.listKeysForOrganization.mockResolvedValueOnce([]);
-
-      apiKeyService.rotateKey.mockResolvedValueOnce({
-        secret: "secret_2",
-        apiKey: { id: "key_1", prefix: "prefix2", name: "Key 1" },
-      });
-
+      apiKeyService.rotateKey.mockResolvedValueOnce(apiKeyResponse("prefix2"));
       apiKeyService.revokeKey.mockResolvedValueOnce(undefined);
 
-      // Create
-      const createResult = await controller.createKey(adminUser, {
-        name: "Key 1",
-      });
-      expect(createResult.secret).toBeDefined();
+      await expect(
+        controller.createKey(adminUser, { name: "Key 1" }),
+      ).resolves.toBeDefined();
+      await expect(controller.listKeys(adminUser)).resolves.toBeDefined();
+      await expect(
+        controller.rotateKey(adminUser, "key_1"),
+      ).resolves.toBeDefined();
+      await expect(
+        controller.revokeKey(adminUser, "key_1"),
+      ).resolves.toBeUndefined();
 
-      // List
-      const listResult = await controller.listKeys(adminUser);
-      expect(listResult).toBeDefined();
-
-      // Rotate
-      const rotateResult = await controller.rotateKey(adminUser, "key_1");
-      expect(rotateResult.secret).toBeDefined();
-
-      // Revoke
-      const revokeResult = await controller.revokeKey(adminUser, "key_1");
-      expect(revokeResult.message).toBeDefined();
-
-      // All service methods should have been called exactly once
       expect(apiKeyService.createKey).toHaveBeenCalledTimes(1);
       expect(apiKeyService.listKeysForOrganization).toHaveBeenCalledTimes(1);
       expect(apiKeyService.rotateKey).toHaveBeenCalledTimes(1);
       expect(apiKeyService.revokeKey).toHaveBeenCalledTimes(1);
     });
 
-    it("non-admin user is rejected from all four operations", async () => {
-      prismaService.organization.findFirst.mockResolvedValue(null);
+    it("unauthorized users are rejected from create, list, rotate, and revoke", async () => {
+      prismaService.organization.findMany.mockResolvedValue([]);
 
-      // Create should fail
-      expect(
-        controller.createKey(nonAdminUser, { name: "Key" })
+      await expect(
+        controller.createKey(outsiderUser, { name: "Key" }),
+      ).rejects.toThrow(ForbiddenException);
+      await expect(controller.listKeys(outsiderUser)).rejects.toThrow(
+        ForbiddenException,
+      );
+      await expect(
+        controller.rotateKey(outsiderUser, "key_1"),
+      ).rejects.toThrow(ForbiddenException);
+      await expect(
+        controller.revokeKey(outsiderUser, "key_1"),
       ).rejects.toThrow(ForbiddenException);
 
-      // List should fail
-      expect(controller.listKeys(nonAdminUser)).rejects.toThrow(
-        ForbiddenException
-      );
-
-      // Rotate should fail
-      expect(controller.rotateKey(nonAdminUser, "key_1")).rejects.toThrow(
-        ForbiddenException
-      );
-
-      // Revoke should fail
-      expect(controller.revokeKey(nonAdminUser, "key_1")).rejects.toThrow(
-        ForbiddenException
-      );
-
-      // No service methods should have been called
       expect(apiKeyService.createKey).not.toHaveBeenCalled();
       expect(apiKeyService.listKeysForOrganization).not.toHaveBeenCalled();
       expect(apiKeyService.rotateKey).not.toHaveBeenCalled();

@@ -1,12 +1,27 @@
-import { Injectable, Logger } from "@nestjs/common";
+import {
+  Injectable,
+  OnApplicationShutdown,
+} from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { Interval } from "@nestjs/schedule";
 import { AnchoringOperation, AnchoringStatus } from "@prisma/client";
 import { PrismaService } from "../database/prisma.service";
+import { redactError } from "../common/observability/redaction";
+import { StructuredLogger } from "../common/logger";
 import {
   AnchorProofInput,
   ContractAnchoringService,
 } from "../proofs/contract-anchoring.service";
+import { isPermanentContractError } from "../proofs/contract-error";
+
+/**
+ * Upper bound on how long shutdown waits for an in-flight poll cycle to
+ * finish draining before giving up (earnproof-backend#68). A batch is at
+ * most BATCH_SIZE intents, each a single CLI invocation, so this generously
+ * covers a healthy drain without letting one stuck call block shutdown
+ * indefinitely — the orchestrator's own SIGKILL grace period is the backstop.
+ */
+const SHUTDOWN_DRAIN_TIMEOUT_MS = 25_000;
 
 /**
  * Maximum number of delivery attempts before an intent is permanently failed.
@@ -36,35 +51,6 @@ const BATCH_SIZE = 5;
  */
 const STALE_PROCESSING_THRESHOLD_MS = 5 * 60_000;
 
-/**
- * Error message substrings that indicate a permanent failure.
- * These are matched case-insensitively against the sanitised error text.
- */
-const PERMANENT_ERROR_PATTERNS: RegExp[] = [
-  /already registered/i,
-  /already exists/i,
-  /proof not found/i,
-  /invalid contract id/i,
-  /contract not found/i,
-  /unauthorized/i,
-  /access denied/i,
-];
-
-/**
- * Strip potential secrets from an error message before storing.
- * Removes Stellar secret-key-like tokens (S…56 chars) and KEY=VALUE pairs.
- */
-function sanitiseError(message: string): string {
-  return message
-    .replace(/S[A-Z2-7]{55}/g, "[REDACTED_SECRET]")
-    .replace(/\b[A-Z_]{3,}=[^\s]+/g, "[REDACTED_ENV]")
-    .slice(0, 500); // cap length to avoid unbounded storage
-}
-
-function isPermanentError(message: string): boolean {
-  return PERMANENT_ERROR_PATTERNS.some((pattern) => pattern.test(message));
-}
-
 function computeNextRetryAt(attemptCount: number): Date {
   const delayMs = Math.min(
     BACKOFF_BASE_MS * Math.pow(2, attemptCount - 1),
@@ -74,8 +60,21 @@ function computeNextRetryAt(attemptCount: number): Date {
 }
 
 @Injectable()
-export class AnchoringWorkerService {
-  private readonly logger = new Logger(AnchoringWorkerService.name);
+export class AnchoringWorkerService implements OnApplicationShutdown {
+  private readonly logger = new StructuredLogger(AnchoringWorkerService.name);
+
+  /** Set once shutdown begins — `poll()` becomes a no-op after this. */
+  private draining = false;
+
+  /**
+   * The currently in-flight poll cycle, if any. `onApplicationShutdown`
+   * awaits this (bounded by SHUTDOWN_DRAIN_TIMEOUT_MS) instead of tearing
+   * the process down mid-batch, so a claimed intent either finishes its
+   * CLI call and is written CONFIRMED/FAILED, or is left PROCESSING for
+   * `resetStaleProcessing` to reclaim on the next healthy worker's tick —
+   * never left half-committed.
+   */
+  private inFlightCycle: Promise<void> | null = null;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -92,12 +91,77 @@ export class AnchoringWorkerService {
    */
   @Interval(10_000)
   async poll(): Promise<void> {
+    if (this.draining) {
+      // New work stops being picked up as soon as shutdown begins
+      // (earnproof-backend#68) — only a cycle already in flight is allowed
+      // to finish.
+      return;
+    }
     if (!this.config.get<boolean>("contractAnchoring.enabled")) {
       return;
     }
 
+    const cycle = this.runCycle();
+    this.inFlightCycle = cycle;
+    try {
+      await cycle;
+    } finally {
+      if (this.inFlightCycle === cycle) {
+        this.inFlightCycle = null;
+      }
+    }
+  }
+
+  private async runCycle(): Promise<void> {
     await this.resetStaleProcessing();
     await this.processBatch();
+  }
+
+  /**
+   * Called by Nest during shutdown (requires `app.enableShutdownHooks()` in
+   * main.ts — see that file). Stops new poll cycles immediately and waits
+   * for any cycle already running to finish, up to
+   * SHUTDOWN_DRAIN_TIMEOUT_MS.
+   */
+  async onApplicationShutdown(signal?: string): Promise<void> {
+    this.draining = true;
+    this.logger.log(
+      `Draining: no new poll cycles will start (signal=${signal ?? "unknown"})`,
+    );
+
+    const cycle = this.inFlightCycle;
+    if (!cycle) {
+      return;
+    }
+
+    let timer: NodeJS.Timeout | undefined;
+    const timeout = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, SHUTDOWN_DRAIN_TIMEOUT_MS);
+    });
+
+    let drained: boolean;
+    try {
+      drained = await Promise.race([
+        cycle.then(() => true).catch(() => true),
+        timeout.then(() => false),
+      ]);
+    } finally {
+      // Whichever side of the race lost, its timer/handle must not outlive
+      // this call — an uncleared setTimeout otherwise keeps the process
+      // (and, in tests, the Jest worker) alive after shutdown has already
+      // decided the outcome.
+      clearTimeout(timer);
+    }
+
+    if (drained) {
+      this.logger.log("In-flight poll cycle finished draining");
+    } else {
+      this.logger.warn(
+        `In-flight poll cycle did not finish within ${SHUTDOWN_DRAIN_TIMEOUT_MS}ms — ` +
+          "any intent still PROCESSING will be reclaimed by resetStaleProcessing " +
+          "on a future worker's tick",
+      );
+    }
   }
 
   /**
@@ -151,8 +215,55 @@ export class AnchoringWorkerService {
     }
   }
 
+  /**
+   * Decides which operations may be claimed this cycle, and how many, from the
+   * state of their dependency circuits.
+   *
+   * This is the backpressure (issue #203). An operation whose circuit is *open*
+   * is excluded from the claim entirely — the worker stops pulling intents it
+   * cannot serve, rather than claiming them only to bounce each off an open
+   * circuit. An operation whose circuit is *half-open* is admitted at a budget
+   * of one, so recovery is tested with a single probing intent before the full
+   * batch resumes. Ordering and idempotency are untouched: the claim is still
+   * `ORDER BY createdAt`, and the idempotency guard in {@link executeIntent}
+   * still runs. A durable intent that is not claimed simply stays PENDING.
+   */
+  private claimPlan(): { operations: AnchoringOperation[]; budget: number } {
+    const register = this.anchoring.circuitState("register");
+    const revoke = this.anchoring.circuitState("revoke");
+
+    const operations: AnchoringOperation[] = [];
+    if (register !== "open") operations.push(AnchoringOperation.REGISTER);
+    if (revoke !== "open") operations.push(AnchoringOperation.REVOKE);
+
+    if (operations.length === 0) return { operations, budget: 0 };
+
+    // If any admitted operation is only half-open, keep the whole cycle to a
+    // single probe: a half-open circuit must not be handed a full batch.
+    const probing =
+      (register === "half_open" && operations.includes(AnchoringOperation.REGISTER)) ||
+      (revoke === "half_open" && operations.includes(AnchoringOperation.REVOKE));
+
+    return { operations, budget: probing ? 1 : BATCH_SIZE };
+  }
+
   private async processBatch(): Promise<void> {
     const now = new Date();
+
+    const plan = this.claimPlan();
+    if (plan.budget === 0) {
+      // Every dependency circuit is open. Claim nothing and let the intents
+      // wait; a half-open probe will resume them once a circuit permits it.
+      this.logger.warn(
+        "Anchoring backpressure: all contract circuits open; not claiming intents",
+      );
+      return;
+    }
+
+    // The operations this claim is allowed to touch, as text for an `ANY`
+    // comparison — avoids binding a Postgres enum array while still filtering
+    // out an operation whose circuit is open.
+    const allowedOperations = plan.operations.map((operation) => operation.toString());
 
     // Atomically claim a batch: use raw SQL UPDATE...RETURNING to ensure only
     // rows that THIS worker transitions from PENDING→PROCESSING are returned.
@@ -184,8 +295,9 @@ export class AnchoringWorkerService {
         WHERE
           status = ${AnchoringStatus.PENDING}::"AnchoringStatus"
           AND ("nextRetryAt" IS NULL OR "nextRetryAt" <= ${now})
+          AND operation::text = ANY(${allowedOperations})
         ORDER BY "createdAt" ASC
-        LIMIT ${BATCH_SIZE}
+        LIMIT ${plan.budget}
         FOR UPDATE SKIP LOCKED
       )
       UPDATE "AnchoringIntent" AS intent
@@ -276,6 +388,10 @@ export class AnchoringWorkerService {
         const result = await this.anchoring.anchorProof(anchorInput);
 
         if (!result.anchored) {
+          if (result.reason === "circuit_open") {
+            await this.releaseUnclaimed(id, operation, proofId);
+            return;
+          }
           // anchorProof returned anchored:false without throwing — treat as
           // transient unless the reason is "disabled" (config issue, permanent).
           const isFatal = result.reason === "disabled";
@@ -290,6 +406,10 @@ export class AnchoringWorkerService {
         const result = await this.anchoring.revokeProof(proofId);
 
         if (!result.anchored) {
+          if (result.reason === "circuit_open") {
+            await this.releaseUnclaimed(id, operation, proofId);
+            return;
+          }
           const isFatal = result.reason === "disabled";
           throw Object.assign(
             new Error(result.error ?? `Revocation ${result.reason}`),
@@ -335,10 +455,10 @@ export class AnchoringWorkerService {
         err instanceof Error ? err.message : "Unknown error";
       const permanent =
         (err instanceof Error && (err as Error & { permanent?: boolean }).permanent) ||
-        isPermanentError(message) ||
+        isPermanentContractError(message) ||
         newAttemptCount >= MAX_ATTEMPTS;
 
-      const safeError = sanitiseError(message);
+      const safeError = redactError(err);
 
       if (permanent) {
         await this.prisma.anchoringIntent.update({
@@ -374,5 +494,31 @@ export class AnchoringWorkerService {
         );
       }
     }
+  }
+
+  /**
+   * Returns an intent to PENDING without consuming an attempt.
+   *
+   * Used when the dependency circuit refused the call: the contract was never
+   * touched, so this is not a failure of the intent and must not count against
+   * its retry budget or push it toward permanent FAILED. The durable intent is
+   * simply released, eligible immediately, to be re-claimed once a circuit probe
+   * lets work resume — preserving the intent without losing it.
+   */
+  private async releaseUnclaimed(
+    id: string,
+    operation: AnchoringOperation,
+    proofId: string,
+  ): Promise<void> {
+    await this.prisma.anchoringIntent.update({
+      where: { id },
+      data: {
+        status: AnchoringStatus.PENDING,
+        nextRetryAt: new Date(),
+      },
+    });
+    this.logger.warn(
+      `Intent ${id} released unclaimed (circuit open): ${operation} for proof ${proofId}`,
+    );
   }
 }

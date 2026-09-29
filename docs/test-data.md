@@ -185,8 +185,10 @@ Add a builder when a state is awkward to construct by hand or easy to get wrong.
    synthetic marker.
 2. Put the builder in `index.ts`, named for the scenario, taking
    `(seed, ...relations, overrides?)`.
-3. If it belongs in the demo scenario, add it to `scenario.ts` and to the seed
-   script's insertion order, which follows the foreign-key graph.
+3. If it belongs in the demo scenario, add it to `scenario.ts` and to
+   `applyDemoScenario` in
+   [`src/testing/seed/apply-demo-scenario.ts`](../src/testing/seed/apply-demo-scenario.ts),
+   whose insertion order follows the foreign-key graph.
 4. Add coverage to `factories.spec.ts`. At minimum, assert determinism and that
    generated identifiers are synthetic.
 
@@ -203,3 +205,7 @@ npx jest src/testing --runInBand
 Coverage includes determinism (including under a mocked system clock),
 referential integrity across the whole scenario, uniqueness of every unique
 column, production refusal in all its forms, and idempotent reseeding.
+
+Running the seed and reset commands themselves — and the guards that stand in
+front of them — is documented in
+[development database tooling](development.md).

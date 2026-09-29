@@ -47,6 +47,7 @@ describe("OrganizationsService", () => {
             organization: {
               create: jest.fn(),
               update: jest.fn(),
+              findFirst: jest.fn(),
               findUnique: jest.fn(),
               findMany: jest.fn(),
               count: jest.fn(),
@@ -155,7 +156,7 @@ describe("OrganizationsService", () => {
       const input = { name: "Updated Name" };
 
       jest
-        .spyOn(prisma.organization, "findUnique")
+        .spyOn(prisma.organization, "findFirst")
         .mockResolvedValue(mockOrganization);
       jest
         .spyOn(prisma.organization, "update")
@@ -175,18 +176,18 @@ describe("OrganizationsService", () => {
       const input = { name: "Updated Name" };
 
       jest
-        .spyOn(prisma.organization, "findUnique")
-        .mockResolvedValue(mockOrganization);
+        .spyOn(prisma.organization, "findFirst")
+        .mockResolvedValue(null);
 
       await expect(
         service.updateOrganization(mockIssuerUser, "org-1", input),
-      ).rejects.toThrow(ForbiddenException);
+      ).rejects.toThrow(NotFoundException);
     });
 
     it("should not fail when org not found - handled by getOrganizationById", async () => {
       const input = { name: "Updated Name" };
 
-      jest.spyOn(prisma.organization, "findUnique").mockResolvedValue(null);
+      jest.spyOn(prisma.organization, "findFirst").mockResolvedValue(null);
 
       await expect(
         service.updateOrganization(mockUser, "nonexistent", input),
@@ -275,7 +276,7 @@ describe("OrganizationsService", () => {
   describe("getOrganization", () => {
     it("should return organization with issuer count", async () => {
       jest
-        .spyOn(prisma.organization, "findUnique")
+        .spyOn(prisma.organization, "findFirst")
         .mockResolvedValue(mockOrganization);
       jest.spyOn(prisma.issuer, "count").mockResolvedValue(3);
 
@@ -286,7 +287,7 @@ describe("OrganizationsService", () => {
     });
 
     it("should throw when organization not found", async () => {
-      jest.spyOn(prisma.organization, "findUnique").mockResolvedValue(null);
+      jest.spyOn(prisma.organization, "findFirst").mockResolvedValue(null);
 
       await expect(
         service.getOrganization(mockUser, "nonexistent"),
@@ -295,12 +296,12 @@ describe("OrganizationsService", () => {
 
     it("should reject access to another user's organization", async () => {
       jest
-        .spyOn(prisma.organization, "findUnique")
-        .mockResolvedValue(mockOrganization);
+        .spyOn(prisma.organization, "findFirst")
+        .mockResolvedValue(null);
 
       await expect(
         service.getOrganization(mockIssuerUser, "org-1"),
-      ).rejects.toThrow(ForbiddenException);
+      ).rejects.toThrow(NotFoundException);
       expect(prisma.issuer.count).not.toHaveBeenCalled();
     });
   });

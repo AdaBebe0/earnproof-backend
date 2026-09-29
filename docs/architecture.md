@@ -155,6 +155,11 @@ last month must verify today, so any change to
 [`canonicalize.ts`](../src/common/crypto/canonicalize.ts) invalidates every
 signature ever issued. Treat it as frozen.
 
+The module is verification-only on purpose: it reads proofs and never writes
+them, and issuance, revocation and any future export format stay in `proofs`,
+which owns the signing key and the authenticated surface. See
+[ADR-0007](adr/0007-keep-the-credentials-module.md).
+
 ### `webhooks` — [`src/webhooks/`](../src/webhooks/)
 
 Signed outbound event delivery.
@@ -281,6 +286,7 @@ without an account. That is why the response carries no payment detail and no
 wallet address — see [Protected data](#protected-data).
 
 Tests: [`credentials.service.spec.ts`](../src/credentials/credentials.service.spec.ts),
+[`credentials.controller.spec.ts`](../src/credentials/credentials.controller.spec.ts),
 [`verification-event.service.spec.ts`](../src/audit/verification-event.service.spec.ts).
 
 ### Revocation

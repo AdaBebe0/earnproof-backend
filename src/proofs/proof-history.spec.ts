@@ -1,6 +1,7 @@
 import { BadRequestException, NotFoundException } from "@nestjs/common";
 import { ProofStatus, ProofType } from "@prisma/client";
 import { ProofsService } from "./proofs.service";
+import { AttestationsService } from "../attestations/attestations.service";
 
 describe("ProofsService proof history", () => {
   const config = {
@@ -18,6 +19,9 @@ describe("ProofsService proof history", () => {
     recordEvent: jest.fn(),
     getAggregateStats: jest.fn(),
   };
+  const mockAttestationsService = {
+    getValidAttestationsForSubject: jest.fn().mockResolvedValue([]),
+  } as unknown as AttestationsService;
   const user = {
     id: "user_1",
     walletAddress: "GB_OWNER",
@@ -58,6 +62,7 @@ describe("ProofsService proof history", () => {
       prisma as never,
       config as never,
       events as never,
+      mockAttestationsService,
     );
 
     const result = await service.listProofs("user_1", {
@@ -102,6 +107,7 @@ describe("ProofsService proof history", () => {
       prisma as never,
       config as never,
       events as never,
+      mockAttestationsService,
     );
 
     await expect(
@@ -116,6 +122,7 @@ describe("ProofsService proof history", () => {
       prisma as never,
       config as never,
       events as never,
+      mockAttestationsService,
     );
 
     for (const id of ["unknown", "owned-by-someone-else"]) {
@@ -151,6 +158,7 @@ describe("ProofsService proof history", () => {
       prisma as never,
       config as never,
       events as never,
+      mockAttestationsService,
     );
 
     const result = await service.listProofs("user_1", { limit: 20 });
@@ -196,6 +204,7 @@ describe("ProofsService proof history", () => {
       prisma as never,
       config as never,
       events as never,
+      mockAttestationsService,
       contract as never,
     );
 

@@ -1,12 +1,27 @@
 import { Injectable, UnauthorizedException } from "@nestjs/common";
+import type { Prisma } from "@prisma/client";
 import { ConfigService } from "@nestjs/config";
 import { randomBytes } from "crypto";
 import { PrismaService } from "../database/prisma.service";
 import { sha256 } from "../common/crypto/hash";
 import { AuthenticatedUser } from "./auth.types";
+import { Clock, SystemClock } from "../common/time/clock";
+import { deriveDeviceLabel, escapeLabel, SessionDeviceHeaders } from "./session-device-metadata";
 
 /** Default session TTL: 12 hours in seconds. */
 const DEFAULT_TTL_SECONDS = 60 * 60 * 12;
+
+type SessionLookup = {
+  id: string;
+  userId: string;
+  expiresAt: Date;
+  revokedAt: Date | null;
+};
+
+export type SessionIdentity = {
+  sessionId: string;
+  userId: string;
+};
 
 /**
  * How the opaque token is structured (internal only).
@@ -25,6 +40,11 @@ export class SessionService {
   constructor(
     private readonly prisma: PrismaService,
     configService: ConfigService,
+    // Defaults to the real system clock so every existing call site (Nest's
+    // DI container, and every test that constructs SessionService directly)
+    // keeps working unchanged; pass a FixedClock (test/time/fixed-clock.ts)
+    // to control "now" deterministically in boundary tests.
+    private readonly clock: Clock = new SystemClock(),
   ) {
     // Re-use the existing SESSION_SECRET env var to confirm the config is
     // present; actual token confidentiality comes from the random bytes,
@@ -44,15 +64,19 @@ export class SessionService {
   async create(
     user: AuthenticatedUser,
     ttlSeconds = this.sessionTtlSeconds,
+    headers?: SessionDeviceHeaders,
   ): Promise<{ token: string; sessionId: string; expiresAt: Date }> {
     const { token, tokenHash, sessionId } = this.generateToken();
-    const expiresAt = new Date(Date.now() + ttlSeconds * 1000);
+    const expiresAt = new Date(this.clock.nowMs() + ttlSeconds * 1000);
 
     await this.prisma.authSession.create({
       data: {
         id: sessionId,
         tokenHash,
         userId: user.id,
+        deviceLabel: deriveDeviceLabel(headers),
+        firstSeenAt: this.clock.now(),
+        lastSeenAt: this.clock.now(),
         expiresAt,
       },
     });
@@ -79,15 +103,7 @@ export class SessionService {
       throw new UnauthorizedException("Malformed session token");
     }
 
-    const session = await this.prisma.authSession.findUnique({
-      where: { tokenHash },
-      select: {
-        id: true,
-        userId: true,
-        expiresAt: true,
-        revokedAt: true,
-      },
-    });
+    const session = await this.findSessionByHash(tokenHash);
 
     if (!session) {
       throw new UnauthorizedException("Session not found");
@@ -97,7 +113,7 @@ export class SessionService {
       throw new UnauthorizedException("Session has been revoked");
     }
 
-    if (session.expiresAt <= new Date()) {
+    if (session.expiresAt <= this.clock.now()) {
       throw new UnauthorizedException("Session has expired");
     }
 
@@ -105,7 +121,7 @@ export class SessionService {
     this.prisma.authSession
       .update({
         where: { id: session.id },
-        data: { lastUsedAt: new Date() },
+        data: { lastUsedAt: this.clock.now(), lastSeenAt: this.clock.now() },
       })
       .catch(() => {
         // Deliberately swallowed: a failed timestamp update must not break
@@ -113,6 +129,26 @@ export class SessionService {
       });
 
     return { sessionId: session.id, userId: session.userId };
+  }
+
+  /**
+   * Resolve a live persisted session without mutating `lastUsedAt` or throwing.
+   * This is for soft-auth consumers such as global rate limiting; route guards
+   * still own authentication enforcement.
+   */
+  async tryIdentify(token: string): Promise<SessionIdentity | null> {
+    const tokenHash = this.hashToken(token);
+    if (!tokenHash) return null;
+
+    try {
+      const session = await this.findSessionByHash(tokenHash);
+      if (!session) return null;
+      if (session.revokedAt !== null) return null;
+      if (session.expiresAt <= this.clock.now()) return null;
+      return { sessionId: session.id, userId: session.userId };
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -127,7 +163,7 @@ export class SessionService {
         id: sessionId,
         revokedAt: null, // idempotent guard
       },
-      data: { revokedAt: new Date() },
+      data: { revokedAt: this.clock.now() },
     });
   }
 
@@ -145,11 +181,12 @@ export class SessionService {
     sessionId: string,
     user: AuthenticatedUser,
     ttlSeconds = this.sessionTtlSeconds,
+    headers?: SessionDeviceHeaders,
   ): Promise<{ token: string; sessionId: string; expiresAt: Date }> {
     const { token, tokenHash, sessionId: newSessionId } = this.generateToken();
-    const expiresAt = new Date(Date.now() + ttlSeconds * 1000);
+    const expiresAt = new Date(this.clock.nowMs() + ttlSeconds * 1000);
 
-    await this.prisma.$transaction(async (transaction) => {
+    await this.prisma.$transaction(async (transaction: Prisma.TransactionClient) => {
       const existing = await transaction.authSession.findUnique({
         where: { id: sessionId },
         select: { userId: true, revokedAt: true, expiresAt: true },
@@ -165,7 +202,7 @@ export class SessionService {
         );
       }
 
-      if (existing.expiresAt <= new Date()) {
+      if (existing.expiresAt <= this.clock.now()) {
         throw new UnauthorizedException("Session has expired");
       }
 
@@ -174,6 +211,9 @@ export class SessionService {
           id: newSessionId,
           tokenHash,
           userId: user.id,
+          deviceLabel: deriveDeviceLabel(headers),
+          firstSeenAt: this.clock.now(),
+          lastSeenAt: this.clock.now(),
           expiresAt,
         },
       });
@@ -181,7 +221,7 @@ export class SessionService {
       const revoked = await transaction.authSession.updateMany({
         where: { id: sessionId, userId: user.id, revokedAt: null },
         data: {
-          revokedAt: new Date(),
+          revokedAt: this.clock.now(),
           rotatedToId: newSessionId,
         },
       });
@@ -205,8 +245,36 @@ export class SessionService {
         userId,
         revokedAt: null,
       },
-      data: { revokedAt: new Date() },
+      data: { revokedAt: this.clock.now() },
     });
+  }
+
+  /** Return only the caller's session metadata; token hashes never leave storage. */
+  async listForUser(userId: string) {
+    return this.prisma.authSession.findMany({
+      where: { userId },
+      orderBy: [{ lastSeenAt: "desc" }, { id: "asc" }],
+      select: {
+        id: true,
+        deviceLabel: true,
+        firstSeenAt: true,
+        lastSeenAt: true,
+        expiresAt: true,
+        revokedAt: true,
+      },
+    });
+  }
+
+  /** Rename only a session owned by the caller. */
+  async renameForUser(userId: string, sessionId: string, label: string): Promise<void> {
+    const result = await this.prisma.authSession.updateMany({
+      where: { id: sessionId, userId },
+      data: { deviceLabel: escapeLabel(label) },
+    });
+
+    if (result.count !== 1) {
+      throw new UnauthorizedException("Session does not belong to the current user");
+    }
   }
 
   /**
@@ -215,10 +283,138 @@ export class SessionService {
    *
    * @returns  Number of rows deleted.
    */
-  async deleteExpired(olderThan: Date = new Date()): Promise<number> {
+  async deleteExpired(olderThan: Date = this.clock.now()): Promise<number> {
     const result = await this.prisma.authSession.deleteMany({
       where: { expiresAt: { lt: olderThan } },
     });
+    return result.count;
+  }
+
+  /**
+   * Get all active sessions for a user, ordered by creation time (newest first).
+   * Returns only non-sensitive metadata — token hash is never included.
+   */
+  async getSessions(userId: string): Promise<
+    Array<{
+      id: string;
+      deviceFingerprint: string | null;
+      createdAt: Date;
+      expiresAt: Date;
+      lastUsedAt: Date | null;
+    }>
+  > {
+    return this.prisma.authSession.findMany({
+      where: {
+        userId,
+        revokedAt: null,
+      },
+      select: {
+        id: true,
+        deviceFingerprint: true,
+        createdAt: true,
+        expiresAt: true,
+        lastUsedAt: true,
+      },
+      orderBy: { createdAt: "desc" },
+    });
+  }
+
+  /**
+   * Revoke a single session other than the current one.
+   * Requires ownership check: the session must belong to the authenticated user.
+   * Optionally set a revocation reason (e.g., "REMOTE_REVOCATION").
+   *
+   * Throws UnauthorizedException if:
+   *  - The session does not exist
+   *  - The session belongs to a different user
+   *  - The session is already revoked
+   *
+   * @param sessionId          The session to revoke (NOT the token).
+   * @param authenticatedUserId The authenticated user's ID for ownership check.
+   * @param revocationReason   Optional reason for revocation.
+   * @returns                  The revoked session ID.
+   */
+  async revokeOtherSession(
+    sessionId: string,
+    authenticatedUserId: string,
+    revocationReason?: string,
+  ): Promise<string> {
+    const session = await this.prisma.authSession.findUnique({
+      where: { id: sessionId },
+      select: { userId: true, revokedAt: true },
+    });
+
+    if (!session) {
+      throw new UnauthorizedException("Session not found");
+    }
+
+    if (session.userId !== authenticatedUserId) {
+      throw new UnauthorizedException("Session does not belong to you");
+    }
+
+    if (session.revokedAt !== null) {
+      throw new UnauthorizedException("Session is already revoked");
+    }
+
+    await this.prisma.authSession.update({
+      where: { id: sessionId },
+      data: {
+        revokedAt: this.clock.now(),
+        revocationReason: revocationReason || "REMOTE_REVOCATION",
+      },
+    });
+
+    return sessionId;
+  }
+
+  /**
+   * Revoke all sessions *except* the current one.
+   * Requires the current session to be active (not already revoked).
+   * Optionally set a revocation reason for all revoked sessions.
+   *
+   * Throws UnauthorizedException if the current session is not found or already revoked.
+   *
+   * @param userId             The user whose sessions to revoke.
+   * @param currentSessionId   The session to keep active.
+   * @param revocationReason   Optional reason for revocation.
+   * @returns                  Number of sessions revoked.
+   */
+  async revokeAllOtherSessions(
+    userId: string,
+    currentSessionId: string,
+    revocationReason?: string,
+  ): Promise<number> {
+    const currentSession = await this.prisma.authSession.findUnique({
+      where: { id: currentSessionId },
+      select: { userId: true, revokedAt: true },
+    });
+
+    if (!currentSession) {
+      throw new UnauthorizedException("Current session not found");
+    }
+
+    if (currentSession.userId !== userId) {
+      throw new UnauthorizedException("Current session does not belong to you");
+    }
+
+    if (currentSession.revokedAt !== null) {
+      throw new UnauthorizedException(
+        "Cannot use an already-revoked session to revoke others",
+      );
+    }
+
+    const result = await this.prisma.authSession.updateMany({
+      where: {
+        userId,
+        id: { not: currentSessionId },
+        revokedAt: null,
+      },
+      data: {
+        revokedAt: this.clock.now(),
+        revocationReason: revocationReason || "REMOTE_REVOCATION",
+      },
+    });
+
     return result.count;
   }
 
@@ -257,5 +453,18 @@ export class SessionService {
       return null;
     }
     return sha256(token);
+  }
+
+  private findSessionByHash(tokenHash: string): Promise<SessionLookup | null> {
+    return this.prisma.authSession.findUnique({
+      where: { tokenHash },
+      select: {
+        id: true,
+        userId: true,
+        expiresAt: true,
+          revokedAt: true,
+          lastSeenAt: true,
+      },
+    });
   }
 }

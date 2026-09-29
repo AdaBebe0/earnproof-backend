@@ -1,7 +1,44 @@
 import { Keypair } from "@stellar/stellar-base";
 import { createHash } from "crypto";
-import { AuthTokenService } from "./auth-token.service";
 import { AuthService } from "./auth.service";
+
+/**
+ * Builds the service with inert collaborators.
+ *
+ * This suite is about one thing: which request wins the race to consume a
+ * challenge. Sessions, audit writes and rate limits must not be able to change
+ * that answer, so they are doubles that always succeed.
+ */
+function buildAuthService(prisma: any, config: any): AuthService {
+  // After a failed consume the service asks whether the challenge was already
+  // used, to audit a replay separately from an expiry. That lookup is not what
+  // these tests are about, so it defaults to "no such row" unless the test
+  // supplies its own — which keeps each case's mock to the calls it cares about.
+  const withReplayLookup = {
+    ...prisma,
+    walletChallenge: {
+      findFirst: jest.fn().mockResolvedValue(null),
+      ...(prisma?.walletChallenge ?? {}),
+    },
+  };
+
+  return new AuthService(
+    withReplayLookup,
+    {
+      create: jest.fn().mockResolvedValue({
+        token: "session-token",
+        sessionId: "session_1",
+        expiresAt: new Date(Date.now() + 60_000),
+      }),
+    } as never,
+    { recordEvent: jest.fn().mockResolvedValue(undefined) } as never,
+    {
+      checkChallengeCreationLimit: jest.fn().mockResolvedValue(undefined),
+      checkVerificationLimit: jest.fn().mockResolvedValue(undefined),
+    } as never,
+    config,
+  );
+}
 
 describe("Auth challenge replay and race-condition tests", () => {
   let authService: AuthService;
@@ -11,14 +48,12 @@ describe("Auth challenge replay and race-condition tests", () => {
   let keypairB: Keypair;
   let walletAddressA: string;
   let walletAddressB: string;
-  let challengeIdCounter = 0;
 
   beforeEach(() => {
     keypairA = Keypair.random();
     keypairB = Keypair.random();
     walletAddressA = keypairA.publicKey();
     walletAddressB = keypairB.publicKey();
-    challengeIdCounter = 0;
 
     mockConfig = {
       getOrThrow: (key: string) => {
@@ -31,11 +66,9 @@ describe("Auth challenge replay and race-condition tests", () => {
       },
     } as any;
 
-    authService = new AuthService(
-      mockPrisma,
-      new AuthTokenService(mockConfig),
-      mockConfig,
-    );
+    // The collaborators are inert doubles: this suite is about the challenge
+    // consume race, and a session or an audit write must not decide its result.
+    authService = buildAuthService(mockPrisma, mockConfig);
   });
 
   // Helper function to generate SEP-53 message hash
@@ -86,8 +119,8 @@ describe("Auth challenge replay and race-condition tests", () => {
             .mockResolvedValueOnce({ count: 0 }), // Second call fails (already used)
           findUnique: jest
             .fn()
-            .mockResolvedValueOnce({ message, walletAddress: walletAddressA })
-            .mockResolvedValueOnce({ message, walletAddress: walletAddressA }),
+            .mockResolvedValueOnce({ message, walletAddress: walletAddressA, networkPassphrase: "Test SDF Network ; September 2015", origin: "http://localhost:3000" })
+            .mockResolvedValueOnce({ message, walletAddress: walletAddressA, networkPassphrase: "Test SDF Network ; September 2015", origin: "http://localhost:3000" }),
         },
         user: {
           upsert: jest.fn().mockResolvedValue({
@@ -99,11 +132,7 @@ describe("Auth challenge replay and race-condition tests", () => {
         },
       };
 
-      authService = new AuthService(
-        mockPrisma,
-        new AuthTokenService(mockConfig),
-        mockConfig,
-      );
+      authService = buildAuthService(mockPrisma, mockConfig);
 
       // First verification succeeds
       const result1 = await authService.verifyChallenge({
@@ -148,7 +177,7 @@ describe("Auth challenge replay and race-condition tests", () => {
             .mockResolvedValueOnce({ count: 0 }), // 5th loses
           findUnique: jest
             .fn()
-            .mockResolvedValue({ message, walletAddress: walletAddressA }),
+            .mockResolvedValue({ message, walletAddress: walletAddressA, networkPassphrase: "Test SDF Network ; September 2015", origin: "http://localhost:3000" }),
         },
         user: {
           upsert: jest.fn().mockResolvedValue({
@@ -160,11 +189,7 @@ describe("Auth challenge replay and race-condition tests", () => {
         },
       };
 
-      authService = new AuthService(
-        mockPrisma,
-        new AuthTokenService(mockConfig),
-        mockConfig,
-      );
+      authService = buildAuthService(mockPrisma, mockConfig);
 
       // Fire 5 concurrent verification requests for the same challenge
       const results = await Promise.allSettled([
@@ -229,7 +254,7 @@ describe("Auth challenge replay and race-condition tests", () => {
             .mockResolvedValueOnce({ count: 0 }), // Second loses
           findUnique: jest
             .fn()
-            .mockResolvedValue({ message, walletAddress: walletAddressA }),
+            .mockResolvedValue({ message, walletAddress: walletAddressA, networkPassphrase: "Test SDF Network ; September 2015", origin: "http://localhost:3000" }),
         },
         user: {
           upsert: jest.fn().mockResolvedValue({
@@ -241,11 +266,7 @@ describe("Auth challenge replay and race-condition tests", () => {
         },
       };
 
-      authService = new AuthService(
-        mockPrisma,
-        new AuthTokenService(mockConfig),
-        mockConfig,
-      );
+      authService = buildAuthService(mockPrisma, mockConfig);
 
       const results = await Promise.allSettled([
         authService.verifyChallenge({
@@ -281,20 +302,14 @@ describe("Auth challenge replay and race-condition tests", () => {
 
       mockPrisma = {
         walletChallenge: {
-          updateMany: jest
-            .fn()
-            .mockResolvedValue({ count: 0 }), // No challenge found (expired)
+          updateMany: jest.fn().mockResolvedValue({ count: 0 }), // No challenge found (expired)
         },
         user: {
           upsert: jest.fn(),
         },
       };
 
-      authService = new AuthService(
-        mockPrisma,
-        new AuthTokenService(mockConfig),
-        mockConfig,
-      );
+      authService = buildAuthService(mockPrisma, mockConfig);
 
       await expect(
         authService.verifyChallenge({
@@ -318,6 +333,8 @@ describe("Auth challenge replay and race-condition tests", () => {
           findUnique: jest.fn().mockResolvedValue({
             message,
             walletAddress: walletAddressA,
+            networkPassphrase: "Test SDF Network ; September 2015",
+            origin: "http://localhost:3000",
           }),
         },
         user: {
@@ -330,11 +347,7 @@ describe("Auth challenge replay and race-condition tests", () => {
         },
       };
 
-      authService = new AuthService(
-        mockPrisma,
-        new AuthTokenService(mockConfig),
-        mockConfig,
-      );
+      authService = buildAuthService(mockPrisma, mockConfig);
 
       const result = await authService.verifyChallenge({
         challengeId,
@@ -364,11 +377,7 @@ describe("Auth challenge replay and race-condition tests", () => {
         },
       };
 
-      authService = new AuthService(
-        mockPrisma,
-        new AuthTokenService(mockConfig),
-        mockConfig,
-      );
+      authService = buildAuthService(mockPrisma, mockConfig);
 
       // Attempt to verify with wallet B's signature
       const wrongSig = signChallenge(messageA, keypairB); // Different wallet
@@ -399,11 +408,7 @@ describe("Auth challenge replay and race-condition tests", () => {
         },
       };
 
-      authService = new AuthService(
-        mockPrisma,
-        new AuthTokenService(mockConfig),
-        mockConfig,
-      );
+      authService = buildAuthService(mockPrisma, mockConfig);
 
       // Attempt to verify challenge for A with wallet B
       await expect(
@@ -429,6 +434,8 @@ describe("Auth challenge replay and race-condition tests", () => {
           findUnique: jest.fn().mockResolvedValue({
             message,
             walletAddress: walletAddressA,
+            networkPassphrase: "Test SDF Network ; September 2015",
+            origin: "http://localhost:3000",
           }),
         },
         user: {
@@ -436,11 +443,7 @@ describe("Auth challenge replay and race-condition tests", () => {
         },
       };
 
-      authService = new AuthService(
-        mockPrisma,
-        new AuthTokenService(mockConfig),
-        mockConfig,
-      );
+      authService = buildAuthService(mockPrisma, mockConfig);
 
       try {
         await authService.verifyChallenge({
@@ -468,6 +471,8 @@ describe("Auth challenge replay and race-condition tests", () => {
           findUnique: jest.fn().mockResolvedValue({
             message,
             walletAddress: walletAddressA,
+            networkPassphrase: "Test SDF Network ; September 2015",
+            origin: "http://localhost:3000",
           }),
         },
         user: {
@@ -475,11 +480,7 @@ describe("Auth challenge replay and race-condition tests", () => {
         },
       };
 
-      authService = new AuthService(
-        mockPrisma,
-        new AuthTokenService(mockConfig),
-        mockConfig,
-      );
+      authService = buildAuthService(mockPrisma, mockConfig);
 
       await expect(
         authService.verifyChallenge({
@@ -493,7 +494,6 @@ describe("Auth challenge replay and race-condition tests", () => {
 
   describe("Cross-challenge nonce replay", () => {
     it("replay_of_different_challenge_nonce_fails", async () => {
-      const challengeIdA = "challenge_a";
       const challengeIdB = "challenge_b";
       const nonceA = "nonce_a_distinct_123456789012345";
       const nonceB = "nonce_b_distinct_987654321098765";
@@ -509,6 +509,8 @@ describe("Auth challenge replay and race-condition tests", () => {
           findUnique: jest.fn().mockResolvedValue({
             message: messageB, // Challenge B has a different message
             walletAddress: walletAddressA,
+            networkPassphrase: "Test SDF Network ; September 2015",
+            origin: "http://localhost:3000",
           }),
         },
         user: {
@@ -516,11 +518,7 @@ describe("Auth challenge replay and race-condition tests", () => {
         },
       };
 
-      authService = new AuthService(
-        mockPrisma,
-        new AuthTokenService(mockConfig),
-        mockConfig,
-      );
+      authService = buildAuthService(mockPrisma, mockConfig);
 
       // Sign nonce A but submit against challenge B
       await expect(
@@ -553,11 +551,7 @@ describe("Auth challenge replay and race-condition tests", () => {
         },
       };
 
-      authService = new AuthService(
-        mockPrisma,
-        new AuthTokenService(mockConfig),
-        mockConfig,
-      );
+      authService = buildAuthService(mockPrisma, mockConfig);
 
       try {
         await authService.verifyChallenge({
@@ -589,11 +583,7 @@ describe("Auth challenge replay and race-condition tests", () => {
         },
       };
 
-      authService = new AuthService(
-        mockPrisma,
-        new AuthTokenService(mockConfig),
-        mockConfig,
-      );
+      authService = buildAuthService(mockPrisma, mockConfig);
 
       let expiredError: any;
       let invalidError: any;
@@ -638,6 +628,8 @@ describe("Auth challenge replay and race-condition tests", () => {
           findUnique: jest.fn().mockResolvedValue({
             message,
             walletAddress: walletAddressA,
+            networkPassphrase: "Test SDF Network ; September 2015",
+            origin: "http://localhost:3000",
           }),
         },
         user: {
@@ -650,11 +642,7 @@ describe("Auth challenge replay and race-condition tests", () => {
         },
       };
 
-      authService = new AuthService(
-        mockPrisma,
-        new AuthTokenService(mockConfig),
-        mockConfig,
-      );
+      authService = buildAuthService(mockPrisma, mockConfig);
 
       const result = await authService.verifyChallenge({
         challengeId,
@@ -694,11 +682,7 @@ describe("Auth challenge replay and race-condition tests", () => {
         },
       };
 
-      authService = new AuthService(
-        mockPrisma,
-        new AuthTokenService(mockConfig),
-        mockConfig,
-      );
+      authService = buildAuthService(mockPrisma, mockConfig);
 
       // Attempt with bad signature
       try {
@@ -740,11 +724,7 @@ describe("Auth challenge replay and race-condition tests", () => {
         },
       };
 
-      authService = new AuthService(
-        mockPrisma,
-        new AuthTokenService(mockConfig),
-        mockConfig,
-      );
+      authService = buildAuthService(mockPrisma, mockConfig);
 
       // First attempt with bad signature fails after consuming
       try {
@@ -768,3 +748,6 @@ describe("Auth challenge replay and race-condition tests", () => {
     });
   });
 });
+
+
+
