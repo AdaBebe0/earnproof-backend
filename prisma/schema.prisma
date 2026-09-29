@@ -115,10 +115,45 @@ enum OrganizationMemberRole {
   ADMIN
   MEMBER
   VIEWER
+}
+
 enum IdempotencyStatus {
   PENDING
   COMPLETED
   FAILED
+}
+
+enum MembershipImportStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  CANCELLED
+  FAILED
+}
+
+enum MembershipImportRowResult {
+  ACCEPTED
+  NO_OP
+  REJECTED
+  FAILED
+}
+
+enum AccessReviewCampaignStatus {
+  OPEN
+  COMPLETED
+  CANCELLED
+}
+
+enum AccessReviewDecision {
+  CONFIRM
+  ROLE_CHANGE
+  REMOVE
+}
+
+enum WebhookCircuitState {
+  CLOSED
+  OPEN
+  HALF_OPEN
 }
 
 model User {
@@ -137,6 +172,9 @@ model User {
   createdApiKeys     ApiKey[]
   sessions           AuthSession[]
   organizationMemberships OrganizationMember[]
+  createdImportJobs  MembershipImportJob[] @relation("CreatedImportJobs")
+  createdAccessReviews AccessReviewCampaign[] @relation("CreatedAccessReviews")
+  reviewedAccessEntries AccessReviewEntry[] @relation("ReviewedAccessEntries")
 
   @@index([walletHash])
   @@index([status])
@@ -202,6 +240,8 @@ model Organization {
   webhooks    Webhook[]
   members     OrganizationMember[]
   idempotencyRecords IdempotencyRecord[]
+  membershipImports MembershipImportJob[]
+  accessReviews AccessReviewCampaign[]
 
   @@index([status])
 }
@@ -217,11 +257,14 @@ model OrganizationMember {
   joinedAt       DateTime?
   createdAt      DateTime                  @default(now())
   updatedAt      DateTime                  @updatedAt
+  accessReviewEntries AccessReviewEntry[]
 
   @@unique([organizationId, userId])
   @@index([organizationId])
   @@index([userId])
   @@index([status])
+}
+
 /// Stores idempotency records to prevent duplicate mutations within an organization.
 /// Indexed by (organizationId, idempotencyKey) to enforce uniqueness and enable O(1) lookup.
 /// The requestFingerprint is checked on incoming requests; if the key exists but fingerprint
@@ -306,9 +349,11 @@ model Payment {
   occurredAt             DateTime
   memo                   Json?
   classification         PaymentClassification @default(UNKNOWN)
+  classificationRevision Int                   @default(1)
   isEligible             Boolean               @default(false)
   createdAt              DateTime              @default(now())
   updatedAt              DateTime              @updatedAt
+  classificationHistory  PaymentClassificationHistory[]
 
   // Canonical identity of an indexed payment. A transaction hash alone is not
   // enough — one transaction can hold several payment operations — so network,
@@ -483,6 +528,7 @@ model Webhook {
   createdAt        DateTime          @default(now())
   updatedAt        DateTime          @updatedAt
   deliveries       WebhookDelivery[]
+  circuitBreaker   WebhookCircuitState?
 
   @@index([organizationId, status])
 }
@@ -635,6 +681,138 @@ model ContractDriftAcknowledgement {
   createdAt   DateTime @default(now())
 
   @@index([driftKey, expiresAt])
+/// Immutable history of payment classification changes.
+/// Used for auditability and proof eligibility reconstruction.
+model PaymentClassificationHistory {
+  id                     String                @id @default(cuid())
+  paymentId              String
+  payment                Payment               @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  actorId                String
+  previousClassification PaymentClassification
+  newClassification      PaymentClassification
+  reasonCode             String
+  classificationRevision Int
+  createdAt              DateTime              @default(now())
+
+  @@index([paymentId, createdAt])
+  @@index([actorId, createdAt])
+  @@index([classificationRevision])
+}
+
+/// Bounded bulk organization membership import jobs.
+model MembershipImportJob {
+  id             String                   @id @default(cuid())
+  organizationId String
+  organization   Organization             @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  createdById    String
+  createdBy      User                     @relation("CreatedImportJobs", fields: [createdById], references: [id])
+  version        String                   @default("1.0")
+  filename       String?
+  rowCount       Int
+  status         MembershipImportStatus   @default(PENDING)
+  progress       Int                      @default(0)
+  cancelledAt    DateTime?
+  completedAt    DateTime?
+  errorMessage   String?
+  createdAt      DateTime                 @default(now())
+  updatedAt      DateTime                 @updatedAt
+  results        MembershipImportResult[]
+
+  @@index([organizationId, status])
+  @@index([createdById, createdAt])
+  @@index([status, createdAt])
+}
+
+/// Per-row results for membership import jobs.
+/// Maintains input ordering and provides detailed feedback.
+model MembershipImportResult {
+  id            String                    @id @default(cuid())
+  importJobId   String
+  importJob     MembershipImportJob       @relation(fields: [importJobId], references: [id], onDelete: Cascade)
+  rowIndex      Int
+  walletAddress String
+  requestedRole OrganizationMemberRole
+  result        MembershipImportRowResult
+  reasonCode    String?
+  errorMessage  String?
+  processedAt   DateTime?
+  createdAt     DateTime                  @default(now())
+
+  @@unique([importJobId, rowIndex])
+  @@index([importJobId, rowIndex])
+  @@index([result])
+}
+
+/// Periodic organization access review campaign.
+/// Captures membership snapshot for review decisions.
+model AccessReviewCampaign {
+  id               String                      @id @default(cuid())
+  organizationId   String
+  organization     Organization                @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  createdById      String
+  createdBy        User                        @relation("CreatedAccessReviews", fields: [createdById], references: [id])
+  name             String
+  description      String?
+  status           AccessReviewCampaignStatus  @default(OPEN)
+  snapshotVersion  Int
+  completedAt      DateTime?
+  cancelledAt      DateTime?
+  createdAt        DateTime                    @default(now())
+  updatedAt        DateTime                    @updatedAt
+  entries          AccessReviewEntry[]
+
+  @@index([organizationId, status])
+  @@index([createdById, createdAt])
+  @@index([status, createdAt])
+}
+
+/// Individual review entries for organization members.
+/// Links to membership snapshot and tracks decisions.
+model AccessReviewEntry {
+  id               String                @id @default(cuid())
+  campaignId       String
+  campaign         AccessReviewCampaign  @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  memberId         String
+  member           OrganizationMember    @relation(fields: [memberId], references: [id], onDelete: Restrict)
+  snapshotRole     OrganizationMemberRole
+  decision         AccessReviewDecision?
+  recommendedRole  OrganizationMemberRole?
+  reviewedById     String?
+  reviewedBy       User?                 @relation("ReviewedAccessEntries", fields: [reviewedById], references: [id])
+  reviewedAt       DateTime?
+  appliedAt        DateTime?
+  conflictDetected Boolean               @default(false)
+  notes            String?
+  createdAt        DateTime              @default(now())
+  updatedAt        DateTime              @updatedAt
+
+  @@unique([campaignId, memberId])
+  @@index([campaignId, decision])
+  @@index([memberId])
+  @@index([reviewedById, reviewedAt])
+}
+
+/// Webhook circuit breaker state per endpoint.
+/// Tracks failure counts and recovery windows.
+model WebhookCircuitState {
+  id                    String              @id @default(cuid())
+  webhookId             String              @unique
+  webhook               Webhook             @relation(fields: [webhookId], references: [id], onDelete: Cascade)
+  state                 WebhookCircuitState @default(CLOSED)
+  failureCount          Int                 @default(0)
+  failureThreshold      Int                 @default(5)
+  lastFailureAt         DateTime?
+  openedAt              DateTime?
+  halfOpenAt            DateTime?
+  lastSuccessAt         DateTime?
+  recoveryWindowMs      Int                 @default(300000)
+  createdAt             DateTime            @default(now())
+  updatedAt             DateTime            @updatedAt
+
+  @@index([state, openedAt])
+  @@index([webhookId, state])
+}
+
 /// Short-lived, action-bound assertion issued after wallet re-verification.
 /// Consumed (single-use) when the destructive operation succeeds.
 /// Bound to: userId, action, resourceId (or "*"), origin, network.
