@@ -45,6 +45,11 @@ export enum ApiErrorCode {
   // 422 - proof cannot be shared in its current state
   PROOF_NOT_SHAREABLE = "PROOF_NOT_SHAREABLE",
 
+  // 422 - an aggregate-earnings proof cannot be issued under its policy
+  AGGREGATION_CROSS_ASSET_UNSUPPORTED = "AGGREGATION_CROSS_ASSET_UNSUPPORTED",
+  AGGREGATION_INSUFFICIENT_PAYMENTS = "AGGREGATION_INSUFFICIENT_PAYMENTS",
+  AGGREGATION_LIMIT_EXCEEDED = "AGGREGATION_LIMIT_EXCEEDED",
+
   // 409 – request conflicts with current state
   CONFLICT = "CONFLICT",
   PAYMENT_ALREADY_SETTLED = "PAYMENT_ALREADY_SETTLED",

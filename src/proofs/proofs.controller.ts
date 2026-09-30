@@ -383,6 +383,51 @@ export class ProofsController {
   }
 
   @ApiOperation({
+    summary: "Create an aggregate-earnings proof",
+    description:
+      "Sums the caller's eligible income payments in one asset over a half-open period under the " +
+      "versioned aggregate-earnings policy, floors the total to the requested rounding increment, " +
+      "and issues a credential committing only that rounded aggregate, the payment count and the " +
+      "policy parameters. Component payments, exact amounts and source identities are not disclosed.",
+  })
+  @ApiBearerAuth()
+  @ApiResponse({
+    status: HttpStatus.CREATED,
+    description: "Aggregate-earnings proof created.",
+    type: ProofCreatedDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.BAD_REQUEST,
+    description:
+      "INVALID_INPUT: the period is empty, longer than 366 days or in the future, issuerIds was " +
+      "given without sourceScope verified_issuers, or a requested issuer is unknown or inactive.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.UNPROCESSABLE_ENTITY,
+    description:
+      "Validation failed, or the policy refused the aggregate: AGGREGATION_CROSS_ASSET_UNSUPPORTED, " +
+      "AGGREGATION_INSUFFICIENT_PAYMENTS (fewer than 2 payments, or a total below the increment), " +
+      "AGGREGATION_LIMIT_EXCEEDED (more than 500 payments), or PAYMENT_NOT_ELIGIBLE (an amount is unreadable).",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.UNAUTHORIZED,
+    description: "Bearer token is missing, malformed, invalid, or expired.",
+    type: ApiErrorDto,
+  })
+  @UseGuards(AuthGuard)
+  @SkipThrottle({ default: true, verification: true })
+  @Throttle({ strict: {} })
+  @Post("aggregate-earnings")
+  createAggregateEarningsProof(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() body: CreateAggregateEarningsProofDto,
+  ) {
+    return this.proofsService.createAggregateEarningsProof(user, body);
+  }
+
+  @ApiOperation({
     summary: "Revoke a proof",
     description:
       "Marks the proof as REVOKED and records a revocation timestamp. " +
