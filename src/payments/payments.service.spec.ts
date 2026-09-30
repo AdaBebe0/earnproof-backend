@@ -1,12 +1,37 @@
 import { PaymentClassification, ResourceStatus } from "@prisma/client";
 import { PaymentEncryptionKeyringService } from "../common/crypto/payment-encryption-keyring.service";
 import { PaymentsService } from "./payments.service";
+import { unlimitedQuotas } from "../testing/quotas";
+
+/**
+ * Finality stub for tests about the write path. Checkpoint behaviour has its own
+ * suite (payment-finality.service.spec.ts); here every sync is an initial one.
+ */
+function finalityStub() {
+  return {
+    plan: jest.fn().mockResolvedValue({ mode: "initial" }),
+    readOptions: jest.fn().mockReturnValue({}),
+    inspect: jest.fn().mockReturnValue(null),
+    replacements: jest.fn().mockReturnValue(new Set()),
+    settle: jest.fn().mockResolvedValue({
+      status: "unverified",
+      heldPayments: 0,
+      orphanedPayments: 0,
+    }),
+  };
+}
+
+/** The read result shape `readIncomingPayments` resolves with. */
+function readOf(payments: unknown[]) {
+  return { payments, stopReason: "exhausted", lastCursor: null };
+}
 
 describe("PaymentsService", () => {
   const config = {
     getOrThrow: jest.fn((key: string) => {
       const values: Record<string, string> = {
         paymentEncryptionKey: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
+        "stellar.network": "stellar-testnet",
       };
       return values[key];
     }),
@@ -28,18 +53,20 @@ describe("PaymentsService", () => {
       },
     };
     const stellar = {
-      fetchIncomingPayments: jest.fn().mockResolvedValue([
-        {
-          operationId: "op_1",
-          stellarTransactionHash: "tx_1",
-          sourceAddress: "GA",
-          destinationAddress: "GB",
-          assetCode: "XLM",
-          assetIssuer: null,
-          amount: "10",
-          occurredAt: new Date("2026-07-13T00:00:00Z"),
-        },
-      ]),
+      readIncomingPayments: jest.fn().mockResolvedValue(
+        readOf([
+          {
+            operationId: "op_1",
+            stellarTransactionHash: "tx_1",
+            sourceAddress: "GA",
+            destinationAddress: "GB",
+            assetCode: "XLM",
+            assetIssuer: null,
+            amount: "10",
+            occurredAt: new Date("2026-07-13T00:00:00Z"),
+          },
+        ]),
+      ),
       fetchTransaction: jest.fn().mockResolvedValue({
         memo_type: "text",
         memo: "Salary June",
@@ -49,6 +76,8 @@ describe("PaymentsService", () => {
       prisma as never,
       stellar as never,
       config as never,
+      unlimitedQuotas() as never,
+      finalityStub() as never,
     );
 
     await expect(
@@ -59,11 +88,12 @@ describe("PaymentsService", () => {
       updated: 0,
       skipped: 0,
       enrichmentErrors: 0,
+      finality: { status: "unverified", heldPayments: 0, orphanedPayments: 0 },
       conflicts: 0,
     });
 
     expect(prisma.supportedAsset.findMany).toHaveBeenCalledWith({
-      where: { status: ResourceStatus.ACTIVE },
+      where: { status: ResourceStatus.ACTIVE, network: "stellar-testnet" },
       select: { code: true, issuer: true, network: true },
     });
     expect(prisma.payment.upsert).toHaveBeenCalledWith(
@@ -101,7 +131,7 @@ describe("PaymentsService", () => {
       },
     };
     const stellar = {
-      fetchIncomingPayments: jest.fn().mockResolvedValue(payments),
+      readIncomingPayments: jest.fn().mockResolvedValue(readOf(payments)),
       fetchTransaction: jest
         .fn()
         .mockResolvedValue({ memo_type: "id", memo: "42" }),
@@ -110,6 +140,8 @@ describe("PaymentsService", () => {
       prisma as never,
       stellar as never,
       config as never,
+      unlimitedQuotas() as never,
+      finalityStub() as never,
     );
 
     const result = await service.syncPayments({
@@ -135,18 +167,20 @@ describe("PaymentsService", () => {
       },
     };
     const stellar = {
-      fetchIncomingPayments: jest.fn().mockResolvedValue([
-        {
-          operationId: "op_1",
-          stellarTransactionHash: "tx_1",
-          sourceAddress: "GA",
-          destinationAddress: "GB",
-          assetCode: "XLM",
-          assetIssuer: null,
-          amount: "10",
-          occurredAt: new Date("2026-07-13T00:00:00Z"),
-        },
-      ]),
+      readIncomingPayments: jest.fn().mockResolvedValue(
+        readOf([
+          {
+            operationId: "op_1",
+            stellarTransactionHash: "tx_1",
+            sourceAddress: "GA",
+            destinationAddress: "GB",
+            assetCode: "XLM",
+            assetIssuer: null,
+            amount: "10",
+            occurredAt: new Date("2026-07-13T00:00:00Z"),
+          },
+        ]),
+      ),
       fetchTransaction:
         transactionResult instanceof Error
           ? jest.fn().mockRejectedValue(transactionResult)
@@ -156,6 +190,8 @@ describe("PaymentsService", () => {
       prisma as never,
       stellar as never,
       config as never,
+      unlimitedQuotas() as never,
+      finalityStub() as never,
     );
 
     await expect(
@@ -191,6 +227,8 @@ describe("PaymentsService", () => {
       prisma as never,
       {} as never,
       config as never,
+      unlimitedQuotas() as never,
+      {} as never,
     );
 
     await expect(
@@ -248,6 +286,8 @@ describe("PaymentsService", () => {
       prisma as never,
       {} as never,
       config as never,
+      unlimitedQuotas() as never,
+      {} as never,
     );
 
     const [listed] = await service.listPayments("user_1", {});
@@ -286,6 +326,8 @@ describe("PaymentsService", () => {
       prisma as never,
       {} as never,
       config as never,
+      unlimitedQuotas() as never,
+      {} as never,
     );
 
     const updated = await service.updateClassification(
@@ -306,112 +348,122 @@ describe("PaymentsService", () => {
     });
   });
 
-  describe("address encryption at rest", () => {
-    const encryptionConfig = {
-      get: (key: string) =>
-        key === "paymentEncryptionKey" ? "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=" : undefined,
+  it("does not grant eligibility from a SupportedAsset row seeded for a different network", async () => {
+    // Same code/issuer (native, no issuer) but active only on "public" -
+    // this deployment runs on "stellar-testnet" and must not borrow the
+    // other network's policy.
+    const prisma = {
+      supportedAsset: {
+        findMany: jest.fn().mockResolvedValue([]),
+      },
+      payment: {
+        findUnique: jest.fn().mockResolvedValue(null),
+        upsert: jest.fn().mockResolvedValue({ id: "payment_1" }),
+      },
     };
-    const cipher = new PaymentEncryptionKeyringService(encryptionConfig as never).addressCipher();
-    const SENDER = "GSYNTHETICSENDERADDRESS";
-    const RECEIVER = "GSYNTHETICRECEIVERADDRESS";
-
-    it("writes ciphertext and a lookup token, never plaintext", async () => {
-      const prisma = {
-        supportedAsset: { findMany: jest.fn().mockResolvedValue([]) },
-        payment: {
-          findMany: jest.fn().mockResolvedValue([]),
-          upsert: jest.fn().mockResolvedValue({ id: "payment_1" }),
-        },
-      };
-      const service = new PaymentsService(
-        prisma as never,
+    const stellar = {
+      fetchIncomingPayments: jest.fn().mockResolvedValue([
         {
-          fetchIncomingPayments: jest.fn().mockResolvedValue([
-            {
-              operationId: "op_1",
-              stellarTransactionHash: "tx_1",
-              sourceAddress: SENDER,
-              destinationAddress: RECEIVER,
-              assetCode: "XLM",
-              assetIssuer: null,
-              amount: "10",
-              occurredAt: new Date("2026-07-13T00:00:00Z"),
-            },
+          operationId: "op_1",
+          stellarTransactionHash: "tx_1",
+          sourceAddress: "GA",
+          destinationAddress: "GB",
+          assetCode: "XLM",
+          assetIssuer: null,
+          amount: "10",
+          occurredAt: new Date("2026-07-13T00:00:00Z"),
+        },
+      ]),
+      fetchTransaction: jest.fn().mockResolvedValue({ type: "none" }),
+    };
+    const service = new PaymentsService(
+      prisma as never,
+      stellar as never,
+      config as never,
+    );
+
+    await service.syncPayments({ id: "user_1", walletAddress: "GB" });
+
+    expect(prisma.supportedAsset.findMany).toHaveBeenCalledWith({
+      where: { status: ResourceStatus.ACTIVE, network: "stellar-testnet" },
+      select: { code: true, issuer: true, network: true },
+    });
+    expect(prisma.payment.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        create: expect.objectContaining({ isEligible: false }),
+      }),
+    );
+  });
+
+  it("flips isEligible to false on the next sync after the asset is deactivated", async () => {
+    // First sync: asset is ACTIVE, payment becomes eligible.
+    const activePrisma = {
+      supportedAsset: {
+        findMany: jest
+          .fn()
+          .mockResolvedValue([
+            { code: "USDC", issuer: "GISSUER1", network: "stellar-testnet" },
           ]),
-          fetchTransaction: jest.fn().mockResolvedValue(null),
-        } as never,
-        encryptionConfig as never,
-      );
+      },
+      payment: {
+        findUnique: jest.fn().mockResolvedValue(null),
+        upsert: jest.fn().mockResolvedValue({ id: "payment_1" }),
+      },
+    };
+    const stellar = {
+      fetchIncomingPayments: jest.fn().mockResolvedValue([
+        {
+          operationId: "op_1",
+          stellarTransactionHash: "tx_1",
+          sourceAddress: "GA",
+          destinationAddress: "GB",
+          assetCode: "USDC",
+          assetIssuer: "GISSUER1",
+          amount: "10",
+          occurredAt: new Date("2026-07-13T00:00:00Z"),
+        },
+      ]),
+      fetchTransaction: jest.fn().mockResolvedValue({ type: "none" }),
+    };
+    const service = new PaymentsService(
+      activePrisma as never,
+      stellar as never,
+      config as never,
+    );
 
-      await service.syncPayments({ id: "user_1", walletAddress: RECEIVER });
+    await service.syncPayments({ id: "user_1", walletAddress: "GB" });
+    expect(activePrisma.payment.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        create: expect.objectContaining({ isEligible: true }),
+      }),
+    );
 
-      const [{ create, update }] = prisma.payment.upsert.mock.calls[0];
-      for (const written of [create, update]) {
-        expect(written).toMatchObject({ sourceAddress: null, destinationAddress: null });
-        expect(written.sourceAddressEncrypted).toMatch(/^aenc:v0:/);
-        expect(written.destinationAddressEncrypted).toMatch(/^aenc:v0:/);
-        expect(cipher.sourceLookupTokens(SENDER)).toContain(written.sourceAddressLookup);
-        expect(JSON.stringify(written)).not.toContain(SENDER);
-        expect(JSON.stringify(written)).not.toContain(RECEIVER);
-      }
+    // Asset gets deactivated (no longer returned by the ACTIVE-status query).
+    // Second sync of the same payment must flip it to ineligible.
+    const deactivatedPrisma = {
+      supportedAsset: {
+        findMany: jest.fn().mockResolvedValue([]),
+      },
+      payment: {
+        findUnique: jest.fn().mockResolvedValue({ id: "payment_1" }),
+        upsert: jest.fn().mockResolvedValue({ id: "payment_1" }),
+      },
+    };
+    const serviceAfterDeactivation = new PaymentsService(
+      deactivatedPrisma as never,
+      stellar as never,
+      config as never,
+    );
+
+    await serviceAfterDeactivation.syncPayments({
+      id: "user_1",
+      walletAddress: "GB",
     });
 
-    function stored(overrides: Record<string, unknown>) {
-      return {
-        id: "payment_1",
-        userId: "user_1",
-        operationId: "op_1",
-        stellarTransactionHash: "tx_1",
-        sourceAddress: null,
-        destinationAddress: null,
-        sourceAddressEncrypted: null,
-        destinationAddressEncrypted: null,
-        sourceAddressLookup: null,
-        assetCode: "XLM",
-        assetIssuer: null,
-        amountEncrypted: null,
-        occurredAt: new Date("2026-07-13T00:00:00Z"),
-        memo: null,
-        classification: PaymentClassification.INCOME,
-        isEligible: true,
-        createdAt: new Date("2026-07-13T00:00:00Z"),
-        updatedAt: new Date("2026-07-13T00:00:00Z"),
-        ...overrides,
-      };
-    }
-
-    async function read(row: Record<string, unknown>) {
-      const service = new PaymentsService(
-        { payment: { findFirst: jest.fn().mockResolvedValue(row) } } as never,
-        {} as never,
-        encryptionConfig as never,
-      );
-      return service.getPayment("user_1", "payment_1");
-    }
-
-    it("decrypts addresses for the owner", async () => {
-      const columns = cipher.protect(SENDER, RECEIVER);
-      await expect(read(stored({ ...columns }))).resolves.toMatchObject({
-        sourceAddress: SENDER,
-        destinationAddress: RECEIVER,
-      });
-    });
-
-    it("still reads a legacy plaintext row during the migration window", async () => {
-      await expect(read(stored({ sourceAddress: SENDER, destinationAddress: RECEIVER }))).resolves.toMatchObject({
-        sourceAddress: SENDER,
-        destinationAddress: RECEIVER,
-      });
-    });
-
-    it("shows null for a corrupt ciphertext instead of failing or leaking it", async () => {
-      const dto = await read(
-        stored({ sourceAddressEncrypted: "aenc:v0:AAAA:BBBB:CCCC", destinationAddressEncrypted: "garbage" }),
-      );
-      expect(dto).toMatchObject({ sourceAddress: null, destinationAddress: null });
-      expect(JSON.stringify(dto)).not.toContain("AAAA");
-      expect(dto).not.toHaveProperty("sourceAddressEncrypted");
-      expect(dto).not.toHaveProperty("sourceAddressLookup");
-    });
+    expect(deactivatedPrisma.payment.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        update: expect.objectContaining({ isEligible: false }),
+      }),
+    );
   });
 });

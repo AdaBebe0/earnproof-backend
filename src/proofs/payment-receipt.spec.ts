@@ -11,6 +11,7 @@ import {
 import { PaymentEncryptionKeyringService } from "../common/crypto/payment-encryption-keyring.service";
 import { ApiErrorCode } from "../common/dto/api-error.dto";
 import { ProofsService } from "./proofs.service";
+import { unlimitedQuotas } from "../testing/quotas";
 import { AttestationsService } from "../attestations/attestations.service";
 
 describe("ProofsService payment-receipt proofs", () => {
@@ -94,6 +95,22 @@ describe("ProofsService payment-receipt proofs", () => {
       },
       verificationEvent: { create: jest.fn().mockResolvedValue({}) },
       anchoringIntent: { create: jest.fn().mockResolvedValue({}) },
+      supportedAsset: {
+        findFirst: jest.fn().mockResolvedValue(
+          selectedPayment
+            ? {
+                id: "asset_receipt",
+                assetKey: "testnet:issued:USDC:GB_ASSET_ISSUER",
+                code: selectedPayment.assetCode,
+                issuer: selectedPayment.assetIssuer,
+                network: "testnet",
+                status: "ACTIVE",
+                createdAt: new Date("2026-01-01T00:00:00.000Z"),
+                updatedAt: new Date("2026-01-01T00:00:00.000Z"),
+              }
+            : null,
+        ),
+      },
     };
     prisma.$transaction = jest.fn(async (callback) => callback(prisma));
     const harnessConfig = {
@@ -109,6 +126,7 @@ describe("ProofsService payment-receipt proofs", () => {
       prisma as never,
       harnessConfig as never,
       events as never,
+      unlimitedQuotas() as never,
       mockAttestationsService,
       contract as never,
     );
@@ -202,6 +220,24 @@ describe("ProofsService payment-receipt proofs", () => {
         });
       }
     }
+  });
+
+  it("refuses a payment held pending ledger reconciliation", async () => {
+    const held = harness({
+      ...payment,
+      finalityHoldAt: new Date("2026-08-02T00:00:00.000Z"),
+    } as typeof payment);
+
+    await expect(
+      held.service.createPaymentReceiptProof(user, { paymentId: "payment_1" }),
+    ).rejects.toMatchObject({
+      constructor: UnprocessableEntityException,
+      response: {
+        code: ApiErrorCode.PAYMENT_NOT_ELIGIBLE,
+        message: "Payment is pending ledger reconciliation",
+      },
+    });
+    expect(held.prisma.proof.create).not.toHaveBeenCalled();
   });
 
   it("rejects ineligibility before exclusion and uses stable codes", async () => {

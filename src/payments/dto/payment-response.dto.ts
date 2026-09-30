@@ -92,6 +92,13 @@ export class PaymentResponseDto {
   })
   isEligible!: boolean;
 
+  @ApiProperty({
+    description:
+      "True while the ledger view this payment was read from is being reconciled after a Horizon checkpoint divergence, or after reconciliation could not find it again. Held payments cannot be used in proofs.",
+    example: false,
+  })
+  finalityHeld!: boolean;
+
   @ApiProperty({ example: "2025-01-01T09:00:00.000Z" })
   createdAt!: string;
 
