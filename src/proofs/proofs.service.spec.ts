@@ -460,6 +460,8 @@ describe("ProofsService", () => {
 
   describe("required anchoring policy â€” verify endpoint", () => {
     function makeVerifyProof(contractTransactionHash: string | null, credOverrides: Record<string, unknown> = {}) {
+      const issuedAt = new Date(Date.now() - 24 * 60 * 60 * 1000);
+      const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
       const credential = {
         id: "proof_req",
         type: "EarnProofMinimumIncomeCredential",
@@ -476,6 +478,8 @@ describe("ProofsService", () => {
           qualifyingPaymentCount: 1,
         },
         privacy: { exactIncomeHidden: true, sourceTransactionsHidden: true },
+        issuedAt: issuedAt.toISOString(),
+        expiresAt: expiresAt.toISOString(),
         issuedAt: "2026-08-02T00:00:00.000Z",
         expiresAt: "2027-09-01T00:00:00.000Z",
         ...credOverrides,
@@ -492,9 +496,10 @@ describe("ProofsService", () => {
             assetIssuer: null,
             periodStart: new Date("2026-08-01T00:00:00.000Z"),
             periodEnd: new Date("2026-08-31T23:59:59.000Z"),
+            expiresAt,
             expiresAt: new Date("2027-09-01T00:00:00.000Z"),
             revokedAt: null,
-            createdAt: new Date("2026-08-02T00:00:00.000Z"),
+            createdAt: issuedAt,
             credentialHash: `sha256:${sha256(canonicalize(credential))}`,
             contractTransactionHash,
             user: { walletHash: "sha256:wallet" },
