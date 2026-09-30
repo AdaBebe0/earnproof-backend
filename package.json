@@ -36,6 +36,7 @@
     "db:reset": "ts-node prisma/reset.ts",
     "backfill:payment-identity": "ts-node scripts/backfill-payment-identity.ts",
     "drill:verify": "ts-node scripts/backup/verify-backup-format.ts",
+    "payments:backfill-addresses": "ts-node scripts/payments/backfill-payment-addresses.ts",
     "webhook:conformance": "ts-node scripts/webhook-receiver/conformance.ts",
     "credential:conformance": "ts-node scripts/credential-verifier/conformance.ts",
     "migration:safety": "ts-node scripts/migration-safety.ts",

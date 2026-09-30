@@ -433,6 +433,16 @@ model Payment {
   network                String?
   stellarTransactionHash String
   operationId            String                 @unique
+  /// Legacy plaintext. Never written by current code; cleared by the address
+  /// backfill once the ciphertext is verified. Drop in a later release.
+  sourceAddress          String?
+  /// Legacy plaintext; see sourceAddress.
+  destinationAddress     String?
+  /// aenc:v<N>:... AES-256-GCM ciphertext, field-bound. See protected-address.ts.
+  sourceAddressEncrypted      String?
+  destinationAddressEncrypted String?
+  /// hmac:v<N>:... keyed lookup token for equality queries on the sender.
+  sourceAddressLookup    String?
   operationIndex         Int?
   sourceAddress          String
   destinationAddress     String
@@ -463,6 +473,7 @@ model Payment {
   @@index([userId, occurredAt])
   @@index([userId, ledgerSequence])
   @@index([sourceAddress])
+  @@index([sourceAddressLookup])
   @@index([assetCode, assetIssuer])
   @@index([classification])
 }

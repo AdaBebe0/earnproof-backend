@@ -8,6 +8,7 @@ import {
   ProofType,
   VerificationResult,
 } from "@prisma/client";
+import { PaymentEncryptionKeyringService } from "../common/crypto/payment-encryption-keyring.service";
 import { ApiErrorCode } from "../common/dto/api-error.dto";
 import { ProofsService } from "./proofs.service";
 import { unlimitedQuotas } from "../testing/quotas";
@@ -349,6 +350,84 @@ describe("ProofsService payment-receipt proofs", () => {
         operation: "REVOKE",
         status: "PENDING",
       }),
+    });
+  });
+});
+
+describe("ProofsService payment-receipt proofs with encrypted sender addresses", () => {
+  const KEY = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=";
+  const SENDER = "GSYNTHETICDISCLOSEDSENDER";
+  const owner = { id: "user_1", walletAddress: "GB_OWNER", walletHash: "sha256:owner", role: "WORKER" };
+  const values: Record<string, unknown> = {
+    credentialSigningSecret: "test-signing-secret",
+    paymentEncryptionKey: KEY,
+    "stellar.network": "testnet",
+  };
+  const config = { get: (key: string) => values[key], getOrThrow: (key: string) => values[key] };
+  const cipher = new PaymentEncryptionKeyringService(config as never).addressCipher();
+
+  function service(sourceColumns: { sourceAddress: string | null; sourceAddressEncrypted: string | null }) {
+    const prisma: any = {
+      payment: {
+        findFirst: jest.fn().mockResolvedValue({
+          operationId: "op_1",
+          assetCode: "USDC",
+          assetIssuer: "GB_ASSET_ISSUER",
+          amountEncrypted: `redacted:${Buffer.from("10").toString("base64url")}`,
+          classification: PaymentClassification.INCOME,
+          isEligible: true,
+          occurredAt: new Date("2026-08-01T12:00:00.000Z"),
+          ...sourceColumns,
+        }),
+      },
+      proof: {
+        create: jest.fn(({ data }) => ({
+          ...data,
+          user: { walletHash: owner.walletHash },
+          claim: { ...data.claim.create },
+        })),
+      },
+      anchoringIntent: { create: jest.fn() },
+    };
+    prisma.$transaction = jest.fn(async (callback) => callback(prisma));
+    const attestations = { getValidAttestationsForSubject: jest.fn().mockResolvedValue([]) };
+    return {
+      prisma,
+      proofs: new ProofsService(prisma as never, config as never, {} as never, attestations as never),
+    };
+  }
+
+  it("decrypts the sender only when the owner discloses it", async () => {
+    const { proofs } = service({
+      sourceAddress: null,
+      sourceAddressEncrypted: cipher.protect(SENDER, "GDEST").sourceAddressEncrypted,
+    });
+
+    const disclosed = await proofs.createPaymentReceiptProof(owner, { paymentId: "p1", discloseSender: true });
+    const hidden = await proofs.createPaymentReceiptProof(owner, { paymentId: "p1" });
+
+    expect(disclosed.credential.claim.sourceAddress).toBe(SENDER);
+    expect(hidden.credential.claim).not.toHaveProperty("sourceAddress");
+  });
+
+  it("refuses to disclose an unreadable sender without echoing the stored value", async () => {
+    const { proofs, prisma } = service({ sourceAddress: null, sourceAddressEncrypted: "aenc:v0:AAAA:BBBB:CCCC" });
+
+    const error = await proofs
+      .createPaymentReceiptProof(owner, { paymentId: "p1", discloseSender: true })
+      .catch((thrown: unknown) => thrown);
+
+    expect(error).toBeInstanceOf(UnprocessableEntityException);
+    expect((error as { response: { code: string } }).response.code).toBe(ApiErrorCode.PAYMENT_NOT_ELIGIBLE);
+    expect(JSON.stringify((error as { response: unknown }).response)).not.toContain("AAAA");
+    expect(prisma.proof.create).not.toHaveBeenCalled();
+  });
+
+  it("still issues a hidden-sender receipt when the sender ciphertext is unreadable", async () => {
+    const { proofs } = service({ sourceAddress: null, sourceAddressEncrypted: "aenc:v0:AAAA:BBBB:CCCC" });
+
+    await expect(proofs.createPaymentReceiptProof(owner, { paymentId: "p1" })).resolves.toMatchObject({
+      status: "ACTIVE",
     });
   });
 });

@@ -26,16 +26,24 @@ export class PaymentResponseDto {
   operationId!: string;
 
   @ApiProperty({
-    description: "Stellar public key of the payment sender.",
+    description:
+      "Stellar public key of the payment sender. Stored encrypted at rest and decrypted only " +
+      "for the owner; null if the stored ciphertext cannot be decrypted.",
     example: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+    nullable: true,
+    type: String,
   })
-  sourceAddress!: string;
+  sourceAddress!: string | null;
 
   @ApiProperty({
-    description: "Stellar public key of the payment recipient (the authenticated user).",
+    description:
+      "Stellar public key of the payment recipient (the authenticated user). Stored encrypted " +
+      "at rest; null if the stored ciphertext cannot be decrypted.",
     example: "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+    nullable: true,
+    type: String,
   })
-  destinationAddress!: string;
+  destinationAddress!: string | null;
 
   @ApiProperty({ example: "USDC" })
   assetCode!: string;

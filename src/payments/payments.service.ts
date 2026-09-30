@@ -458,8 +458,19 @@ export class PaymentsService {
       operationId: payment.operationId,
       operationIndex: payment.operationIndex,
       stellarTransactionHash: payment.stellarTransactionHash,
-      sourceAddress: payment.sourceAddress,
-      destinationAddress: payment.destinationAddress,
+      // Owner-only DTO. A row whose ciphertext cannot be read shows null
+      // rather than failing the whole listing or exposing the stored value.
+      sourceAddress: this.addressCipher.tryReveal(
+        { encrypted: payment.sourceAddressEncrypted, plaintext: payment.sourceAddress },
+        "source",
+      ),
+      destinationAddress: this.addressCipher.tryReveal(
+        {
+          encrypted: payment.destinationAddressEncrypted,
+          plaintext: payment.destinationAddress,
+        },
+        "destination",
+      ),
       assetCode: payment.assetCode,
       assetIssuer: payment.assetIssuer,
       occurredAt: payment.occurredAt,

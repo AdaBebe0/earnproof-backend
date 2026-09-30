@@ -1,4 +1,5 @@
 import { PaymentClassification, ResourceStatus } from "@prisma/client";
+import { PaymentEncryptionKeyringService } from "../common/crypto/payment-encryption-keyring.service";
 import { PaymentsService } from "./payments.service";
 import { unlimitedQuotas } from "../testing/quotas";
 
