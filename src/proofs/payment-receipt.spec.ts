@@ -93,6 +93,22 @@ describe("ProofsService payment-receipt proofs", () => {
       },
       verificationEvent: { create: jest.fn().mockResolvedValue({}) },
       anchoringIntent: { create: jest.fn().mockResolvedValue({}) },
+      supportedAsset: {
+        findFirst: jest.fn().mockResolvedValue(
+          selectedPayment
+            ? {
+                id: "asset_receipt",
+                assetKey: "testnet:issued:USDC:GB_ASSET_ISSUER",
+                code: selectedPayment.assetCode,
+                issuer: selectedPayment.assetIssuer,
+                network: "testnet",
+                status: "ACTIVE",
+                createdAt: new Date("2026-01-01T00:00:00.000Z"),
+                updatedAt: new Date("2026-01-01T00:00:00.000Z"),
+              }
+            : null,
+        ),
+      },
     };
     prisma.$transaction = jest.fn(async (callback) => callback(prisma));
     const harnessConfig = {

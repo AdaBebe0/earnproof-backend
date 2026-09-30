@@ -232,6 +232,18 @@ function createProofStore() {
     // $transaction is used by createMinimumIncomeProof and revokeProof.
     $transaction: jest.fn().mockImplementation(async (fn: (tx: unknown) => unknown) => {
       const tx = {
+        supportedAsset: {
+          findFirst: jest.fn().mockResolvedValue({
+            id: "asset_lifecycle",
+            assetKey: "testnet:native:XLM",
+            code: "XLM",
+            issuer: null,
+            network: "testnet",
+            status: "ACTIVE",
+            createdAt: new Date("2026-01-01T00:00:00.000Z"),
+            updatedAt: new Date("2026-01-01T00:00:00.000Z"),
+          }),
+        },
         proof: {
           create: jest.fn(({ data }) => {
             const proof = {
@@ -399,6 +411,18 @@ function createRecurringProofStore() {
     prisma: {
       $transaction: jest.fn(async (callback) =>
         callback({
+          supportedAsset: {
+            findFirst: jest.fn().mockResolvedValue({
+              id: "asset_ri_lifecycle",
+              assetKey: "testnet:native:XLM",
+              code: "XLM",
+              issuer: null,
+              network: "testnet",
+              status: "ACTIVE",
+              createdAt: new Date("2026-01-01T00:00:00.000Z"),
+              updatedAt: new Date("2026-01-01T00:00:00.000Z"),
+            }),
+          },
           proof: {
             create: jest.fn(({ data }) => {
               const proof = {

@@ -9,6 +9,7 @@ import {
   isUniqueViolation,
   seedPayment,
   seedProof,
+  seedSupportedAsset,
   seedUser,
   violatedTarget,
 } from "./harness/fixtures";
@@ -38,6 +39,11 @@ function proofs(): ProofsService {
 /** A user with two eligible income payments inside the proof period. */
 async function userWithIncome(seed: string) {
   const user = await seedUser(db.prisma, seed);
+
+  // Proof issuance re-validates eligibility against the live SupportedAsset
+  // registry inside the write transaction, so USDC must be an active
+  // registry entry for these payments to be usable for issuance.
+  await seedSupportedAsset(db.prisma, seed, { code: "USDC" });
 
   const first = await seedPayment(db.prisma, `${seed}-1`, user.id, {
     amount: "600.0000000",
