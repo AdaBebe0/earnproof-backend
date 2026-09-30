@@ -16,12 +16,14 @@ import {
   Prisma,
   ProofStatus,
   ProofType,
+  ResourceStatus,
   VerificationResult,
   VerificationOutcome,
 } from "@prisma/client";
 import { createHmac, randomUUID } from "crypto";
 import { VerificationEventService } from "../audit/verification-event.service";
 import { AuthenticatedUser } from "../auth/auth.types";
+import { canonicalAssetId } from "../common/assets/asset-identifier";
 import { canonicalize } from "../common/crypto/canonicalize";
 import { CredentialVerificationKeyService } from "../common/crypto/credential-verification-key.service";
 import { sha256 } from "../common/crypto/hash";
@@ -155,6 +157,64 @@ export class ProofsService {
       configService.get<boolean>("contractAnchoring.required") ?? false;
   }
 
+  /**
+   * Re-validates asset eligibility against the LIVE SupportedAsset registry,
+   * inside the same transaction that writes the Proof.
+   *
+   * `Payment.isEligible` is a cache populated by the last `syncPayments` run
+   * and is only checked as a fast-path rejection before this method runs.
+   * Between that cache being written and this transaction committing, a
+   * concurrent sync or an admin action could deactivate the asset - so the
+   * write path itself must be authoritative against the registry, not the
+   * cached flag. If the asset is no longer active for this network, the
+   * transaction is aborted and no Proof is written.
+   *
+   * On success, returns a durable snapshot of the policy that was found
+   * active at this moment, to be stored on the Proof itself. Verification of
+   * an already-issued proof must consult only this snapshot, never the live
+   * registry, so that deactivating an asset later cannot retroactively
+   * invalidate historical proofs.
+   */
+  private async requireActiveAssetPolicy(
+    tx: Prisma.TransactionClient,
+    asset: { code: string; issuer: string | null },
+  ): Promise<{ assetPolicyId: string; assetPolicySnapshot: Prisma.InputJsonValue }> {
+    const activeAsset = await tx.supportedAsset.findFirst({
+      where: {
+        code: asset.code,
+        issuer: asset.issuer,
+        network: this.stellarNetwork,
+        status: ResourceStatus.ACTIVE,
+      },
+    });
+
+    if (!activeAsset) {
+      throw new UnprocessableEntityException({
+        code: ApiErrorCode.ASSET_NOT_SUPPORTED,
+        message:
+          "Asset is not an active supported asset on this network and is not eligible for proof issuance",
+      });
+    }
+
+    return {
+      assetPolicyId: activeAsset.id,
+      assetPolicySnapshot: {
+        supportedAssetId: activeAsset.id,
+        assetKey: activeAsset.assetKey,
+        code: activeAsset.code,
+        issuer: activeAsset.issuer,
+        network: activeAsset.network,
+        status: activeAsset.status,
+        canonicalAssetId: canonicalAssetId({
+          network: activeAsset.network,
+          code: activeAsset.code,
+          issuer: activeAsset.issuer,
+        }),
+        checkedAt: new Date().toISOString(),
+      },
+    };
+  }
+
   async createPaymentReceiptProof(
     user: AuthenticatedUser,
     input: CreatePaymentReceiptProofDto,
@@ -222,6 +282,11 @@ export class ProofsService {
     const commitment = `sha256:${sha256(credentialHash)}`;
 
     const proof = await this.prisma.$transaction(async (tx) => {
+      const assetPolicy = await this.requireActiveAssetPolicy(tx, {
+        code: payment.assetCode,
+        issuer: payment.assetIssuer,
+      });
+
       const created = await tx.proof.create({
         data: {
           id: proofId,
@@ -232,6 +297,8 @@ export class ProofsService {
           network: this.stellarNetwork,
           assetCode: payment.assetCode,
           assetIssuer: payment.assetIssuer,
+          assetPolicyId: assetPolicy.assetPolicyId,
+          assetPolicySnapshot: assetPolicy.assetPolicySnapshot,
           periodStart: payment.occurredAt,
           periodEnd: payment.occurredAt,
           expiresAt,
@@ -454,6 +521,11 @@ export class ProofsService {
     // The intent is enqueued here (PENDING) even before any external call so
     // that a crash after this point is recoverable by the worker.
     const proof = await this.prisma.$transaction(async (tx) => {
+      const assetPolicy = await this.requireActiveAssetPolicy(tx, {
+        code: input.assetCode,
+        issuer: input.assetIssuer ?? null,
+      });
+
       const created = await tx.proof.create({
         data: {
           id: proofId,
@@ -464,6 +536,8 @@ export class ProofsService {
           network: this.stellarNetwork,
           assetCode: input.assetCode,
           assetIssuer: input.assetIssuer ?? null,
+          assetPolicyId: assetPolicy.assetPolicyId,
+          assetPolicySnapshot: assetPolicy.assetPolicySnapshot,
           periodStart,
           periodEnd,
           expiresAt,
@@ -628,6 +702,11 @@ export class ProofsService {
     const commitment = `sha256:${sha256(credentialHash)}`;
 
     const proof = await this.prisma.$transaction(async (tx) => {
+      const assetPolicy = await this.requireActiveAssetPolicy(tx, {
+        code: input.assetCode,
+        issuer: input.assetIssuer ?? null,
+      });
+
       const created = await tx.proof.create({
         data: {
           id: proofId,
@@ -638,6 +717,8 @@ export class ProofsService {
           network: this.stellarNetwork,
           assetCode: input.assetCode,
           assetIssuer: input.assetIssuer ?? null,
+          assetPolicyId: assetPolicy.assetPolicyId,
+          assetPolicySnapshot: assetPolicy.assetPolicySnapshot,
           periodStart,
           periodEnd,
           expiresAt,

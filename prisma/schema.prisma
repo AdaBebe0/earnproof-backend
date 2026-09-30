@@ -477,6 +477,13 @@ model Proof {
   commitment              String?
   credentialHash          String              @unique
   contractTransactionHash String?
+  // Snapshot of the SupportedAsset policy that was live-validated at issuance
+  // time. Intentionally NOT a foreign key: the registry row may later be
+  // deactivated or removed, and an already-issued proof must remain
+  // verifiable purely from this snapshot, without re-consulting the
+  // (possibly since-changed) live SupportedAsset row.
+  assetPolicyId           String?
+  assetPolicySnapshot     Json?
   revokedAt               DateTime?
   createdAt               DateTime            @default(now())
   updatedAt               DateTime            @updatedAt

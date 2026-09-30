@@ -39,6 +39,7 @@ export enum ApiErrorCode {
   // 422 - payment cannot be used for the requested proof
   PAYMENT_NOT_ELIGIBLE = "PAYMENT_NOT_ELIGIBLE",
   PAYMENT_EXCLUDED = "PAYMENT_EXCLUDED",
+  ASSET_NOT_SUPPORTED = "ASSET_NOT_SUPPORTED",
 
   // 409 – request conflicts with current state
   CONFLICT = "CONFLICT",

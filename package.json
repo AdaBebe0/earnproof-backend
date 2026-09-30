@@ -18,6 +18,7 @@
     "start:nest": "nest start",
     "start:dev": "nest start --watch",
     "lint": "eslint \"src/**/*.ts\" \"test/**/*.ts\" \"scripts/**/*.ts\"",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
     "typecheck": "tsc --noEmit",
     "test": "jest",
     "test:watch": "jest --watch",
