@@ -32,6 +32,7 @@
     "prisma:migrate:deploy": "prisma migrate deploy",
     "prisma:studio": "prisma studio",
     "seed:demo": "ts-node prisma/seed-demo.ts",
+    "backfill:audit-chain": "ts-node scripts/migrations/backfill-audit-log-chain.ts",
     "db:reset": "ts-node prisma/reset.ts",
     "backfill:payment-identity": "ts-node scripts/backfill-payment-identity.ts",
     "drill:verify": "ts-node scripts/backup/verify-backup-format.ts",

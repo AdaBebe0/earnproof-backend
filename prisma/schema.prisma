@@ -310,6 +310,7 @@ model Organization {
   issuers     Issuer[]
   apiKeys     ApiKey[]
   webhooks    Webhook[]
+  auditLogs   AuditLog[]
   members     OrganizationMember[]
   idempotencyRecords IdempotencyRecord[]
   proofSharingEvents ProofSharingEvent[]
@@ -650,18 +651,48 @@ model WebhookDelivery {
 }
 
 model AuditLog {
-  id           String   @id @default(cuid())
-  actorType    String
-  actorId      String?
-  action       String
-  resourceType String
-  resourceId   String?
-  metadata     Json?
-  createdAt    DateTime @default(now())
+  id             String        @id @default(cuid())
+  actorType      String
+  actorId        String?
+  action         String
+  resourceType   String
+  resourceId     String?
+  metadata       Json?
+  createdAt      DateTime      @default(now())
 
+  // Tamper-evidence chain fields. Every record belongs to exactly one
+  // hash chain, partitioned by `chainKey` (the organization id, or the
+  // "SYSTEM" sentinel for records with no organization). `sequence` is a
+  // monotonically increasing, gap-free position within that chain, and
+  // `hash` binds this record's canonical content to `prevHash` (the prior
+  // record's `hash`, or null at chain genesis). `hashVersion` records which
+  // canonicalization/hash algorithm produced `hash`, so verification can
+  // dispatch on it even after the algorithm evolves.
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id])
+  chainKey       String        @default("SYSTEM")
+  sequence       BigInt        @default(0)
+  hashVersion    Int           @default(1)
+  prevHash       String?
+  hash           String        @default("")
+
+  @@unique([chainKey, sequence])
   @@index([actorType, actorId])
   @@index([resourceType, resourceId])
   @@index([createdAt])
+  @@index([organizationId, createdAt])
+}
+
+/// Per-chain append cursor for the AuditLog hash chain.
+/// Row-level locking on this table (`SELECT ... FOR UPDATE`) is what makes
+/// concurrent appends to the same chain safe: a writer holds the lock for
+/// the duration of its transaction, so sequence/prevHash assignment for a
+/// chain is always derived from a value nobody else can be mutating.
+model AuditChainCursor {
+  chainKey     String   @id
+  lastSequence BigInt   @default(0)
+  lastHash     String?
+  updatedAt    DateTime @updatedAt
 }
 
 model AnchoringIntent {
