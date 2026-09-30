@@ -24,6 +24,7 @@ import {
 import { createHmac, randomUUID } from "crypto";
 import { VerificationEventService } from "../audit/verification-event.service";
 import { AuthenticatedUser } from "../auth/auth.types";
+import { canonicalAssetId } from "../common/assets/asset-identifier";
 import { canonicalize } from "../common/crypto/canonicalize";
 import { CredentialVerificationKeyService } from "../common/crypto/credential-verification-key.service";
 import { sha256 } from "../common/crypto/hash";
@@ -38,6 +39,7 @@ import {
 } from "../common/rate-limit/proof-verification-abuse.service";
 import { ContractAnchoringService } from "./contract-anchoring.service";
 import { CreateInvoiceSettlementProofDto } from "./dto/create-invoice-settlement-proof.dto";
+import { CreateIncomeRangeProofDto } from "./dto/create-income-range-proof.dto";
 import { CreateMinimumIncomeProofDto } from "./dto/create-minimum-income-proof.dto";
 import { CreatePaymentReceiptProofDto } from "./dto/create-payment-receipt-proof.dto";
 import {
@@ -50,6 +52,7 @@ const SCHEMA_VERSION = "earnproof.minimum-income.v1";
 const PAYMENT_RECEIPT_SCHEMA_VERSION = "earnproof.payment-receipt.v1";
 const RECURRING_INCOME_SCHEMA_VERSION = "earnproof.recurring-income.v1";
 const INVOICE_SETTLEMENT_SCHEMA_VERSION = "earnproof.invoice-settlement.v1";
+const INCOME_RANGE_SCHEMA_VERSION = "earnproof.income-range.v1";
 const DEFAULT_EXPIRY_DAYS = 30;
 
 type MinimumIncomeCredential = {
@@ -135,6 +138,28 @@ type InvoiceSettlementCredential = {
     amount?: string;
   };
   privacy: { amountHidden: boolean };
+type IncomeRangeCredential = {
+  id: string;
+  type: "EarnProofIncomeRangeCredential";
+  schemaVersion: string;
+  issuer: "earnproof-backend";
+  subject: {
+    walletHash: string;
+  };
+  claim: {
+    operator: "range";
+    lowerBound: string;
+    upperBound: string;
+    assetCode: string;
+    assetIssuer: string | null;
+    periodStart: string;
+    periodEnd: string;
+    qualifyingPaymentCount: number;
+  };
+  privacy: {
+    exactIncomeHidden: true;
+    sourceTransactionsHidden: true;
+  };
   issuedAt: string;
   expiresAt: string;
 };
@@ -144,6 +169,7 @@ type EarnProofCredential =
   | PaymentReceiptCredential
   | RecurringIncomeCredential
   | InvoiceSettlementCredential;
+  | IncomeRangeCredential;
 
 @Injectable()
 export class ProofsService {
@@ -177,6 +203,64 @@ export class ProofsService {
       configService.get<boolean>("contractAnchoring.enabled") ?? false;
     this.anchoringRequired =
       configService.get<boolean>("contractAnchoring.required") ?? false;
+  }
+
+  /**
+   * Re-validates asset eligibility against the LIVE SupportedAsset registry,
+   * inside the same transaction that writes the Proof.
+   *
+   * `Payment.isEligible` is a cache populated by the last `syncPayments` run
+   * and is only checked as a fast-path rejection before this method runs.
+   * Between that cache being written and this transaction committing, a
+   * concurrent sync or an admin action could deactivate the asset - so the
+   * write path itself must be authoritative against the registry, not the
+   * cached flag. If the asset is no longer active for this network, the
+   * transaction is aborted and no Proof is written.
+   *
+   * On success, returns a durable snapshot of the policy that was found
+   * active at this moment, to be stored on the Proof itself. Verification of
+   * an already-issued proof must consult only this snapshot, never the live
+   * registry, so that deactivating an asset later cannot retroactively
+   * invalidate historical proofs.
+   */
+  private async requireActiveAssetPolicy(
+    tx: Prisma.TransactionClient,
+    asset: { code: string; issuer: string | null },
+  ): Promise<{ assetPolicyId: string; assetPolicySnapshot: Prisma.InputJsonValue }> {
+    const activeAsset = await tx.supportedAsset.findFirst({
+      where: {
+        code: asset.code,
+        issuer: asset.issuer,
+        network: this.stellarNetwork,
+        status: ResourceStatus.ACTIVE,
+      },
+    });
+
+    if (!activeAsset) {
+      throw new UnprocessableEntityException({
+        code: ApiErrorCode.ASSET_NOT_SUPPORTED,
+        message:
+          "Asset is not an active supported asset on this network and is not eligible for proof issuance",
+      });
+    }
+
+    return {
+      assetPolicyId: activeAsset.id,
+      assetPolicySnapshot: {
+        supportedAssetId: activeAsset.id,
+        assetKey: activeAsset.assetKey,
+        code: activeAsset.code,
+        issuer: activeAsset.issuer,
+        network: activeAsset.network,
+        status: activeAsset.status,
+        canonicalAssetId: canonicalAssetId({
+          network: activeAsset.network,
+          code: activeAsset.code,
+          issuer: activeAsset.issuer,
+        }),
+        checkedAt: new Date().toISOString(),
+      },
+    };
   }
 
   async createPaymentReceiptProof(
@@ -246,6 +330,11 @@ export class ProofsService {
     const commitment = `sha256:${sha256(credentialHash)}`;
 
     const proof = await this.prisma.$transaction(async (tx) => {
+      const assetPolicy = await this.requireActiveAssetPolicy(tx, {
+        code: payment.assetCode,
+        issuer: payment.assetIssuer,
+      });
+
       const created = await tx.proof.create({
         data: {
           id: proofId,
@@ -256,6 +345,8 @@ export class ProofsService {
           network: this.stellarNetwork,
           assetCode: payment.assetCode,
           assetIssuer: payment.assetIssuer,
+          assetPolicyId: assetPolicy.assetPolicyId,
+          assetPolicySnapshot: assetPolicy.assetPolicySnapshot,
           periodStart: payment.occurredAt,
           periodEnd: payment.occurredAt,
           expiresAt,
@@ -741,6 +832,11 @@ export class ProofsService {
     // The intent is enqueued here (PENDING) even before any external call so
     // that a crash after this point is recoverable by the worker.
     const proof = await this.prisma.$transaction(async (tx) => {
+      const assetPolicy = await this.requireActiveAssetPolicy(tx, {
+        code: input.assetCode,
+        issuer: input.assetIssuer ?? null,
+      });
+
       const created = await tx.proof.create({
         data: {
           id: proofId,
@@ -751,6 +847,8 @@ export class ProofsService {
           network: this.stellarNetwork,
           assetCode: input.assetCode,
           assetIssuer: input.assetIssuer ?? null,
+          assetPolicyId: assetPolicy.assetPolicyId,
+          assetPolicySnapshot: assetPolicy.assetPolicySnapshot,
           periodStart,
           periodEnd,
           expiresAt,
@@ -804,6 +902,194 @@ export class ProofsService {
 
     // Anchoring is now async (handled by AnchoringWorkerService).
     // Return a "pending" anchoring status so callers know to poll verify later.
+    const anchoringResult = this.anchoringEnabled
+      ? { anchored: false as const, reason: "pending" as const }
+      : { anchored: false as const, reason: "disabled" as const };
+
+    this.emitProofCreated(user.id, proof);
+    return {
+      proofId: proof.id,
+      status: proof.status,
+      verificationUrl: `/api/v1/proofs/${proof.id}/verify`,
+      credential: this.signCredential(credential),
+      anchoring: anchoringResult,
+    };
+  }
+
+  async createIncomeRangeProof(
+    user: AuthenticatedUser,
+    input: CreateIncomeRangeProofDto,
+  ) {
+    const periodStart = new Date(input.periodStart);
+    const periodEnd = new Date(input.periodEnd);
+
+    if (periodStart > periodEnd) {
+      throw new BadRequestException("periodStart must be before periodEnd");
+    }
+
+    const lowerBound = this.parseAmount(input.lowerBound);
+    const upperBound = this.parseAmount(input.upperBound);
+
+    if (lowerBound >= upperBound) {
+      throw new BadRequestException(
+        "lowerBound must be strictly less than upperBound",
+      );
+    }
+
+    const selectedPaymentIds = [...new Set(input.selectedPaymentIds)];
+    const payments = await this.prisma.payment.findMany({
+      where: {
+        id: {
+          in: selectedPaymentIds,
+        },
+        userId: user.id,
+      },
+      select: {
+        id: true,
+        assetCode: true,
+        assetIssuer: true,
+        amountEncrypted: true,
+        classification: true,
+        isEligible: true,
+        occurredAt: true,
+      },
+    });
+
+    if (payments.length !== selectedPaymentIds.length) {
+      throw new BadRequestException(
+        "One or more selected payments are invalid",
+      );
+    }
+
+    for (const payment of payments) {
+      if (
+        payment.classification !== PaymentClassification.INCOME ||
+        !payment.isEligible
+      ) {
+        throw new BadRequestException(
+          "Selected payments must be eligible income payments",
+        );
+      }
+
+      if (
+        payment.assetCode !== input.assetCode ||
+        (payment.assetIssuer ?? null) !== (input.assetIssuer ?? null)
+      ) {
+        throw new BadRequestException(
+          "Selected payments must use the requested asset",
+        );
+      }
+
+      if (payment.occurredAt < periodStart || payment.occurredAt > periodEnd) {
+        throw new BadRequestException(
+          "Selected payments must fall inside the requested period",
+        );
+      }
+    }
+
+    // Deterministic inclusion rule: the sum of the selected payments must
+    // fall inside [lowerBound, upperBound], inclusive on both ends.
+    const total = payments.reduce(
+      (sum, payment) =>
+        sum + this.revealProtectedAmount(payment.amountEncrypted),
+      0n,
+    );
+
+    if (total < lowerBound || total > upperBound) {
+      throw new BadRequestException(
+        "Selected payments do not fall within the requested income range",
+      );
+    }
+
+    const now = new Date();
+    const expiresAt = new Date(
+      now.getTime() +
+        (input.expiresInDays ?? DEFAULT_EXPIRY_DAYS) * 24 * 60 * 60 * 1000,
+    );
+
+    const proofId = randomUUID();
+    const draftCredential = this.buildIncomeRangeCredential({
+      id: proofId,
+      walletHash: user.walletHash,
+      lowerBound: input.lowerBound,
+      upperBound: input.upperBound,
+      assetCode: input.assetCode,
+      assetIssuer: input.assetIssuer ?? null,
+      periodStart,
+      periodEnd,
+      qualifyingPaymentCount: payments.length,
+      issuedAt: now,
+      expiresAt,
+    });
+    const credentialHash = `sha256:${sha256(canonicalize(draftCredential))}`;
+    const commitment = `sha256:${sha256(credentialHash)}`;
+
+    // Write Proof + ProofClaim + AnchoringIntent in a single transaction,
+    // mirroring createMinimumIncomeProof's shared issuance pipeline. Only the
+    // committed bounds are persisted — the summed total is never written.
+    const proof = await this.prisma.$transaction(async (tx) => {
+      const created = await tx.proof.create({
+        data: {
+          id: proofId,
+          userId: user.id,
+          proofType: ProofType.INCOME_RANGE,
+          schemaVersion: INCOME_RANGE_SCHEMA_VERSION,
+          status: ProofStatus.ACTIVE,
+          network: this.stellarNetwork,
+          assetCode: input.assetCode,
+          assetIssuer: input.assetIssuer ?? null,
+          periodStart,
+          periodEnd,
+          expiresAt,
+          createdAt: now,
+          credentialHash,
+          commitment,
+          claim: {
+            create: {
+              operator: "range",
+              result: true,
+              disclosurePolicy: {
+                exactIncomeHidden: true,
+                sourceTransactionsHidden: true,
+                qualifyingPaymentCount: payments.length,
+                lowerBound: input.lowerBound,
+                upperBound: input.upperBound,
+              },
+            },
+          },
+        },
+        include: {
+          claim: true,
+        },
+      });
+
+      if (this.anchoringEnabled) {
+        await tx.anchoringIntent.create({
+          data: {
+            proofId: created.id,
+            operation: AnchoringOperation.REGISTER,
+            status: AnchoringStatus.PENDING,
+          },
+        });
+      }
+
+      return created;
+    });
+
+    const credential = this.buildIncomeRangeCredential({
+      id: proof.id,
+      walletHash: user.walletHash,
+      lowerBound: input.lowerBound,
+      upperBound: input.upperBound,
+      assetCode: input.assetCode,
+      assetIssuer: input.assetIssuer ?? null,
+      periodStart,
+      periodEnd,
+      qualifyingPaymentCount: payments.length,
+      issuedAt: proof.createdAt,
+      expiresAt: proof.expiresAt,
+    });
+
     const anchoringResult = this.anchoringEnabled
       ? { anchored: false as const, reason: "pending" as const }
       : { anchored: false as const, reason: "disabled" as const };
@@ -915,6 +1201,11 @@ export class ProofsService {
     const commitment = `sha256:${sha256(credentialHash)}`;
 
     const proof = await this.prisma.$transaction(async (tx) => {
+      const assetPolicy = await this.requireActiveAssetPolicy(tx, {
+        code: input.assetCode,
+        issuer: input.assetIssuer ?? null,
+      });
+
       const created = await tx.proof.create({
         data: {
           id: proofId,
@@ -925,6 +1216,8 @@ export class ProofsService {
           network: this.stellarNetwork,
           assetCode: input.assetCode,
           assetIssuer: input.assetIssuer ?? null,
+          assetPolicyId: assetPolicy.assetPolicyId,
+          assetPolicySnapshot: assetPolicy.assetPolicySnapshot,
           periodStart,
           periodEnd,
           expiresAt,
@@ -1126,6 +1419,18 @@ export class ProofsService {
                 thresholdAmount: this.revealThreshold(
                   proof.claim.thresholdEncrypted,
                 ),
+          : proof.proofType === ProofType.INCOME_RANGE
+            ? this.buildIncomeRangeCredential({
+                id: proof.id,
+                walletHash: proof.user.walletHash,
+                lowerBound:
+                  typeof policy["lowerBound"] === "string"
+                    ? policy["lowerBound"]
+                    : "0",
+                upperBound:
+                  typeof policy["upperBound"] === "string"
+                    ? policy["upperBound"]
+                    : "0",
                 assetCode: proof.assetCode,
                 assetIssuer: proof.assetIssuer,
                 periodStart: proof.periodStart ?? proof.createdAt,
@@ -1136,6 +1441,21 @@ export class ProofsService {
                 issuedAt: proof.createdAt,
                 expiresAt: proof.expiresAt,
               });
+              })
+            : this.buildCredential({
+            id: proof.id,
+            walletHash: proof.user.walletHash,
+            thresholdAmount: this.revealThreshold(
+              proof.claim.thresholdEncrypted,
+            ),
+            assetCode: proof.assetCode,
+            assetIssuer: proof.assetIssuer,
+            periodStart: proof.periodStart ?? proof.createdAt,
+            periodEnd: proof.periodEnd ?? proof.createdAt,
+            qualifyingPaymentCount: this.qualifyingPaymentCount(proof.claim),
+            issuedAt: proof.createdAt,
+            expiresAt: proof.expiresAt,
+          });
     const signedCredential = this.signCredential(credential);
     const expectedHash = `sha256:${sha256(canonicalize(credential))}`;
 
@@ -1451,6 +1771,46 @@ export class ProofsService {
         cadence: input.cadence,
         intervalUnit: input.intervalUnit,
         intervalCount: input.intervalCount,
+        assetCode: input.assetCode,
+        assetIssuer: input.assetIssuer,
+        periodStart: input.periodStart.toISOString(),
+        periodEnd: input.periodEnd.toISOString(),
+        qualifyingPaymentCount: input.qualifyingPaymentCount,
+      },
+      privacy: {
+        exactIncomeHidden: true,
+        sourceTransactionsHidden: true,
+      },
+      issuedAt: input.issuedAt.toISOString(),
+      expiresAt: input.expiresAt.toISOString(),
+    };
+  }
+
+  private buildIncomeRangeCredential(input: {
+    id: string;
+    walletHash: string;
+    lowerBound: string;
+    upperBound: string;
+    assetCode: string;
+    assetIssuer: string | null;
+    periodStart: Date;
+    periodEnd: Date;
+    qualifyingPaymentCount: number;
+    issuedAt: Date;
+    expiresAt: Date;
+  }): IncomeRangeCredential {
+    return {
+      id: input.id,
+      type: "EarnProofIncomeRangeCredential",
+      schemaVersion: INCOME_RANGE_SCHEMA_VERSION,
+      issuer: "earnproof-backend",
+      subject: {
+        walletHash: input.walletHash,
+      },
+      claim: {
+        operator: "range",
+        lowerBound: input.lowerBound,
+        upperBound: input.upperBound,
         assetCode: input.assetCode,
         assetIssuer: input.assetIssuer,
         periodStart: input.periodStart.toISOString(),

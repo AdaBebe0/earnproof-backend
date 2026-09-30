@@ -30,6 +30,7 @@ const config = {
     const values: Record<string, string> = {
       paymentEncryptionKey: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
       "stellar.horizonUrl": fixtures.horizonUrl,
+      "stellar.network": "stellar-testnet",
     };
     return values[key];
   }),
