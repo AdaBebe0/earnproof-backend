@@ -32,6 +32,7 @@ import {
 import { Idempotent } from "../common/decorators/idempotent.decorator";
 import { ApiErrorDto } from "../common/dto/api-error.dto";
 import { AuthGuard } from "../common/guards/auth.guard";
+import { CreateIncomeRangeProofDto } from "./dto/create-income-range-proof.dto";
 import { RequireApiKeyScopes } from "../common/guards/api-key-quota.guard";
 import { RequireConsent } from "../common/guards/consent.guard";
 import {
@@ -237,6 +238,48 @@ export class ProofsController {
     @Body() body: CreateMinimumIncomeProofDto,
   ) {
     return this.proofsService.createMinimumIncomeProof(user, body);
+  }
+
+  @ApiOperation({
+    summary: "Create an income-range proof",
+    description:
+      "Generates a privacy-preserving credential asserting that the authenticated wallet " +
+      "received a total income inside the inclusive range [`lowerBound`, `upperBound`] of a " +
+      "given asset during the specified period. The exact income total and individual " +
+      "transactions are never disclosed; only the committed bounds and the boolean outcome " +
+      "are embedded in the credential.",
+  })
+  @ApiBearerAuth()
+  @ApiResponse({
+    status: HttpStatus.CREATED,
+    description:
+      "Proof created. Returns the signed credential and an optional anchoring result.",
+    type: ProofCreatedDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.UNPROCESSABLE_ENTITY,
+    description: "Request body failed validation.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.BAD_REQUEST,
+    description:
+      "Business rule violation — e.g. period range invalid, bounds inverted or degenerate, " +
+      "payments ineligible, asset mismatch, or the payment sum falls outside the requested range.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.UNAUTHORIZED,
+    description: "Bearer token is missing, malformed, invalid, or expired.",
+    type: ApiErrorDto,
+  })
+  @UseGuards(AuthGuard)
+  @Post("income-range")
+  createIncomeRangeProof(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() body: CreateIncomeRangeProofDto,
+  ) {
+    return this.proofsService.createIncomeRangeProof(user, body);
   }
 
   @ApiOperation({

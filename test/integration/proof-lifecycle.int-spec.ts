@@ -184,6 +184,108 @@ describe("proof creation", () => {
   });
 });
 
+describe("income-range proof creation", () => {
+  // Structurally validated against the same integration harness used above,
+  // but — like the rest of this file — requires a live PostgreSQL instance
+  // (see docs/integration-testing.md) and could not be executed in this
+  // sandbox, which has no reachable database.
+  it("persists the proof and claim, and never discloses the exact sum", async () => {
+    const { authenticated, paymentIds } = await userWithIncome("income-range-create");
+
+    const result = await proofs().createIncomeRangeProof(authenticated, {
+      selectedPaymentIds: paymentIds,
+      lowerBound: "500.0000000",
+      upperBound: "1500.0000000",
+      assetCode: "USDC",
+      periodStart: PERIOD_START,
+      periodEnd: PERIOD_END,
+    });
+
+    const stored = await db.prisma.proof.findUniqueOrThrow({
+      where: { id: result.proofId },
+      include: { claim: true },
+    });
+
+    expect(stored.status).toBe(ProofStatus.ACTIVE);
+    expect(stored.proofType).toBe(ProofType.INCOME_RANGE);
+    expect(stored.userId).toBe(authenticated.id);
+    expect(stored.claim?.operator).toBe("range");
+    expect(stored.claim?.result).toBe(true);
+    expect(stored.claim?.disclosurePolicy).toEqual({
+      exactIncomeHidden: true,
+      sourceTransactionsHidden: true,
+      qualifyingPaymentCount: 2,
+      lowerBound: "500.0000000",
+      upperBound: "1500.0000000",
+    });
+    // The sum of the selected payments is 1000; it must appear nowhere.
+    expect(JSON.stringify(stored.claim?.disclosurePolicy)).not.toContain(
+      "1000",
+    );
+    expect(JSON.stringify(result.credential)).not.toContain("1000.0000000");
+  });
+
+  it("rejects an inverted range end-to-end", async () => {
+    const { authenticated, paymentIds } = await userWithIncome(
+      "income-range-inverted",
+    );
+
+    await expect(
+      proofs().createIncomeRangeProof(authenticated, {
+        selectedPaymentIds: paymentIds,
+        lowerBound: "1500.0000000",
+        upperBound: "500.0000000",
+        assetCode: "USDC",
+        periodStart: PERIOD_START,
+        periodEnd: PERIOD_END,
+      }),
+    ).rejects.toThrow("lowerBound must be strictly less than upperBound");
+  });
+
+  it("rejects a payment sum outside the requested range end-to-end", async () => {
+    const { authenticated, paymentIds } = await userWithIncome(
+      "income-range-outside",
+    );
+
+    await expect(
+      proofs().createIncomeRangeProof(authenticated, {
+        selectedPaymentIds: paymentIds,
+        lowerBound: "1100.0000000",
+        upperBound: "2000.0000000",
+        assetCode: "USDC",
+        periodStart: PERIOD_START,
+        periodEnd: PERIOD_END,
+      }),
+    ).rejects.toThrow("do not fall within the requested income range");
+  });
+
+  it("refuses a range proof for a payment belonging to another user", async () => {
+    const owner = await userWithIncome("income-range-owner");
+    const stranger = await seedUser(db.prisma, "income-range-stranger");
+
+    await expect(
+      proofs().createIncomeRangeProof(
+        {
+          id: stranger.id,
+          walletAddress: stranger.walletAddress,
+          walletHash: stranger.walletHash,
+          role: stranger.role,
+        },
+        {
+          selectedPaymentIds: owner.paymentIds,
+          lowerBound: "500.0000000",
+          upperBound: "1500.0000000",
+          assetCode: "USDC",
+          periodStart: PERIOD_START,
+          periodEnd: PERIOD_END,
+        },
+      ),
+    ).rejects.toThrow();
+
+    expect(await db.prisma.proof.count()).toBe(0);
+  });
+});
+
 describe("proof revocation", () => {
   it("marks the proof revoked and stamps the time", async () => {
     const { user, authenticated, paymentIds } = await userWithIncome("proof-revoke");
