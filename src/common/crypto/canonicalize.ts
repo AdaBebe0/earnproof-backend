@@ -6,7 +6,21 @@ export function canonicalize(value: unknown): string {
   return JSON.stringify(sortObject(value));
 }
 
+/** Raised when a JavaScript-only numeric value has no unambiguous JSON form. */
+export class UnsupportedCanonicalNumberError extends TypeError {
+  constructor(value: number) {
+    super(`Cannot canonicalize non-finite number: ${String(value)}`);
+    this.name = "UnsupportedCanonicalNumberError";
+  }
+}
+
 function sortObject(value: unknown): unknown {
+  if (typeof value === "number" && !Number.isFinite(value)) {
+    // JSON.stringify turns these into null. That makes a signed payload
+    // dependent on an implicit coercion and can make distinct inputs collide.
+    throw new UnsupportedCanonicalNumberError(value);
+  }
+
   if (Array.isArray(value)) {
     return value.map((item) => sortObject(item));
   }

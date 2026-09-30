@@ -10,6 +10,7 @@ import {
 } from "@prisma/client";
 import { ApiErrorCode } from "../common/dto/api-error.dto";
 import { ProofsService } from "./proofs.service";
+import { AttestationsService } from "../attestations/attestations.service";
 
 describe("ProofsService payment-receipt proofs", () => {
   const user = {
@@ -92,6 +93,22 @@ describe("ProofsService payment-receipt proofs", () => {
       },
       verificationEvent: { create: jest.fn().mockResolvedValue({}) },
       anchoringIntent: { create: jest.fn().mockResolvedValue({}) },
+      supportedAsset: {
+        findFirst: jest.fn().mockResolvedValue(
+          selectedPayment
+            ? {
+                id: "asset_receipt",
+                assetKey: "testnet:issued:USDC:GB_ASSET_ISSUER",
+                code: selectedPayment.assetCode,
+                issuer: selectedPayment.assetIssuer,
+                network: "testnet",
+                status: "ACTIVE",
+                createdAt: new Date("2026-01-01T00:00:00.000Z"),
+                updatedAt: new Date("2026-01-01T00:00:00.000Z"),
+              }
+            : null,
+        ),
+      },
     };
     prisma.$transaction = jest.fn(async (callback) => callback(prisma));
     const harnessConfig = {
@@ -100,10 +117,14 @@ describe("ProofsService payment-receipt proofs", () => {
         key === "contractAnchoring.enabled" ? Boolean(contract) : false,
       ),
     };
+    const mockAttestationsService = {
+      getValidAttestationsForSubject: jest.fn().mockResolvedValue([]),
+    } as unknown as AttestationsService;
     const service = new ProofsService(
       prisma as never,
       harnessConfig as never,
       events as never,
+      mockAttestationsService,
       contract as never,
     );
     return { service, prisma, getStoredProof: () => storedProof };

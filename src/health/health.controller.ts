@@ -12,9 +12,14 @@ import {
   ApiResponse,
   ApiTags,
 } from "@nestjs/swagger";
+import { SkipThrottle } from "@nestjs/throttler";
 import { ApiKeyScope } from "@prisma/client";
 import { ApiErrorDto } from "../common/dto/api-error.dto";
 import { RequireScopes } from "../common/decorators/require-scopes.decorator";
+import {
+  AuthenticatedRoute,
+  PublicRoute,
+} from "../common/decorators/authorization-policy.decorator";
 import { ApiKeyGuard } from "../common/guards/api-key.guard";
 import { ScopesGuard } from "../common/guards/scopes.guard";
 import { HealthResponseDto } from "./dto/health-response.dto";
@@ -26,6 +31,7 @@ import { HealthService } from "./health.service";
 import { DependencyStatus } from "./health.types";
 
 @ApiTags("health")
+@SkipThrottle({ default: true, strict: true, verification: true })
 @Controller("health")
 export class HealthController {
   constructor(private readonly health: HealthService) {}
@@ -56,6 +62,7 @@ export class HealthController {
     type: ApiErrorDto,
   })
   @Get()
+  @PublicRoute()
   async getHealth(): Promise<HealthResponseDto> {
     const readiness = await this.health.checkReadiness();
     const database = readiness.dependencies.find(
@@ -94,6 +101,7 @@ export class HealthController {
     type: LivenessResponseDto,
   })
   @Get("live")
+  @PublicRoute()
   getLiveness(): LivenessResponseDto {
     return this.health.checkLiveness();
   }
@@ -124,6 +132,7 @@ export class HealthController {
     type: ReadinessResponseDto,
   })
   @Get("ready")
+  @PublicRoute()
   async getReadiness(): Promise<ReadinessResponseDto> {
     const result = await this.health.checkReadiness();
 
@@ -172,6 +181,7 @@ export class HealthController {
     type: ApiErrorDto,
   })
   @Get("diagnostics")
+  @AuthenticatedRoute({ roles: ["ORG_ADMIN"] })
   @HttpCode(HttpStatus.OK)
   @UseGuards(ApiKeyGuard, ScopesGuard)
   @RequireScopes(ApiKeyScope.ORG_ADMIN)

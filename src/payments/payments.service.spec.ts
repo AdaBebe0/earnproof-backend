@@ -6,6 +6,7 @@ describe("PaymentsService", () => {
     getOrThrow: jest.fn((key: string) => {
       const values: Record<string, string> = {
         paymentEncryptionKey: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
+        "stellar.network": "stellar-testnet",
       };
       return values[key];
     }),
@@ -19,7 +20,10 @@ describe("PaymentsService", () => {
         ]),
       },
       payment: {
-        findUnique: jest.fn().mockResolvedValue(null),
+        // syncPayments batches the existence check into one findMany ahead
+        // of its loop; an empty result means nothing pre-exists, i.e. every
+        // incoming payment is a create.
+        findMany: jest.fn().mockResolvedValue([]),
         upsert: jest.fn().mockResolvedValue({ id: "payment_1" }),
       },
     };
@@ -55,10 +59,11 @@ describe("PaymentsService", () => {
       updated: 0,
       skipped: 0,
       enrichmentErrors: 0,
+      conflicts: 0,
     });
 
     expect(prisma.supportedAsset.findMany).toHaveBeenCalledWith({
-      where: { status: ResourceStatus.ACTIVE },
+      where: { status: ResourceStatus.ACTIVE, network: "stellar-testnet" },
       select: { code: true, issuer: true, network: true },
     });
     expect(prisma.payment.upsert).toHaveBeenCalledWith(
@@ -66,7 +71,7 @@ describe("PaymentsService", () => {
         create: expect.objectContaining({
           classification: PaymentClassification.UNKNOWN,
           isEligible: true,
-          amountEncrypted: expect.stringMatching(/^enc:v1:/),
+          amountEncrypted: expect.stringMatching(/^enc:v0:/),
           memo: {
             type: "text",
             value: "Salary June",
@@ -91,7 +96,7 @@ describe("PaymentsService", () => {
     const prisma = {
       supportedAsset: { findMany: jest.fn().mockResolvedValue([]) },
       payment: {
-        findUnique: jest.fn().mockResolvedValue(null),
+        findMany: jest.fn().mockResolvedValue([]),
         upsert: jest.fn().mockResolvedValue({}),
       },
     };
@@ -125,7 +130,7 @@ describe("PaymentsService", () => {
     const prisma = {
       supportedAsset: { findMany: jest.fn().mockResolvedValue([]) },
       payment: {
-        findUnique: jest.fn().mockResolvedValue(null),
+        findMany: jest.fn().mockResolvedValue([]),
         upsert: jest.fn().mockResolvedValue({}),
       },
     };
@@ -299,5 +304,124 @@ describe("PaymentsService", () => {
         classification: PaymentClassification.INCOME,
       },
     });
+  });
+
+  it("does not grant eligibility from a SupportedAsset row seeded for a different network", async () => {
+    // Same code/issuer (native, no issuer) but active only on "public" -
+    // this deployment runs on "stellar-testnet" and must not borrow the
+    // other network's policy.
+    const prisma = {
+      supportedAsset: {
+        findMany: jest.fn().mockResolvedValue([]),
+      },
+      payment: {
+        findUnique: jest.fn().mockResolvedValue(null),
+        upsert: jest.fn().mockResolvedValue({ id: "payment_1" }),
+      },
+    };
+    const stellar = {
+      fetchIncomingPayments: jest.fn().mockResolvedValue([
+        {
+          operationId: "op_1",
+          stellarTransactionHash: "tx_1",
+          sourceAddress: "GA",
+          destinationAddress: "GB",
+          assetCode: "XLM",
+          assetIssuer: null,
+          amount: "10",
+          occurredAt: new Date("2026-07-13T00:00:00Z"),
+        },
+      ]),
+      fetchTransaction: jest.fn().mockResolvedValue({ type: "none" }),
+    };
+    const service = new PaymentsService(
+      prisma as never,
+      stellar as never,
+      config as never,
+    );
+
+    await service.syncPayments({ id: "user_1", walletAddress: "GB" });
+
+    expect(prisma.supportedAsset.findMany).toHaveBeenCalledWith({
+      where: { status: ResourceStatus.ACTIVE, network: "stellar-testnet" },
+      select: { code: true, issuer: true, network: true },
+    });
+    expect(prisma.payment.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        create: expect.objectContaining({ isEligible: false }),
+      }),
+    );
+  });
+
+  it("flips isEligible to false on the next sync after the asset is deactivated", async () => {
+    // First sync: asset is ACTIVE, payment becomes eligible.
+    const activePrisma = {
+      supportedAsset: {
+        findMany: jest
+          .fn()
+          .mockResolvedValue([
+            { code: "USDC", issuer: "GISSUER1", network: "stellar-testnet" },
+          ]),
+      },
+      payment: {
+        findUnique: jest.fn().mockResolvedValue(null),
+        upsert: jest.fn().mockResolvedValue({ id: "payment_1" }),
+      },
+    };
+    const stellar = {
+      fetchIncomingPayments: jest.fn().mockResolvedValue([
+        {
+          operationId: "op_1",
+          stellarTransactionHash: "tx_1",
+          sourceAddress: "GA",
+          destinationAddress: "GB",
+          assetCode: "USDC",
+          assetIssuer: "GISSUER1",
+          amount: "10",
+          occurredAt: new Date("2026-07-13T00:00:00Z"),
+        },
+      ]),
+      fetchTransaction: jest.fn().mockResolvedValue({ type: "none" }),
+    };
+    const service = new PaymentsService(
+      activePrisma as never,
+      stellar as never,
+      config as never,
+    );
+
+    await service.syncPayments({ id: "user_1", walletAddress: "GB" });
+    expect(activePrisma.payment.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        create: expect.objectContaining({ isEligible: true }),
+      }),
+    );
+
+    // Asset gets deactivated (no longer returned by the ACTIVE-status query).
+    // Second sync of the same payment must flip it to ineligible.
+    const deactivatedPrisma = {
+      supportedAsset: {
+        findMany: jest.fn().mockResolvedValue([]),
+      },
+      payment: {
+        findUnique: jest.fn().mockResolvedValue({ id: "payment_1" }),
+        upsert: jest.fn().mockResolvedValue({ id: "payment_1" }),
+      },
+    };
+    const serviceAfterDeactivation = new PaymentsService(
+      deactivatedPrisma as never,
+      stellar as never,
+      config as never,
+    );
+
+    await serviceAfterDeactivation.syncPayments({
+      id: "user_1",
+      walletAddress: "GB",
+    });
+
+    expect(deactivatedPrisma.payment.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        update: expect.objectContaining({ isEligible: false }),
+      }),
+    );
   });
 });

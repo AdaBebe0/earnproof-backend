@@ -41,6 +41,7 @@ function buildCredentialBody(overrides: Partial<Record<string, unknown>> = {}) {
     privacy: { exactIncomeHidden: true as const, sourceTransactionsHidden: true as const },
     issuedAt: "2026-08-02T00:00:00.000Z",
     expiresAt: FUTURE_EXPIRY.toISOString(),
+    expiresAt: "2027-09-02T00:00:00.000Z",
     ...overrides,
   };
 }
@@ -90,6 +91,7 @@ describe("CredentialsService.verifyCredential", () => {
     const prisma = mockPrismaWith({
       status: ProofStatus.ACTIVE,
       expiresAt: FUTURE_EXPIRY, // future
+      expiresAt: new Date("2027-09-02T00:00:00.000Z"), // future
       schemaVersion: "earnproof.minimum-income.v1",
     });
 
@@ -255,6 +257,7 @@ describe("CredentialsService.verifyCredential", () => {
     const prisma = mockPrismaWith({
       status: ProofStatus.REVOKED,
       expiresAt: FUTURE_EXPIRY, // future
+      expiresAt: new Date("2027-09-02T00:00:00.000Z"), // future
       schemaVersion: "earnproof.minimum-income.v1",
     });
 
@@ -288,7 +291,7 @@ describe("CredentialsService.verifyCredential", () => {
       // subject intentionally omitted
       // claim intentionally omitted
       issuedAt: "2026-08-02T00:00:00.000Z",
-      expiresAt: "2026-09-02T00:00:00.000Z",
+      expiresAt: "2027-09-02T00:00:00.000Z",
       proof: {
         type: "HMAC-SHA256",
         credentialHash: "sha256:dummy",

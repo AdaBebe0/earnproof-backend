@@ -1,8 +1,14 @@
-import { Injectable, Logger, OnModuleInit } from "@nestjs/common";
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+  OnModuleInit,
+} from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { Prisma, WebhookDeliveryStatus } from "@prisma/client";
 import { randomUUID } from "crypto";
-import { decryptProtectedAmount } from "../common/crypto/protected-amount";
+import { PaymentEncryptionKeyringService } from "../common/crypto/payment-encryption-keyring.service";
+import { StructuredLogger } from "../common/logger";
 import { PrismaService } from "../database/prisma.service";
 import { WebhookEnvelope, WebhookEventType } from "./webhook-event.types";
 import { WebhookSigningService } from "./webhook-signing.service";
@@ -10,6 +16,7 @@ import {
   SsrfBlockedError,
   assertSafeWebhookDestination,
 } from "./webhook-ssrf-guard";
+import { WebhookCircuitBreakerService } from "./webhook-circuit-breaker.service";
 
 /** Maximum stored response body size in bytes (1 KiB). */
 const MAX_RESPONSE_BODY_BYTES = 1024;
@@ -44,8 +51,8 @@ type WebhookChain = { tail: Promise<void> };
 
 @Injectable()
 export class WebhookDeliveryService implements OnModuleInit {
-  private readonly logger = new Logger(WebhookDeliveryService.name);
-  private readonly encryptionKey: string;
+  private readonly logger = new StructuredLogger(WebhookDeliveryService.name);
+  private readonly paymentEncryptionKeyring: PaymentEncryptionKeyringService;
 
   /**
    * Per-webhook serialization chains.
@@ -56,9 +63,12 @@ export class WebhookDeliveryService implements OnModuleInit {
   constructor(
     private readonly prisma: PrismaService,
     private readonly signing: WebhookSigningService,
+    private readonly circuitBreaker: WebhookCircuitBreakerService,
     configService: ConfigService,
   ) {
-    this.encryptionKey = configService.getOrThrow<string>("paymentEncryptionKey");
+    this.paymentEncryptionKeyring = new PaymentEncryptionKeyringService(
+      configService,
+    );
   }
 
   /**
@@ -112,6 +122,32 @@ export class WebhookDeliveryService implements OnModuleInit {
     if (!user || user.organizations.length === 0) return;
 
     const orgIds = user.organizations.map((o) => o.id);
+    await this.enqueueForOrganizations(orgIds, eventType, envelope);
+  }
+
+  /**
+   * Enqueue an event for every active, subscribing endpoint of a single
+   * organisation.
+   *
+   * Used by producers whose event belongs to an organisation directly rather
+   * than to a user — the attestation reconciler, whose attestations are owned by
+   * an issuer's organisation, not by any one user.
+   */
+  async enqueueForOrganization(
+    organizationId: string,
+    eventType: WebhookEventType,
+    envelope: Omit<WebhookEnvelope, "id" | "specVersion" | "createdAt">,
+  ): Promise<void> {
+    await this.enqueueForOrganizations([organizationId], eventType, envelope);
+  }
+
+  private async enqueueForOrganizations(
+    orgIds: string[],
+    eventType: WebhookEventType,
+    envelope: Omit<WebhookEnvelope, "id" | "specVersion" | "createdAt">,
+  ): Promise<void> {
+    if (orgIds.length === 0) return;
+
     const webhooks = await this.prisma.webhook.findMany({
       where: {
         organizationId: { in: orgIds },
@@ -150,6 +186,9 @@ export class WebhookDeliveryService implements OnModuleInit {
         select: { id: true },
       });
 
+      // Initialize circuit breaker for webhook if needed
+      await this.circuitBreaker.initializeCircuit(hook.id);
+
       this.scheduleDelivery(delivery.id, hook.id, 0, fullEnvelope);
     }
   }
@@ -180,11 +219,13 @@ export class WebhookDeliveryService implements OnModuleInit {
     });
 
     if (!original) {
-      throw new Error("WebhookDelivery not found");
+      throw new NotFoundException("WebhookDelivery not found");
     }
 
     if (original.webhook.status !== "ACTIVE") {
-      throw new Error("Cannot replay delivery for a disabled webhook endpoint");
+      throw new BadRequestException(
+        "Cannot replay delivery for a disabled webhook endpoint",
+      );
     }
 
     const replayKey = `${originalDeliveryId}:${replayedBy}`;
@@ -243,6 +284,14 @@ export class WebhookDeliveryService implements OnModuleInit {
         new Promise<void>((resolve) => {
           setTimeout(async () => {
             try {
+              // Check circuit breaker before attempting delivery
+              const canAttempt = await this.circuitBreaker.canAttemptDelivery(webhookId);
+              if (!canAttempt) {
+                this.logger.debug(`Delivery ${deliveryId} skipped - circuit is OPEN`);
+                resolve();
+                return;
+              }
+
               await this.runDelivery(
                 deliveryId,
                 envelope,
@@ -310,7 +359,7 @@ export class WebhookDeliveryService implements OnModuleInit {
     // Decrypt signing secret — never stored in plain text or in delivery logs.
     let signingSecret: string;
     try {
-      signingSecret = decryptProtectedAmount(secretEncrypted, this.encryptionKey);
+      signingSecret = this.paymentEncryptionKeyring.decrypt(secretEncrypted);
     } catch (err) {
       this.logger.error(
         `Failed to decrypt signing secret for webhook ${delivery.webhook.id}: ${String(err)}`,
@@ -387,6 +436,8 @@ export class WebhookDeliveryService implements OnModuleInit {
             deliveredAt: new Date(),
           },
         });
+
+        // Don't record SSRF blocks in circuit breaker (permanent policy failure)
         this.logger.warn(`Delivery ${deliveryId} blocked by SSRF guard: ${failureReason}`);
         return;
       }
@@ -408,6 +459,10 @@ export class WebhookDeliveryService implements OnModuleInit {
           deliveredAt: new Date(),
         },
       });
+
+      // Record success in circuit breaker
+      await this.circuitBreaker.recordSuccess(delivery.webhookId);
+
       this.logger.log(
         `Delivery ${deliveryId} succeeded (attempt ${delivery.attempt}, ${durationMs}ms, HTTP ${statusCode})`,
       );
@@ -427,6 +482,10 @@ export class WebhookDeliveryService implements OnModuleInit {
           deliveredAt: new Date(),
         },
       });
+
+      // Record failure in circuit breaker (not permanent for normal failures)
+      await this.circuitBreaker.recordFailure(delivery.webhookId, false);
+
       this.logger.warn(
         `Delivery ${deliveryId} permanently failed after ${delivery.attempt} attempt(s): ${failureReason}`,
       );
@@ -469,6 +528,9 @@ export class WebhookDeliveryService implements OnModuleInit {
     this.logger.log(
       `Delivery ${deliveryId} failed (attempt ${delivery.attempt}); retrying as ${retryDelivery.id} in ${delay}ms`,
     );
+
+    // Record failure in circuit breaker for retryable failures
+    await this.circuitBreaker.recordFailure(delivery.webhookId, false);
 
     if (holdAggregateQueue) {
       // Keep the production queue occupied through the retry so later events

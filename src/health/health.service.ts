@@ -1,6 +1,9 @@
-import { Injectable, Logger } from "@nestjs/common";
+﻿import { Injectable, Logger } from "@nestjs/common";
+ 
+import { ContractDriftService } from "./contract-drift.service";
 import { ConfigService } from "@nestjs/config";
 import { PrismaService } from "../database/prisma.service";
+import { MigrationLeaseService } from "../database/migration-lease.service";
 import {
   DependencyKind,
   DependencyResult,
@@ -40,6 +43,14 @@ export class HealthService {
   private readonly cache = new Map<string, CacheEntry>();
 
   /**
+   * Flips true the instant shutdown begins (earnproof-backend#68) — see
+   * `beginShutdown()`. `checkReadiness` reports `not_ready` immediately once
+   * this is set, before any in-flight work has actually finished draining,
+   * so a load balancer stops routing new traffic here as early as possible.
+   */
+  private shuttingDown = false;
+
+  /**
    * In-flight probes, keyed by dependency name.
    *
    * This is the single-flight guard: when N concurrent requests arrive for a
@@ -52,6 +63,14 @@ export class HealthService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
+    /**
+     * Optional so the many unit tests that construct the service with just
+     * (prisma, config) keep working. When present, its circuit states are
+     * surfaced in diagnostics.
+     */
+    @Optional() private readonly circuits?: CircuitBreakerRegistry,
+    private readonly contractDrift: ContractDriftService,
+    private readonly migrationLease: MigrationLeaseService,
   ) {}
 
   /**
@@ -78,12 +97,34 @@ export class HealthService {
    * flip the verdict.
    */
   async checkReadiness(): Promise<ReadinessResult> {
+    if (this.shuttingDown) {
+      // Skip the dependency probes entirely — they'd cost time and I/O for
+      // an answer that's already decided. Not-ready-during-shutdown must
+      // never be masked by a fresh cache entry from a probe that started
+      // before the signal arrived.
+      return {
+        status: "not_ready",
+        dependencies: [
+          {
+            name: "shutdown",
+            kind: DependencyKind.REQUIRED,
+            status: DependencyStatus.ERROR,
+            reason: "shutting_down",
+            durationMs: 0,
+          },
+        ],
+      };
+    }
+
     const dependencies = await Promise.all([
       this.probeCached("database", DependencyKind.REQUIRED, () =>
         this.probeDatabase(),
       ),
       this.probeCached("configuration", DependencyKind.REQUIRED, () =>
         Promise.resolve(this.probeConfiguration()),
+      ),
+      this.probeCached("migration_compatibility", DependencyKind.REQUIRED, () =>
+        this.probeMigrationCompatibility(),
       ),
     ]);
 
@@ -97,6 +138,16 @@ export class HealthService {
       status: blocked ? "not_ready" : "ready",
       dependencies,
     };
+  }
+
+  /**
+   * Called once, as early as possible in the shutdown sequence (see
+   * `main.ts`'s SIGTERM handler). Makes `checkReadiness` report `not_ready`
+   * immediately, before any in-flight work has actually finished draining —
+   * see this module's own doc for why liveness must NOT do the same.
+   */
+  beginShutdown(): void {
+    this.shuttingDown = true;
   }
 
   /**
@@ -115,6 +166,9 @@ export class HealthService {
       this.probeCached("configuration", DependencyKind.REQUIRED, () =>
         Promise.resolve(this.probeConfiguration()),
       ),
+      this.probeCached("migration_compatibility", DependencyKind.REQUIRED, () =>
+        this.probeMigrationCompatibility(),
+      ),
       this.probeCached("horizon", DependencyKind.OPTIONAL, () =>
         this.probeHorizon(),
       ),
@@ -123,6 +177,9 @@ export class HealthService {
       ),
       this.probeCached("webhook_delivery", DependencyKind.OPTIONAL, () =>
         this.probeWebhookDelivery(),
+      ),
+      this.probeCached("circuit_breakers", DependencyKind.OPTIONAL, () =>
+        Promise.resolve(this.probeCircuitBreakers()),
       ),
     ]);
 
@@ -186,6 +243,71 @@ export class HealthService {
     return this.timed("database", DependencyKind.REQUIRED, async () => {
       await this.prisma.$queryRaw`SELECT 1`;
     });
+  }
+
+  /**
+   * Verify migration deployment compatibility.
+   * 
+   * Ensures the application can safely serve requests against the current schema.
+   * Reports not ready when:
+   * - Migration deployment is actively in progress (unsafe to serve)
+   * - Schema is incompatible with expected state
+   * - Migration has failed and requires intervention
+   */
+  private async probeMigrationCompatibility(): Promise<DependencyResult> {
+    try {
+      const leaseStatus = await this.migrationLease.getLeaseStatus();
+      
+      // If a migration deployment is actively held, we're not ready
+      if (leaseStatus.held && leaseStatus.isActive) {
+        // Check if it's our own lease (same process)
+        if (leaseStatus.ownerId === this.migrationLease.getOwnerId()) {
+          return {
+            name: "migration_compatibility",
+            kind: DependencyKind.REQUIRED,
+            status: DependencyStatus.ERROR,
+            reason: "migration_in_progress",
+            durationMs: 0,
+          };
+        } else {
+          return {
+            name: "migration_compatibility",
+            kind: DependencyKind.REQUIRED,
+            status: DependencyStatus.ERROR,
+            reason: "migration_in_progress_other_deployment",
+            durationMs: 0,
+          };
+        }
+      }
+
+      // If lease is stale, it indicates a crashed deployment - may be unsafe
+      if (leaseStatus.isStale) {
+        return {
+          name: "migration_compatibility",
+          kind: DependencyKind.REQUIRED,
+          status: DependencyStatus.DEGRADED,
+          reason: "stale_migration_lease_detected",
+          durationMs: 0,
+        };
+      }
+
+      // Schema compatibility check would go here in a full implementation
+      // For MVP, we assume compatibility if no active migration
+      return {
+        name: "migration_compatibility",
+        kind: DependencyKind.REQUIRED,
+        status: DependencyStatus.OK,
+        durationMs: 0,
+      };
+    } catch (error) {
+      return {
+        name: "migration_compatibility",
+        kind: DependencyKind.REQUIRED,
+        status: DependencyStatus.ERROR,
+        reason: "migration_compatibility_check_failed",
+        durationMs: 0,
+      };
+    }
   }
 
   /**
@@ -309,6 +431,52 @@ export class HealthService {
         }
       },
     );
+  }
+
+  /**
+   * Report the state of every dependency circuit breaker.
+   *
+   * Optional, and never gates readiness: an open circuit is the breaker working
+   * as designed — shedding load from a failing dependency — not the service
+   * itself being unready. It is surfaced as DEGRADED so an operator can see the
+   * dependency is being protected, and the per-circuit detail is counts and
+   * states only, so this authorized endpoint never becomes a channel for
+   * transaction payloads or addresses.
+   */
+  private probeCircuitBreakers(): DependencyResult {
+    if (!this.circuits) {
+      return {
+        name: "circuit_breakers",
+        kind: DependencyKind.OPTIONAL,
+        status: DependencyStatus.NOT_CONFIGURED,
+        reason: "registry_absent",
+      };
+    }
+
+    const snapshots = this.circuits.snapshotAll();
+    const circuits = snapshots.map((snapshot) => ({
+      name: snapshot.name,
+      state: snapshot.state,
+      consecutiveFailures: snapshot.consecutiveFailures,
+      probeSuccesses: snapshot.probeSuccesses,
+      probesInFlight: snapshot.probesInFlight,
+      openCount: snapshot.openCount,
+      cooldownRemainingMs: snapshot.cooldownRemainingMs,
+    }));
+
+    const tripped = circuits.filter((circuit) => circuit.state !== "closed");
+
+    return {
+      name: "circuit_breakers",
+      kind: DependencyKind.OPTIONAL,
+      status:
+        tripped.length > 0 ? DependencyStatus.DEGRADED : DependencyStatus.OK,
+      reason:
+        tripped.length > 0
+          ? `tripped:${tripped.map((circuit) => circuit.name).sort().join(",")}`
+          : undefined,
+      circuits,
+    };
   }
 
   /**

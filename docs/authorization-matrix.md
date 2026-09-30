@@ -1,0 +1,27 @@
+# Authorization and tenant-isolation matrix
+
+All bearer routes require a live session: anonymous, malformed, expired,
+revoked, suspended, and deleted users receive `401` without resource data.
+`ADMIN` is the only administrator role; `DEVELOPER`, `ISSUER`, and `WORKER`
+have no implicit administrative access. A protected resource scoped to another
+user or organization is answered as `404`, identical to an absent resource.
+
+| Routes | Identity and permission | Ownership rule | Denial |
+| --- | --- | --- | --- |
+| `GET/POST /auth/session,/logout,/rotate` | bearer session | own session | 401 |
+| `GET/POST/PATCH /proofs`, `POST /proofs/*`, `PATCH /proofs/:id/revoke`, `GET /proofs/:id/verification-stats` | bearer session | proof owner | 401/404 |
+| `GET /proofs/:id/verify`, `POST /credentials/verify` | public | only published verification result | no protected fields |
+| `GET/POST/PATCH /payments*`, `GET/POST/PATCH/DELETE /trusted-sources*` | bearer session | user-owned record | 401/404 |
+| `GET/POST/PATCH/DELETE /webhooks*`, delivery replay | bearer `DEVELOPER` or `ADMIN` | caller's organization | 401/403/404 |
+| `GET /organizations`, `GET/PATCH /organizations/:id` | bearer | creator; ADMIN exception | 401/404 |
+| `POST /organizations`, issuer create/update/sync and `/issuers/admin*` | bearer `ADMIN` | global admin exception | 401/403 |
+| `GET /issuers*` | public for published issuer data; bearer for admin views | published vs admin view | 401/403/404 |
+| `GET/POST/DELETE /api-keys*`, rotate/revoke | bearer organization creator or ADMIN | organization-scoped query | 401/403/404 |
+| `GET /integrations/auth-context` | API key + `ORG_READ` | key organization selected by `X-Organization-Id` | 401 invalid/cross-org, 403 scope |
+| `GET /health/diagnostics` | API key + `ORG_ADMIN` | key organization | 401/403 |
+
+The table-driven e2e suite verifies allowed and denied sessions, role denial,
+cross-tenant indistinguishability, suspended/deleted users, and API-key scopes
+without treating a bearer session as an API key. Audit and error envelopes must
+contain only bounded identifiers and never credential secrets, wallet material,
+payment records, or hidden resource fields.

@@ -165,9 +165,12 @@ describe("protected amounts", () => {
 
     const stored = raw[0].amountEncrypted ?? "";
     expect(stored).not.toContain(amount);
-    expect(stored.startsWith("enc:v1:")).toBe(true);
+    expect(stored.startsWith("enc:v0:")).toBe(true);
     expect(
-      decryptProtectedAmount(stored, process.env.PAYMENT_ENCRYPTION_KEY as string),
+      decryptProtectedAmount(
+        stored,
+        new Map([[0, process.env.PAYMENT_ENCRYPTION_KEY as string]]),
+      ),
     ).toBe(amount);
   });
 

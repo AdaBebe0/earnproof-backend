@@ -30,6 +30,7 @@ const config = {
     const values: Record<string, string> = {
       paymentEncryptionKey: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
       "stellar.horizonUrl": fixtures.horizonUrl,
+      "stellar.network": "stellar-testnet",
     };
     return values[key];
   }),
@@ -48,12 +49,17 @@ function prismaDouble(existingOperationIds: string[] = []) {
       ]),
     },
     payment: {
-      findUnique: jest.fn(({ where }: { where: { operationId: string } }) =>
-        Promise.resolve(
-          existingOperationIds.includes(where.operationId)
-            ? { id: `payment_${where.operationId}` }
-            : null,
-        ),
+      // syncPayments batches the "does this already exist" check into a
+      // single findMany ahead of its loop (see payments.service.ts) rather
+      // than one findUnique per incoming payment; the double mirrors that
+      // shape by filtering the requested operationIds down to the known set.
+      findMany: jest.fn(
+        ({ where }: { where: { operationId: { in: string[] } } }) =>
+          Promise.resolve(
+            where.operationId.in
+              .filter((operationId) => existingOperationIds.includes(operationId))
+              .map((operationId) => ({ operationId })),
+          ),
       ),
       upsert: jest.fn((args: { where: { operationId: string }; create: { memo: unknown } }) => {
         upserts.push({
