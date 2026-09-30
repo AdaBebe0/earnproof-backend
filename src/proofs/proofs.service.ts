@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Injectable,
   NotFoundException,
@@ -37,6 +38,7 @@ import {
   VerificationClientContext,
 } from "../common/rate-limit/proof-verification-abuse.service";
 import { ContractAnchoringService } from "./contract-anchoring.service";
+import { CreateInvoiceSettlementProofDto } from "./dto/create-invoice-settlement-proof.dto";
 import { CreateIncomeRangeProofDto } from "./dto/create-income-range-proof.dto";
 import { CreateMinimumIncomeProofDto } from "./dto/create-minimum-income-proof.dto";
 import { CreatePaymentReceiptProofDto } from "./dto/create-payment-receipt-proof.dto";
@@ -49,6 +51,7 @@ import { ListProofsDto } from "./dto/list-proofs.dto";
 const SCHEMA_VERSION = "earnproof.minimum-income.v1";
 const PAYMENT_RECEIPT_SCHEMA_VERSION = "earnproof.payment-receipt.v1";
 const RECURRING_INCOME_SCHEMA_VERSION = "earnproof.recurring-income.v1";
+const INVOICE_SETTLEMENT_SCHEMA_VERSION = "earnproof.invoice-settlement.v1";
 const INCOME_RANGE_SCHEMA_VERSION = "earnproof.income-range.v1";
 const DEFAULT_EXPIRY_DAYS = 30;
 
@@ -120,6 +123,21 @@ type RecurringIncomeCredential = {
   expiresAt: string;
 };
 
+type InvoiceSettlementCredential = {
+  id: string;
+  type: "EarnProofInvoiceSettlementCredential";
+  schemaVersion: "earnproof.invoice-settlement.v1";
+  issuer: "earnproof-backend";
+  subject: { walletHash: string };
+  claim: {
+    issuerId: string;
+    assetCode: string;
+    assetIssuer: string | null;
+    occurredAt: string;
+    invoiceReferenceHash: string;
+    amount?: string;
+  };
+  privacy: { amountHidden: boolean };
 type IncomeRangeCredential = {
   id: string;
   type: "EarnProofIncomeRangeCredential";
@@ -150,6 +168,7 @@ type EarnProofCredential =
   | MinimumIncomeCredential
   | PaymentReceiptCredential
   | RecurringIncomeCredential
+  | InvoiceSettlementCredential;
   | IncomeRangeCredential;
 
 @Injectable()
@@ -368,6 +387,269 @@ export class ProofsService {
 
       return created;
     });
+
+    const anchoringResult = this.anchoringEnabled
+      ? { anchored: false as const, reason: "pending" as const }
+      : { anchored: false as const, reason: "disabled" as const };
+
+    this.emitProofCreated(user.id, proof);
+    return {
+      proofId: proof.id,
+      status: proof.status,
+      verificationUrl: `/api/v1/proofs/${proof.id}/verify`,
+      credential: this.signCredential(credential),
+      anchoring: anchoringResult,
+    };
+  }
+
+  /**
+   * Issues an INVOICE_SETTLEMENT proof binding an external invoice reference
+   * to exactly one confirmed (indexed, eligible, non-excluded) Stellar payment.
+   *
+   * Matching policy:
+   *   - The payment must have arrived from a sourceAddress the caller has
+   *     registered as an ACTIVE TrustedSource pointing at `input.issuerId`
+   *     (this is the "issuer policy" check — see TrustedSourcesService).
+   *   - assetCode/assetIssuer must match exactly.
+   *   - If periodStart/periodEnd are given, occurredAt must fall inside them.
+   *   - The payment must not already be bound to a different invoice-settlement
+   *     proof (checked here as a fast-path; the hard guarantee is the DB unique
+   *     constraint on ProofInvoiceSettlement.paymentId, enforced below).
+   *   - Of the remaining candidates, the decrypted payment amount must equal
+   *     `expectedAmount` EXACTLY. A lesser (partial) or greater (overpayment)
+   *     amount is treated as a mismatch and excluded, not just a lesser one —
+   *     this proof asserts a specific invoice was settled for a specific
+   *     amount, so any deviation is not that invoice being settled.
+   *   - Zero remaining candidates is rejected as "not found / unconfirmed".
+   *   - More than one remaining candidate is rejected as "ambiguous" rather
+   *     than silently picking one.
+   *
+   * The raw `invoiceReference` is normalized (trim, collapse whitespace,
+   * case-fold) and immediately reduced to a SHA-256 commitment; the raw and
+   * normalized values are never persisted, logged, or returned.
+   */
+  async createInvoiceSettlementProof(
+    user: AuthenticatedUser,
+    input: CreateInvoiceSettlementProofDto,
+  ) {
+    const normalizedReference = this.normalizeInvoiceReference(
+      input.invoiceReference,
+    );
+    if (!normalizedReference) {
+      throw new BadRequestException(
+        "invoiceReference must not be empty after normalization",
+      );
+    }
+    const invoiceReferenceHash = `sha256:${sha256(normalizedReference)}`;
+
+    const periodStart = input.periodStart
+      ? new Date(input.periodStart)
+      : undefined;
+    const periodEnd = input.periodEnd ? new Date(input.periodEnd) : undefined;
+    if (periodStart && periodEnd && periodStart > periodEnd) {
+      throw new BadRequestException("periodStart must be before periodEnd");
+    }
+
+    const issuer = await this.prisma.issuer.findUnique({
+      where: { id: input.issuerId },
+      select: { id: true, status: true },
+    });
+    if (!issuer || issuer.status !== ResourceStatus.ACTIVE) {
+      throw new BadRequestException(
+        "The specified issuer does not exist or is not active.",
+      );
+    }
+
+    const existingSettlement =
+      await this.prisma.proofInvoiceSettlement.findUnique({
+        where: {
+          issuerId_invoiceReferenceHash: {
+            issuerId: input.issuerId,
+            invoiceReferenceHash,
+          },
+        },
+        select: { id: true },
+      });
+    if (existingSettlement) {
+      throw new ConflictException({
+        code: ApiErrorCode.INVOICE_REFERENCE_CONFLICT,
+        message:
+          "This invoice reference has already been settled for this issuer.",
+      });
+    }
+
+    const trustedSources = await this.prisma.trustedSource.findMany({
+      where: {
+        userId: user.id,
+        issuerId: input.issuerId,
+        status: ResourceStatus.ACTIVE,
+      },
+      select: { sourceAddress: true },
+    });
+
+    if (trustedSources.length === 0) {
+      throw new NotFoundException({
+        code: ApiErrorCode.PAYMENT_NOT_FOUND,
+        message:
+          "No confirmed payment matches the requested issuer, asset, and amount.",
+      });
+    }
+
+    const candidates = await this.prisma.payment.findMany({
+      where: {
+        userId: user.id,
+        sourceAddress: { in: trustedSources.map((ts) => ts.sourceAddress) },
+        assetCode: input.assetCode,
+        assetIssuer: input.assetIssuer ?? null,
+        isEligible: true,
+        classification: { not: PaymentClassification.EXCLUDED },
+        invoiceSettlement: null,
+        occurredAt: {
+          gte: periodStart,
+          lte: periodEnd,
+        },
+      },
+      select: {
+        id: true,
+        operationId: true,
+        sourceAddress: true,
+        assetCode: true,
+        assetIssuer: true,
+        amountEncrypted: true,
+        occurredAt: true,
+      },
+    });
+
+    const expectedAmount = this.parseAmount(input.expectedAmount);
+    const matches = candidates.filter((candidate) => {
+      const amount = this.tryRevealProtectedAmount(candidate.amountEncrypted);
+      return amount !== null && amount === expectedAmount;
+    });
+
+    if (matches.length === 0) {
+      throw new NotFoundException({
+        code: ApiErrorCode.PAYMENT_NOT_FOUND,
+        message:
+          "No confirmed payment matches the requested issuer, asset, and amount.",
+      });
+    }
+    if (matches.length > 1) {
+      throw new UnprocessableEntityException({
+        code: ApiErrorCode.PAYMENT_AMBIGUOUS_MATCH,
+        message:
+          "Multiple confirmed payments match the requested criteria; narrow the period window or amount.",
+      });
+    }
+
+    const payment = matches[0];
+    const amountHidden = input.discloseAmount !== true;
+    const amount = amountHidden
+      ? undefined
+      : this.revealPaymentAmount(payment.amountEncrypted);
+    const now = new Date();
+    const expiresAt = new Date(
+      now.getTime() +
+        (input.expiresInDays ?? DEFAULT_EXPIRY_DAYS) * 24 * 60 * 60 * 1000,
+    );
+    const proofId = randomUUID();
+    const credential = this.buildInvoiceSettlementCredential({
+      id: proofId,
+      walletHash: user.walletHash,
+      issuerId: input.issuerId,
+      assetCode: payment.assetCode,
+      assetIssuer: payment.assetIssuer,
+      occurredAt: payment.occurredAt,
+      invoiceReferenceHash,
+      amountHidden,
+      amount,
+      issuedAt: now,
+      expiresAt,
+    });
+    const credentialHash = `sha256:${sha256(canonicalize(credential))}`;
+    const commitment = `sha256:${sha256(credentialHash)}`;
+
+    let proof: Proof & { claim: ProofClaim | null };
+    try {
+      proof = await this.prisma.$transaction(async (tx) => {
+        const created = await tx.proof.create({
+          data: {
+            id: proofId,
+            userId: user.id,
+            proofType: ProofType.INVOICE_SETTLEMENT,
+            schemaVersion: INVOICE_SETTLEMENT_SCHEMA_VERSION,
+            status: ProofStatus.ACTIVE,
+            network: this.stellarNetwork,
+            assetCode: payment.assetCode,
+            assetIssuer: payment.assetIssuer,
+            periodStart: payment.occurredAt,
+            periodEnd: payment.occurredAt,
+            expiresAt,
+            createdAt: now,
+            credentialHash,
+            commitment,
+            claim: {
+              create: {
+                operator: "settlement",
+                thresholdEncrypted: amountHidden
+                  ? null
+                  : payment.amountEncrypted,
+                result: true,
+                disclosurePolicy: {
+                  amountHidden,
+                  invoiceReferenceHash,
+                  issuerId: input.issuerId,
+                  occurredAt: payment.occurredAt.toISOString(),
+                },
+              },
+            },
+          },
+          include: { claim: true },
+        });
+
+        await tx.proofInvoiceSettlement.create({
+          data: {
+            proofId: created.id,
+            paymentId: payment.id,
+            issuerId: input.issuerId,
+            invoiceReferenceHash,
+          },
+        });
+
+        if (this.anchoringEnabled) {
+          await tx.anchoringIntent.create({
+            data: {
+              proofId: created.id,
+              operation: AnchoringOperation.REGISTER,
+              status: AnchoringStatus.PENDING,
+            },
+          });
+        }
+
+        return created;
+      });
+    } catch (err) {
+      if (
+        err instanceof Prisma.PrismaClientKnownRequestError &&
+        err.code === "P2002"
+      ) {
+        const target = Array.isArray(err.meta?.target)
+          ? (err.meta?.target as string[])
+          : [];
+        if (target.includes("paymentId")) {
+          throw new ConflictException({
+            code: ApiErrorCode.PAYMENT_ALREADY_SETTLED,
+            message:
+              "This payment has already been used to settle a different invoice.",
+          });
+        }
+        throw new ConflictException({
+          code: ApiErrorCode.INVOICE_REFERENCE_CONFLICT,
+          message:
+            "This invoice reference has already been settled for this issuer.",
+        });
+      }
+      throw err;
+    }
 
     const anchoringResult = this.anchoringEnabled
       ? { anchored: false as const, reason: "pending" as const }
@@ -1126,6 +1408,17 @@ export class ProofsService {
               ...proof,
               claim: proof.claim!,
             })
+          : proof.proofType === ProofType.INVOICE_SETTLEMENT
+            ? this.rebuildInvoiceSettlementCredential({
+                ...proof,
+                claim: proof.claim!,
+              })
+            : this.buildCredential({
+                id: proof.id,
+                walletHash: proof.user.walletHash,
+                thresholdAmount: this.revealThreshold(
+                  proof.claim.thresholdEncrypted,
+                ),
           : proof.proofType === ProofType.INCOME_RANGE
             ? this.buildIncomeRangeCredential({
                 id: proof.id,
@@ -1147,6 +1440,7 @@ export class ProofsService {
                 ),
                 issuedAt: proof.createdAt,
                 expiresAt: proof.expiresAt,
+              });
               })
             : this.buildCredential({
             id: proof.id,
@@ -1420,6 +1714,39 @@ export class ProofsService {
     };
   }
 
+  private buildInvoiceSettlementCredential(input: {
+    id: string;
+    walletHash: string;
+    issuerId: string;
+    assetCode: string;
+    assetIssuer: string | null;
+    occurredAt: Date;
+    invoiceReferenceHash: string;
+    amountHidden: boolean;
+    amount?: string;
+    issuedAt: Date;
+    expiresAt: Date;
+  }): InvoiceSettlementCredential {
+    return {
+      id: input.id,
+      type: "EarnProofInvoiceSettlementCredential",
+      schemaVersion: INVOICE_SETTLEMENT_SCHEMA_VERSION,
+      issuer: "earnproof-backend",
+      subject: { walletHash: input.walletHash },
+      claim: {
+        issuerId: input.issuerId,
+        assetCode: input.assetCode,
+        assetIssuer: input.assetIssuer,
+        occurredAt: input.occurredAt.toISOString(),
+        invoiceReferenceHash: input.invoiceReferenceHash,
+        ...(input.amountHidden ? undefined : { amount: input.amount }),
+      },
+      privacy: { amountHidden: input.amountHidden },
+      issuedAt: input.issuedAt.toISOString(),
+      expiresAt: input.expiresAt.toISOString(),
+    };
+  }
+
   private buildRecurringIncomeCredential(input: {
     id: string;
     walletHash: string;
@@ -1600,6 +1927,51 @@ export class ProofsService {
     });
   }
 
+  private rebuildInvoiceSettlementCredential(proof: {
+    id: string;
+    assetCode: string;
+    assetIssuer: string | null;
+    createdAt: Date;
+    expiresAt: Date;
+    periodStart: Date | null;
+    user: { walletHash: string };
+    claim: {
+      thresholdEncrypted: string | null;
+      disclosurePolicy: Prisma.JsonValue;
+    };
+  }) {
+    const policy = this.jsonPolicy(proof.claim.disclosurePolicy);
+    const amountHidden = policy["amountHidden"] !== false;
+    const occurredAtValue = policy["occurredAt"];
+    const occurredAt =
+      typeof occurredAtValue === "string" &&
+      !Number.isNaN(new Date(occurredAtValue).getTime())
+        ? new Date(occurredAtValue)
+        : (proof.periodStart ?? proof.createdAt);
+
+    return this.buildInvoiceSettlementCredential({
+      id: proof.id,
+      walletHash: proof.user.walletHash,
+      issuerId:
+        typeof policy["issuerId"] === "string" ? policy["issuerId"] : "",
+      assetCode: proof.assetCode,
+      assetIssuer: proof.assetIssuer,
+      occurredAt,
+      invoiceReferenceHash:
+        typeof policy["invoiceReferenceHash"] === "string"
+          ? policy["invoiceReferenceHash"]
+          : "",
+      amountHidden,
+      amount: amountHidden
+        ? undefined
+        : this.revealPaymentAmountForVerification(
+            proof.claim.thresholdEncrypted,
+          ),
+      issuedAt: proof.createdAt,
+      expiresAt: proof.expiresAt,
+    });
+  }
+
   private signCredential<T extends EarnProofCredential>(credential: T) {
     if (this.credentialVerificationKeyService) {
       return {
@@ -1619,6 +1991,34 @@ export class ProofsService {
           .digest("base64url")}`,
       },
     };
+  }
+
+  /**
+   * Normalizes a raw invoice reference so that equivalent references (differing
+   * only in surrounding/internal whitespace or letter case) commit to the same
+   * hash. Never persisted or logged — callers must hash the result immediately.
+   */
+  private normalizeInvoiceReference(raw: string): string {
+    return raw.trim().replace(/\s+/g, " ").toLowerCase();
+  }
+
+  /**
+   * Like `revealProtectedAmount`, but returns null instead of throwing when the
+   * amount is missing or undecryptable. Used while filtering payment candidates
+   * so that one payment with unreadable amount data doesn't abort matching for
+   * the whole request — it's just excluded as a non-match.
+   */
+  private tryRevealProtectedAmount(
+    amountEncrypted: string | null,
+  ): bigint | null {
+    if (!amountEncrypted) return null;
+    try {
+      return this.parseAmount(
+        decryptProtectedAmount(amountEncrypted, this.paymentEncryptionKey),
+      );
+    } catch {
+      return null;
+    }
   }
 
   private revealProtectedAmount(amountEncrypted: string | null) {

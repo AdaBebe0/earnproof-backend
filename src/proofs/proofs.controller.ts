@@ -32,6 +32,7 @@ import {
 import { Idempotent } from "../common/decorators/idempotent.decorator";
 import { ApiErrorDto } from "../common/dto/api-error.dto";
 import { AuthGuard } from "../common/guards/auth.guard";
+import { CreateInvoiceSettlementProofDto } from "./dto/create-invoice-settlement-proof.dto";
 import { CreateIncomeRangeProofDto } from "./dto/create-income-range-proof.dto";
 import { RequireApiKeyScopes } from "../common/guards/api-key-quota.guard";
 import { RequireConsent } from "../common/guards/consent.guard";
@@ -179,6 +180,57 @@ export class ProofsController {
     @Body() body: CreatePaymentReceiptProofDto,
   ) {
     return this.proofsService.createPaymentReceiptProof(user, body);
+  }
+
+  @ApiOperation({
+    summary: "Create an invoice-settlement proof",
+    description:
+      "Binds a caller-supplied invoice reference to exactly one confirmed payment matching " +
+      "the requested issuer, asset, and exact amount. The raw invoice reference is never " +
+      "stored or disclosed — only a normalized SHA-256 commitment is embedded in the credential. " +
+      "Ambiguous (multiple matching payments) or unconfirmed (no matching payment) requests are " +
+      "rejected, and a payment already bound to a different invoice cannot be reused.",
+  })
+  @ApiBearerAuth()
+  @ApiResponse({
+    status: HttpStatus.CREATED,
+    description: "Invoice-settlement proof created.",
+    type: ProofCreatedDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.BAD_REQUEST,
+    description: "The issuer is invalid/inactive, or the requested period range is invalid.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.NOT_FOUND,
+    description: "No confirmed payment matches the requested issuer, asset, and amount.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.UNPROCESSABLE_ENTITY,
+    description: "More than one payment matches the requested criteria (ambiguous).",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.CONFLICT,
+    description:
+      "The matched payment is already bound to a different invoice, or this invoice reference " +
+      "has already been settled for this issuer.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.UNAUTHORIZED,
+    description: "Bearer token is missing, malformed, invalid, or expired.",
+    type: ApiErrorDto,
+  })
+  @UseGuards(AuthGuard)
+  @Post("invoice-settlement")
+  createInvoiceSettlementProof(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() body: CreateInvoiceSettlementProofDto,
+  ) {
+    return this.proofsService.createInvoiceSettlementProof(user, body);
   }
 
   @ApiOperation({

@@ -39,10 +39,13 @@ export enum ApiErrorCode {
   // 422 - payment cannot be used for the requested proof
   PAYMENT_NOT_ELIGIBLE = "PAYMENT_NOT_ELIGIBLE",
   PAYMENT_EXCLUDED = "PAYMENT_EXCLUDED",
+  PAYMENT_AMBIGUOUS_MATCH = "PAYMENT_AMBIGUOUS_MATCH",
   ASSET_NOT_SUPPORTED = "ASSET_NOT_SUPPORTED",
 
   // 409 – request conflicts with current state
   CONFLICT = "CONFLICT",
+  PAYMENT_ALREADY_SETTLED = "PAYMENT_ALREADY_SETTLED",
+  INVOICE_REFERENCE_CONFLICT = "INVOICE_REFERENCE_CONFLICT",
 
   // 413 – the request exceeded a transport or structural limit
   PAYLOAD_TOO_LARGE = "PAYLOAD_TOO_LARGE",

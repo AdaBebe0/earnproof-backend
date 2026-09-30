@@ -382,6 +382,16 @@ model Issuer {
   contractSyncState       String          @default("PENDING")
   contractSyncedStatus    ResourceStatus?
   contractTransactionHash String?
+  contractSyncedAt         DateTime?
+  contractSyncError        String?
+  verifiedAt      DateTime?
+  suspendedAt     DateTime?
+  revokedAt       DateTime?
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+  trustedSources  TrustedSource[]
+  attestations    Attestation[]
+  invoiceSettlements ProofInvoiceSettlement[]
   contractSyncedAt        DateTime?
   contractSyncError       String?
   verifiedAt              DateTime?
@@ -424,6 +434,11 @@ model Payment {
   amountEncrypted        String?
   occurredAt             DateTime
   memo                   Json?
+  classification         PaymentClassification  @default(UNKNOWN)
+  isEligible             Boolean                @default(false)
+  createdAt              DateTime               @default(now())
+  updatedAt              DateTime               @updatedAt
+  invoiceSettlement      ProofInvoiceSettlement?
   classification         PaymentClassification @default(UNKNOWN)
   classificationRevision Int                   @default(1)
   isEligible             Boolean               @default(false)
@@ -491,6 +506,7 @@ model Proof {
   claim                   ProofClaim?
   verificationEvents      VerificationEvent[]
   anchoringIntents        AnchoringIntent[]
+  invoiceSettlement       ProofInvoiceSettlement?
   sharingEvents           ProofSharingEvent[]
   disclosureReceipts      DisclosureReceipt[]
 
@@ -510,6 +526,29 @@ model ProofClaim {
   result             Boolean
   disclosurePolicy   Json
   createdAt          DateTime @default(now())
+}
+
+/// Binds exactly one confirmed Stellar payment to exactly one invoice-settlement
+/// proof. Both `paymentId` and the `[issuerId, invoiceReferenceHash]` pair carry
+/// hard uniqueness constraints so that:
+///   - the same settled payment can never satisfy two conflicting invoice proofs, and
+///   - the same invoice reference (under a given issuer) can never be "settled" twice.
+/// These constraints are the actual concurrency guarantee: two simultaneous
+/// issuance attempts race on the same Postgres unique index, and only one can win.
+/// `invoiceReferenceHash` is a salted/plain SHA-256 commitment over the normalized
+/// invoice reference — the raw reference is never persisted here or anywhere else.
+model ProofInvoiceSettlement {
+  id                   String   @id @default(cuid())
+  proofId              String   @unique
+  proof                Proof    @relation(fields: [proofId], references: [id])
+  paymentId            String   @unique
+  payment              Payment  @relation(fields: [paymentId], references: [id])
+  issuerId             String
+  issuer               Issuer   @relation(fields: [issuerId], references: [id])
+  invoiceReferenceHash String
+  createdAt            DateTime @default(now())
+
+  @@unique([issuerId, invoiceReferenceHash])
 }
 
 model Attestation {
