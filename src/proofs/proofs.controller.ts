@@ -52,6 +52,11 @@ import {
   ProofDetailResponseDto,
   ProofListResponseDto,
 } from "./dto/proof-history-response.dto";
+import {
+  ProofRenewalResponseDto,
+  RenewalEligibilityResponseDto,
+  RenewProofDto,
+} from "./dto/renew-proof.dto";
 import { RevokeProofResponseDto } from "./dto/revoke-proof-response.dto";
 import { VerifyProofResponseDto } from "./dto/verify-proof-response.dto";
 import { VerifyProofsBatchResponseDto } from "./dto/verify-proofs-batch-response.dto";
@@ -415,6 +420,113 @@ export class ProofsController {
   @AuthenticatedRoute({ ownership: "user" })
   revokeProof(@CurrentUser() user: AuthenticatedUser, @Param("id") id: string) {
     return this.proofsService.revokeProof(user.id, id);
+  }
+
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: "Check whether a proof can be renewed",
+    description:
+      "Returns renewal eligibility with stable reason codes (`revoked`, `invalid`, " +
+      "`expired_beyond_grace`, `already_superseded`) and the proof's supersession links. " +
+      "Expired proofs remain renewable for a grace period after expiry. Only the proof owner may call this.",
+  })
+  @ApiParam({ name: "id", description: "Proof ID (uuid)." })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: "Renewal eligibility.",
+    type: RenewalEligibilityResponseDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.NOT_FOUND,
+    description: "Proof not found.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.FORBIDDEN,
+    description: "Proof does not belong to the authenticated user.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.UNAUTHORIZED,
+    description: "Bearer token is missing, malformed, invalid, or expired.",
+    type: ApiErrorDto,
+  })
+  @UseGuards(AuthGuard)
+  @Get(":id/renewal-eligibility")
+  getRenewalEligibility(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("id") id: string,
+  ) {
+    return this.proofsService.getRenewalEligibility(user.id, id);
+  }
+
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: "Renew a proof",
+    description:
+      "Supersedes an eligible proof. Without `successorProofId`, issues a successor carrying the " +
+      "same claim with a fresh validity window; with it, links an existing compatible proof " +
+      "(same owner, proof type, issuer, asset, network, and disclosure policy) as the successor. " +
+      "A proof has at most one successor: concurrent renewals cannot fork the chain, and links " +
+      "that would form a cycle are rejected. Repeating an identical request (same body and " +
+      "`Idempotency-Key`) returns the original successor with `replayed: true`; any other " +
+      "request for an already-superseded proof returns 409. The supersession link is recorded " +
+      "off-chain; an issued successor is anchored through the normal registration path.",
+  })
+  @ApiParam({ name: "id", description: "Predecessor proof ID (uuid)." })
+  @ApiHeader({
+    name: "Idempotency-Key",
+    required: false,
+    description: "Client-chosen key (1-128 chars) scoping retries of one renewal.",
+  })
+  @ApiResponse({
+    status: HttpStatus.CREATED,
+    description: "Successor issued or linked (or an identical request replayed).",
+    type: ProofRenewalResponseDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.BAD_REQUEST,
+    description: "Invalid Idempotency-Key.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.NOT_FOUND,
+    description: "Proof or successor proof not found.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.FORBIDDEN,
+    description: "Proof does not belong to the authenticated user.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.CONFLICT,
+    description: "Proof was already superseded by a different renewal.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.UNPROCESSABLE_ENTITY,
+    description:
+      "Proof is not eligible for renewal, or the successor is incompatible.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.UNAUTHORIZED,
+    description: "Bearer token is missing, malformed, invalid, or expired.",
+    type: ApiErrorDto,
+  })
+  @UseGuards(AuthGuard)
+  // Renewal issues a credential, so it shares proof creation's strict budget.
+  @SkipThrottle({ default: true, verification: true })
+  @Throttle({ strict: {} })
+  @Post(":id/renew")
+  renewProof(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("id") id: string,
+    @Body() body: RenewProofDto,
+    @Headers("idempotency-key") idempotencyKey?: string,
+  ) {
+    return this.proofsService.renewProof(user, id, body, idempotencyKey);
   }
 
   @ApiOperation({

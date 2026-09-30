@@ -47,6 +47,16 @@ import {
   IntervalUnit,
 } from "./dto/create-recurring-income-proof.dto";
 import { ListProofsDto } from "./dto/list-proofs.dto";
+import { RenewProofDto } from "./dto/renew-proof.dto";
+import {
+  evaluateRenewalEligibility,
+  evaluateSupersessionCompatibility,
+  MAX_IDEMPOTENCY_KEY_LENGTH,
+  RENEWAL_GRACE_PERIOD_DAYS,
+  renewalRequestHash,
+  SupersessionIncompatibility,
+  wouldCreateCycle,
+} from "./proof-renewal.policy";
 
 const SCHEMA_VERSION = "earnproof.minimum-income.v1";
 const PAYMENT_RECEIPT_SCHEMA_VERSION = "earnproof.payment-receipt.v1";
@@ -170,6 +180,19 @@ type EarnProofCredential =
   | RecurringIncomeCredential
   | InvoiceSettlementCredential;
   | IncomeRangeCredential;
+
+type OwnedRenewableProof = Proof & {
+  claim: ProofClaim | null;
+  user: { walletHash: string };
+  supersededBy: { id: string } | null;
+};
+
+function isUniqueViolation(error: unknown): boolean {
+  return (
+    error instanceof Prisma.PrismaClientKnownRequestError &&
+    error.code === "P2002"
+  );
+}
 
 @Injectable()
 export class ProofsService {
@@ -1403,6 +1426,7 @@ export class ProofsService {
       };
     }
 
+    const credential = this.rebuildCredential({ ...proof, claim: proof.claim });
     const policy = this.jsonPolicy(proof.claim.disclosurePolicy);
     const cadence = this.revealCadence(proof.claim.frequency);
     const credential =
@@ -1897,6 +1921,65 @@ export class ProofsService {
       intervalUnit: match[1] as IntervalUnit,
       intervalCount,
     };
+  }
+
+  /**
+   * Reconstruct a stored proof's credential body from its row and claim.
+   * Shared by verification and renewal so a renewed successor is rebuilt by
+   * exactly the code that will later verify it.
+   */
+  private rebuildCredential(proof: {
+    id: string;
+    proofType: ProofType;
+    assetCode: string;
+    assetIssuer: string | null;
+    createdAt: Date;
+    expiresAt: Date;
+    periodStart: Date | null;
+    periodEnd: Date | null;
+    user: { walletHash: string };
+    claim: {
+      thresholdEncrypted: string | null;
+      frequency: string | null;
+      disclosurePolicy: Prisma.JsonValue;
+    };
+  }): EarnProofCredential {
+    const policy = this.jsonPolicy(proof.claim.disclosurePolicy);
+    const cadence = this.revealCadence(proof.claim.frequency);
+    return proof.proofType === ProofType.RECURRING_INCOME
+      ? this.buildRecurringIncomeCredential({
+          id: proof.id,
+          walletHash: proof.user.walletHash,
+          cadence: proof.claim.frequency ?? "invalid",
+          intervalUnit: cadence?.intervalUnit ?? "month",
+          intervalCount: cadence?.intervalCount ?? 0,
+          assetCode: proof.assetCode,
+          assetIssuer: proof.assetIssuer,
+          periodStart: proof.periodStart ?? proof.createdAt,
+          periodEnd: proof.periodEnd ?? proof.createdAt,
+          qualifyingPaymentCount:
+            typeof policy["qualifyingPaymentCount"] === "number"
+              ? policy["qualifyingPaymentCount"]
+              : 0,
+          issuedAt: proof.createdAt,
+          expiresAt: proof.expiresAt,
+        })
+      : proof.proofType === ProofType.PAYMENT_RECEIPT
+        ? this.rebuildPaymentReceiptCredential(proof)
+        : this.buildCredential({
+            id: proof.id,
+            walletHash: proof.user.walletHash,
+            thresholdAmount: this.revealThreshold(
+              proof.claim.thresholdEncrypted,
+            ),
+            assetCode: proof.assetCode,
+            assetIssuer: proof.assetIssuer,
+            periodStart: proof.periodStart ?? proof.createdAt,
+            periodEnd: proof.periodEnd ?? proof.createdAt,
+            qualifyingPaymentCount: this.qualifyingPaymentCount(proof.claim),
+            issuedAt: proof.createdAt,
+            expiresAt: proof.expiresAt,
+          });
   }
 
   private rebuildPaymentReceiptCredential(proof: {
