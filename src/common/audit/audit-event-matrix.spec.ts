@@ -510,6 +510,7 @@ const scenarios: Scenario[] = [
         prisma as never,
         {} as never,
         configDouble({ paymentEncryptionKey: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=" }),
+        {} as never,
       ).updateClassification({ id: USER_ID }, "payment_1", "INCOME" as never);
     },
   },
