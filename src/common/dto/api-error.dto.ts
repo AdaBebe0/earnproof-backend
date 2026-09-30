@@ -39,12 +39,16 @@ export enum ApiErrorCode {
   // 422 - payment cannot be used for the requested proof
   PAYMENT_NOT_ELIGIBLE = "PAYMENT_NOT_ELIGIBLE",
   PAYMENT_EXCLUDED = "PAYMENT_EXCLUDED",
+  PAYMENT_AMBIGUOUS_MATCH = "PAYMENT_AMBIGUOUS_MATCH",
+  ASSET_NOT_SUPPORTED = "ASSET_NOT_SUPPORTED",
 
   // 422 - proof cannot be shared in its current state
   PROOF_NOT_SHAREABLE = "PROOF_NOT_SHAREABLE",
 
   // 409 – request conflicts with current state
   CONFLICT = "CONFLICT",
+  PAYMENT_ALREADY_SETTLED = "PAYMENT_ALREADY_SETTLED",
+  INVOICE_REFERENCE_CONFLICT = "INVOICE_REFERENCE_CONFLICT",
 
   // 429 – rate limiting (short-window request throttling)
   // 413 – the request exceeded a transport or structural limit

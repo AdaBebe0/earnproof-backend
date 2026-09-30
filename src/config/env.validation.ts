@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { DEPLOYMENT_MANIFEST_MAX_BYTES } from "./deployment-manifest";
 
 /**
  * ──────────────────────────────────────────────────────────────────────────
@@ -255,6 +256,24 @@ const envSchema = z.object({
     .min(1, "STELLAR_NETWORK_PASSPHRASE must be non-empty")
     .default("Test SDF Network ; September 2015"),
 
+  /** Ledgers behind the last verified checkpoint that a divergence may reach */
+  STELLAR_FINALITY_HISTORY_LEDGERS: z
+    .coerce.number()
+    .int("STELLAR_FINALITY_HISTORY_LEDGERS must be an integer")
+    .positive("STELLAR_FINALITY_HISTORY_LEDGERS must be positive")
+    .max(1_000_000, "STELLAR_FINALITY_HISTORY_LEDGERS is unreasonably large")
+    .finite("STELLAR_FINALITY_HISTORY_LEDGERS must be a finite number")
+    .default(17_280),
+
+  /** Horizon pages one ledger reconciliation read may walk */
+  STELLAR_FINALITY_RECONCILIATION_MAX_PAGES: z
+    .coerce.number()
+    .int("STELLAR_FINALITY_RECONCILIATION_MAX_PAGES must be an integer")
+    .positive("STELLAR_FINALITY_RECONCILIATION_MAX_PAGES must be positive")
+    .max(100, "STELLAR_FINALITY_RECONCILIATION_MAX_PAGES must not exceed 100")
+    .finite("STELLAR_FINALITY_RECONCILIATION_MAX_PAGES must be a finite number")
+    .default(10),
+
   // ──────────────────────────────────────────────────────────────────────
   // SECRETS (Required, never logged or exposed in error messages)
   // ──────────────────────────────────────────────────────────────────────
@@ -370,6 +389,26 @@ const envSchema = z.object({
 
   /** Stellar contract ID for issuer registry */
   ISSUER_REGISTRY_CONTRACT_ID: optionalString(stellarContractId),
+
+  // ──────────────────────────────────────────────────────────────────────
+  // DEPLOYMENT MANIFEST (Optional)
+  // ──────────────────────────────────────────────────────────────────────
+
+  /**
+   * Deployment manifest JSON (network, contract addresses, artifact hashes).
+   * Only bounded here; its structure and consistency with the Stellar and
+   * contract variables are validated by deployment-manifest.ts and reported
+   * through readiness, so a bad manifest takes the replica out of rotation
+   * with a stable reason code instead of crash-looping it.
+   */
+  DEPLOYMENT_MANIFEST: optionalString(
+    z
+      .string()
+      .max(
+        DEPLOYMENT_MANIFEST_MAX_BYTES,
+        `DEPLOYMENT_MANIFEST must not exceed ${DEPLOYMENT_MANIFEST_MAX_BYTES} characters`,
+      ),
+  ),
 
   // ──────────────────────────────────────────────────────────────────────
   // EARNPROOF INTEGRATION (Optional, used when anchoring is enabled)

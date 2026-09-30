@@ -153,3 +153,50 @@ export interface WebhookEnvelope<E extends WebhookEventType = WebhookEventType> 
     | ProofVerifiedPayload
     | AttestationExpiredPayload;
 }
+
+// ---------------------------------------------------------------------------
+// Synthetic test events
+// ---------------------------------------------------------------------------
+
+/**
+ * Event type of the synthetic event sent by the test-delivery endpoint.
+ *
+ * Deliberately NOT a member of {@link WEBHOOK_EVENT_TYPES}: it cannot be
+ * subscribed to, never comes out of a proof lifecycle, and so a receiver that
+ * routes on `X-EarnProof-Event` can never mistake it for a business event.
+ */
+export const WEBHOOK_TEST_EVENT_TYPE = "webhook.test" as const;
+
+/** Version of the synthetic `data` shape, bumped on any change to it. */
+export const WEBHOOK_TEST_EVENT_VERSION = "1" as const;
+
+/**
+ * Prefix on the delivery/event id of every synthetic event, so the
+ * `X-EarnProof-Delivery` header alone identifies a test delivery and can never
+ * collide with (or be de-duplicated against) a real event id.
+ */
+export const WEBHOOK_TEST_EVENT_ID_PREFIX = "test_";
+
+export interface WebhookTestEventData {
+  /** Always true. Receivers should acknowledge and otherwise ignore the event. */
+  synthetic: true;
+  testEventVersion: typeof WEBHOOK_TEST_EVENT_VERSION;
+  webhookId: string;
+  message: string;
+}
+
+/**
+ * Envelope of a synthetic test event.
+ *
+ * Same outer shape as {@link WebhookEnvelope} (so it exercises the receiver's
+ * normal parsing and signature path), plus a top-level `synthetic: true`
+ * marker. Carries no proof, payment, or organisation data.
+ */
+export interface WebhookTestEnvelope {
+  specVersion: "1";
+  id: string;
+  event: typeof WEBHOOK_TEST_EVENT_TYPE;
+  synthetic: true;
+  createdAt: string;
+  data: WebhookTestEventData;
+}

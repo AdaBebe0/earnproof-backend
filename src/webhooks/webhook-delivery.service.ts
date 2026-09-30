@@ -15,6 +15,14 @@ import {
   payloadDeprecation,
   serializeWebhookEvent,
 } from "./webhook-payload.serializers";
+import {
+  WEBHOOK_TEST_EVENT_ID_PREFIX,
+  WEBHOOK_TEST_EVENT_TYPE,
+  WEBHOOK_TEST_EVENT_VERSION,
+  WebhookEnvelope,
+  WebhookEventType,
+  WebhookTestEnvelope,
+} from "./webhook-event.types";
 import { WebhookSigningService } from "./webhook-signing.service";
 import {
   SsrfBlockedError,
@@ -493,6 +501,31 @@ export class WebhookDeliveryService implements OnModuleInit {
         // forwarding a signed payload to an internal address.
         redirect: "error",
         signal: AbortSignal.timeout(DELIVERY_TIMEOUT_MS),
+    // The full public payload is persisted, so retries and crash recovery
+    // deliver exactly the same signed event rather than an empty envelope.
+    const envelope = (cachedEnvelope ?? delivery.payload) as WebhookEnvelope;
+
+    const outcome = await this.sendSignedRequest(
+      url,
+      signingSecret,
+      delivery.eventId,
+      delivery.eventType,
+      envelope,
+    );
+    const { statusCode, responseBody, durationMs, success } = outcome;
+    let failureReason = outcome.failureReason;
+
+    if (outcome.kind === "blocked") {
+      failureReason = outcome.error.message;
+      // SSRF block is permanent — do not retry.
+      await this.prisma.webhookDelivery.update({
+        where: { id: deliveryId },
+        data: {
+          status: WebhookDeliveryStatus.FAILED,
+          durationMs,
+          failureReason,
+          deliveredAt: new Date(),
+        },
       });
 
       durationMs = Date.now() - start;
@@ -646,6 +679,181 @@ export class WebhookDeliveryService implements OnModuleInit {
         deadLetterReason: reason,
       },
     });
+  // ---------------------------------------------------------------------------
+  // Synthetic test delivery
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Send one synthetic, signed `webhook.test` event to an endpoint and report
+   * what happened.
+   *
+   * Uses exactly the same signing, destination guard, redirect policy, timeout,
+   * and response redaction/size limits as a real delivery
+   * ({@link sendSignedRequest}), so a passing test means a real event would
+   * reach the receiver the same way.
+   *
+   * It is deliberately NOT a delivery: no `WebhookDelivery` row is written, the
+   * per-endpoint FIFO chain is not touched, and a failure is never retried. A
+   * synthetic event must never be picked up by startup recovery or the retry
+   * path, and must never sit in a business queue ahead of a real event.
+   *
+   * The caller is responsible for authorization and ownership.
+   */
+  async sendTestDelivery(webhook: {
+    id: string;
+    url: string;
+    secretEncrypted: string;
+  }): Promise<WebhookTestDeliveryResult> {
+    const eventId = `${WEBHOOK_TEST_EVENT_ID_PREFIX}${randomUUID()}`;
+    const envelope: WebhookTestEnvelope = {
+      specVersion: "1",
+      id: eventId,
+      event: WEBHOOK_TEST_EVENT_TYPE,
+      synthetic: true,
+      createdAt: new Date().toISOString(),
+      data: {
+        synthetic: true,
+        testEventVersion: WEBHOOK_TEST_EVENT_VERSION,
+        webhookId: webhook.id,
+        message:
+          "Synthetic EarnProof test event. Not a business event; acknowledge and ignore.",
+      },
+    };
+
+    const base = {
+      webhookId: webhook.id,
+      eventId,
+      eventType: WEBHOOK_TEST_EVENT_TYPE,
+      synthetic: true as const,
+      testEventVersion: WEBHOOK_TEST_EVENT_VERSION,
+      sentAt: envelope.createdAt,
+    };
+
+    let signingSecret: string;
+    try {
+      signingSecret = this.paymentEncryptionKeyring.decrypt(webhook.secretEncrypted);
+    } catch (err) {
+      this.logger.error(
+        `Failed to decrypt signing secret for webhook ${webhook.id}: ${String(err)}`,
+      );
+      return {
+        ...base,
+        delivered: false,
+        statusClass: "signing_error",
+        statusCode: null,
+        durationMs: 0,
+        failureReason: "signing secret decryption failure",
+        response: { body: null, truncated: false, maxBytes: MAX_RESPONSE_BODY_BYTES },
+      };
+    }
+
+    const outcome = await this.sendSignedRequest(
+      webhook.url,
+      signingSecret,
+      eventId,
+      WEBHOOK_TEST_EVENT_TYPE,
+      envelope,
+    );
+
+    return {
+      ...base,
+      delivered: outcome.success,
+      statusClass: statusClassOf(outcome),
+      statusCode: outcome.statusCode ?? null,
+      durationMs: outcome.durationMs,
+      // The SSRF guard's own message can name the resolved internal address;
+      // echoing it to the caller would turn this endpoint into a network probe.
+      failureReason:
+        outcome.kind === "blocked"
+          ? "destination rejected by outbound destination policy"
+          : (outcome.failureReason ?? null),
+      response: {
+        body: outcome.responseBody ?? null,
+        truncated: outcome.responseTruncated,
+        maxBytes: MAX_RESPONSE_BODY_BYTES,
+      },
+    };
+  }
+
+  /**
+   * The production send path: sign, check the destination, POST without
+   * following redirects under the delivery timeout, and bound + redact the
+   * response body. Never throws; never writes to the database.
+   */
+  private async sendSignedRequest(
+    url: string,
+    signingSecret: string,
+    eventId: string,
+    eventType: string,
+    envelope: WebhookEnvelope | WebhookTestEnvelope,
+  ): Promise<SignedRequestOutcome> {
+    const body = JSON.stringify(envelope);
+    const timestamp = Math.floor(Date.now() / 1000);
+
+    const signature = this.signing.sign(signingSecret, timestamp, eventId, body);
+
+    const start = Date.now();
+    try {
+      await assertSafeWebhookDestination(url);
+
+      const response = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-EarnProof-Timestamp": String(timestamp),
+          "X-EarnProof-Delivery": eventId,
+          "X-EarnProof-Event": eventType,
+          "X-EarnProof-Signature": signature,
+        },
+        body,
+        // Do NOT follow redirects — prevents an open redirect from
+        // forwarding a signed payload to an internal address.
+        redirect: "error",
+        signal: AbortSignal.timeout(DELIVERY_TIMEOUT_MS),
+      });
+
+      const durationMs = Date.now() - start;
+
+      // Truncate response body to prevent large payloads in logs.
+      const bounded = boundResponseBody(await response.text());
+
+      return {
+        kind: "response",
+        success: response.ok,
+        statusCode: response.status,
+        responseBody: bounded.body,
+        responseTruncated: bounded.truncated,
+        durationMs,
+        failureReason: response.ok ? undefined : `HTTP ${response.status}`,
+      };
+    } catch (err) {
+      const durationMs = Date.now() - start;
+      if (err instanceof SsrfBlockedError) {
+        return {
+          kind: "blocked",
+          error: err,
+          success: false,
+          responseTruncated: false,
+          durationMs,
+        };
+      }
+      if (err instanceof Error && err.name === "TimeoutError") {
+        return {
+          kind: "timeout",
+          success: false,
+          responseTruncated: false,
+          durationMs,
+          failureReason: "delivery request timed out",
+        };
+      }
+      return {
+        kind: isRedirectError(err) ? "redirect" : "network_error",
+        success: false,
+        responseTruncated: false,
+        durationMs,
+        failureReason: "delivery request failed",
+      };
+    }
   }
 
   private parseEvents(events: unknown): WebhookEventType[] {
@@ -654,6 +862,135 @@ export class WebhookDeliveryService implements OnModuleInit {
     }
     return [];
   }
+}
+
+/**
+ * Result of one pass through the production send path.
+ *
+ * `kind` separates outcomes a caller may want to distinguish (the stored
+ * `failureReason` strings for real deliveries are unchanged by it).
+ */
+type SignedRequestOutcome =
+  | {
+      kind: "response";
+      success: boolean;
+      statusCode: number;
+      responseBody: string;
+      responseTruncated: boolean;
+      durationMs: number;
+      failureReason?: string;
+    }
+  | {
+      kind: "blocked";
+      error: SsrfBlockedError;
+      success: false;
+      statusCode?: undefined;
+      responseBody?: undefined;
+      responseTruncated: false;
+      durationMs: number;
+      failureReason?: undefined;
+    }
+  | {
+      kind: "timeout" | "redirect" | "network_error";
+      success: false;
+      statusCode?: undefined;
+      responseBody?: undefined;
+      responseTruncated: false;
+      durationMs: number;
+      failureReason: string;
+    };
+
+/**
+ * Coarse outcome of a test delivery.
+ *
+ * - `2xx`…`5xx`: the receiver answered with that status class.
+ * - `timeout`: no answer within the delivery timeout.
+ * - `redirect_rejected`: the receiver answered with a redirect, which is never
+ *   followed for a signed payload.
+ * - `destination_rejected`: the outbound destination policy refused the URL.
+ * - `network_error`: connection, TLS, or DNS failure.
+ * - `signing_error`: the endpoint's signing secret could not be decrypted.
+ */
+export const WEBHOOK_TEST_STATUS_CLASSES = [
+  "1xx",
+  "2xx",
+  "3xx",
+  "4xx",
+  "5xx",
+  "timeout",
+  "redirect_rejected",
+  "destination_rejected",
+  "network_error",
+  "signing_error",
+] as const;
+
+export type WebhookTestStatusClass = (typeof WEBHOOK_TEST_STATUS_CLASSES)[number];
+
+/** Diagnostic result of a synthetic test delivery. Contains no secrets. */
+export interface WebhookTestDeliveryResult {
+  webhookId: string;
+  eventId: string;
+  eventType: typeof WEBHOOK_TEST_EVENT_TYPE;
+  synthetic: true;
+  testEventVersion: typeof WEBHOOK_TEST_EVENT_VERSION;
+  sentAt: string;
+  delivered: boolean;
+  statusClass: WebhookTestStatusClass;
+  statusCode: number | null;
+  durationMs: number;
+  failureReason: string | null;
+  response: {
+    /** Redacted receiver body, bounded to `maxBytes` (plus a truncation marker). */
+    body: string | null;
+    truncated: boolean;
+    maxBytes: number;
+  };
+}
+
+function statusClassOf(outcome: SignedRequestOutcome): WebhookTestStatusClass {
+  switch (outcome.kind) {
+    case "response":
+      return `${Math.min(5, Math.max(1, Math.floor(outcome.statusCode / 100)))}xx` as WebhookTestStatusClass;
+    case "blocked":
+      return "destination_rejected";
+    case "timeout":
+      return "timeout";
+    case "redirect":
+      return "redirect_rejected";
+    default:
+      return "network_error";
+  }
+}
+
+/**
+ * With `redirect: "error"`, fetch (undici) rejects a 3xx answer with a
+ * `TypeError` whose cause mentions the redirect.
+ */
+function isRedirectError(err: unknown): boolean {
+  // Duck-typed rather than `instanceof Error`: fetch's errors can come from a
+  // different realm than this module's `Error`.
+  const messageOf = (value: unknown): string =>
+    typeof value === "object" && value !== null && "message" in value
+      ? String((value as { message: unknown }).message)
+      : "";
+  const cause = (err as { cause?: unknown } | null)?.cause;
+  return /redirect/i.test(`${messageOf(err)} ${messageOf(cause)}`);
+}
+
+/**
+ * Redact and bound a receiver response body — the single place the stored
+ * `responseBody` of a real delivery and the diagnostics of a test delivery are
+ * produced, so both obey the same limits.
+ */
+export function boundResponseBody(raw: string): { body: string; truncated: boolean } {
+  const redacted = redactSensitiveResponse(raw);
+  if (redacted.length > MAX_RESPONSE_BODY_BYTES) {
+    return {
+      body: redacted.slice(0, MAX_RESPONSE_BODY_BYTES) + "…[truncated]",
+      truncated: true,
+    };
+  }
+  return { body: redacted, truncated: false };
 }
 
 function redactSensitiveResponse(value: string): string {

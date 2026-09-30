@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ForbiddenException,
   Injectable,
   NotFoundException,
@@ -300,6 +301,38 @@ export class WebhooksService {
       replayedBy: replayedById,
       replayedAt: new Date().toISOString(),
     };
+  }
+
+  /**
+   * Send a synthetic, signed `webhook.test` event to an endpoint and return
+   * redacted delivery diagnostics.
+   *
+   * Role authorization (DEVELOPER or ADMIN) is enforced in the controller; this
+   * asserts the endpoint belongs to the caller's organisation and is active,
+   * the same preconditions a replay has. Nothing is persisted: see
+   * `WebhookDeliveryService.sendTestDelivery`.
+   */
+  async sendTestDelivery(organizationId: string, webhookId: string) {
+    const webhook = await this.prisma.webhook.findUnique({
+      where: { id: webhookId },
+      select: {
+        id: true,
+        organizationId: true,
+        url: true,
+        secretEncrypted: true,
+        status: true,
+      },
+    });
+
+    this.assertOwnership(webhook, organizationId, webhookId);
+
+    if (webhook!.status !== ResourceStatus.ACTIVE) {
+      throw new BadRequestException(
+        "Cannot send a test delivery to a disabled webhook endpoint",
+      );
+    }
+
+    return this.deliveryService.sendTestDelivery(webhook!);
   }
 
   /**
