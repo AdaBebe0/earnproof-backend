@@ -316,6 +316,7 @@ model Organization {
   issuers     Issuer[]
   apiKeys     ApiKey[]
   webhooks    Webhook[]
+  quotaUsage  OrganizationQuotaUsage[]
   auditLogs   AuditLog[]
   members     OrganizationMember[]
   idempotencyRecords IdempotencyRecord[]
@@ -549,6 +550,7 @@ model Proof {
   claim                   ProofClaim?
   verificationEvents      VerificationEvent[]
   anchoringIntents        AnchoringIntent[]
+  shareTokens             ProofShareToken[]
   invoiceSettlement       ProofInvoiceSettlement?
   sharingEvents           ProofSharingEvent[]
   disclosureReceipts      DisclosureReceipt[]
@@ -644,12 +646,18 @@ model VerificationEventLog {
   proofId      String
   metadataHash String
   saltVersion  Int
+  /// Share token that authorised this verification, when it arrived through a
+  /// share link. Only the token row id is recorded — never the raw token or its
+  /// hash — so the owner can see how often a link was used without the event
+  /// identifying the verifier.
+  shareTokenId String?
   createdAt    DateTime            @default(now())
   retainUntil  DateTime
 
   @@index([proofId, createdAt])
   @@index([outcome])
   @@index([retainUntil])
+  @@index([shareTokenId])
 }
 
 model ApiKey {
@@ -691,6 +699,10 @@ model Webhook {
   url              String
   secretEncrypted  String
   events           Json
+  /// Webhook payload schema version this endpoint is pinned to. Existing
+  /// endpoints keep receiving the version they subscribed with until they opt
+  /// in to a newer one; see docs/webhook-payloads.md.
+  payloadVersion   String            @default("1")
   status           ResourceStatus    @default(ACTIVE)
   revision         Int               @default(0)
   createdAt        DateTime          @default(now())
@@ -730,6 +742,7 @@ model WebhookDelivery {
   @@index([webhookId, createdAt])
   @@index([eventId])
   @@index([status, nextRetryAt])
+  @@index([deadLetteredAt])
 }
 
 model AuditLog {
@@ -798,6 +811,55 @@ model AnchoringIntent {
   @@index([proofId])
 }
 
+
+enum ProofShareScope {
+  /// Verification result and public proof metadata only.
+  VERIFY_STATUS
+  /// Verification result plus the signed credential.
+  VERIFY_CREDENTIAL
+}
+
+/// Time-limited, scoped share link for a single proof.
+/// Only a SHA-256 hash of the raw token is stored; the raw token is returned
+/// once at creation. Scope, proof, owner, expiry and use limit are immutable
+/// after issuance (enforced by a database trigger as well as by the service).
+model ProofShareToken {
+  id             String          @id @default(cuid())
+  proofId        String
+  proof          Proof           @relation(fields: [proofId], references: [id])
+  /// Proof owner at issuance — the tenant boundary for list/revoke/use.
+  ownerId        String
+  tokenHash      String          @unique
+  scope          ProofShareScope
+  label          String?
+  maxUses        Int?
+  useCount       Int             @default(0)
+  expiresAt      DateTime
+  revokedAt      DateTime?
+  /// Set when a newer token for the same proof and scope replaced this one.
+  supersededAt   DateTime?
+  supersededById String?
+  lastUsedAt     DateTime?
+  createdAt      DateTime        @default(now())
+
+  @@index([proofId, ownerId])
+  @@index([ownerId])
+  @@index([expiresAt])
+}
+
+/// Fixed-window usage counters for rate-style organization quotas
+/// (proof requests per day, payment syncs per hour). Count-style quotas
+/// (active API keys, webhooks) are computed from the owning tables instead.
+model OrganizationQuotaUsage {
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  quota          String
+  windowStart    DateTime
+  count          Int          @default(0)
+  updatedAt      DateTime     @updatedAt
+
+  @@id([organizationId, quota, windowStart])
+  @@index([windowStart])
 model AuthAuditEvent {
   id                 String        @id @default(cuid())
   eventType          AuthEventType

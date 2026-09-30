@@ -1,5 +1,6 @@
 import { PaymentClassification, ResourceStatus } from "@prisma/client";
 import { PaymentsService } from "./payments.service";
+import { unlimitedQuotas } from "../testing/quotas";
 
 /**
  * Finality stub for tests about the write path. Checkpoint behaviour has its own
@@ -74,6 +75,7 @@ describe("PaymentsService", () => {
       prisma as never,
       stellar as never,
       config as never,
+      unlimitedQuotas() as never,
       finalityStub() as never,
     );
 
@@ -137,6 +139,7 @@ describe("PaymentsService", () => {
       prisma as never,
       stellar as never,
       config as never,
+      unlimitedQuotas() as never,
       finalityStub() as never,
     );
 
@@ -186,6 +189,7 @@ describe("PaymentsService", () => {
       prisma as never,
       stellar as never,
       config as never,
+      unlimitedQuotas() as never,
       finalityStub() as never,
     );
 
@@ -222,6 +226,7 @@ describe("PaymentsService", () => {
       prisma as never,
       {} as never,
       config as never,
+      unlimitedQuotas() as never,
       {} as never,
     );
 
@@ -280,6 +285,7 @@ describe("PaymentsService", () => {
       prisma as never,
       {} as never,
       config as never,
+      unlimitedQuotas() as never,
       {} as never,
     );
 
@@ -319,6 +325,7 @@ describe("PaymentsService", () => {
       prisma as never,
       {} as never,
       config as never,
+      unlimitedQuotas() as never,
       {} as never,
     );
 

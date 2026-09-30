@@ -139,6 +139,29 @@ export const configuration = () => ({
     // with poll rate rather than with anything meaningful.
     cacheTtlMs: Number(process.env.HEALTH_CACHE_TTL_MS ?? 5000),
   },
+  webhooks: {
+    // Attempts per delivery chain before the terminal attempt is
+    // dead-lettered. Automatic retries never exceed this.
+    maxDeliveryAttempts: Number(process.env.WEBHOOK_MAX_DELIVERY_ATTEMPTS ?? 5),
+    // Upper bound on one bounded-batch redrive request.
+    maxRedriveBatchSize: Number(process.env.WEBHOOK_REDRIVE_MAX_BATCH ?? 25),
+  },
+  proofSharing: {
+    // Longest lifetime a share token may be issued with. A token never
+    // outlives the proof it shares either.
+    maxTtlMinutes: Number(process.env.PROOF_SHARE_TOKEN_MAX_TTL_MINUTES ?? 10_080),
+    defaultTtlMinutes: Number(
+      process.env.PROOF_SHARE_TOKEN_DEFAULT_TTL_MINUTES ?? 1_440,
+    ),
+  },
+  // Per-organization operational quotas. Every organization is held to these
+  // limits independently; see docs/quotas.md.
+  quotas: {
+    maxActiveApiKeys: Number(process.env.QUOTA_MAX_ACTIVE_API_KEYS ?? 25),
+    maxWebhooks: Number(process.env.QUOTA_MAX_WEBHOOKS ?? 10),
+    proofRequestsPerDay: Number(process.env.QUOTA_PROOF_REQUESTS_PER_DAY ?? 1_000),
+    syncsPerHour: Number(process.env.QUOTA_SYNCS_PER_HOUR ?? 12),
+  },
   issuerRegistry: {
     enabled: process.env.ISSUER_REGISTRY_ENABLED === "true",
     stellarCliPath: process.env.STELLAR_CLI_PATH ?? "stellar",

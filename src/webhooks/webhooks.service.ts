@@ -12,6 +12,7 @@ import { PrismaService } from "../database/prisma.service";
 import { ConflictException } from "../common/exceptions/domain.exceptions";
 import { CreateWebhookDto } from "./dto/create-webhook.dto";
 import { UpdateWebhookEventsDto } from "./dto/update-webhook-events.dto";
+import { OrganizationQuotaService } from "../quotas/organization-quota.service";
 import { WebhookDeliveryService } from "./webhook-delivery.service";
 import { WebhookCircuitBreakerService } from "./webhook-circuit-breaker.service";
 
@@ -27,6 +28,7 @@ export class WebhooksService {
     private readonly deliveryService: WebhookDeliveryService,
     private readonly circuitBreaker: WebhookCircuitBreakerService,
     configService: ConfigService,
+    private readonly quotas: OrganizationQuotaService,
   ) {
     this.paymentEncryptionKeyring = new PaymentEncryptionKeyringService(
       configService,
@@ -46,6 +48,27 @@ export class WebhooksService {
     // De-duplicate events list
     const events = [...new Set(dto.events)];
 
+    // Quota check and creation commit together; see OrganizationQuotaService.
+    const webhook = await this.prisma.$transaction(async (tx) => {
+      await this.quotas.assertCapacity(tx, organizationId, "webhooks");
+      return tx.webhook.create({
+        data: {
+          organizationId,
+          url: dto.url,
+          secretEncrypted,
+          events,
+          payloadVersion: dto.payloadVersion ?? CURRENT_WEBHOOK_PAYLOAD_VERSION,
+          status: ResourceStatus.ACTIVE,
+        },
+        select: {
+          id: true,
+          url: true,
+          events: true,
+          payloadVersion: true,
+          status: true,
+          createdAt: true,
+        },
+      });
     const webhook = await this.prisma.webhook.create({
       data: {
         organizationId,
@@ -84,6 +107,7 @@ export class WebhooksService {
         id: true,
         url: true,
         events: true,
+        payloadVersion: true,
         status: true,
         revision: true,
         createdAt: true,
@@ -101,6 +125,7 @@ export class WebhooksService {
         organizationId: true,
         url: true,
         events: true,
+        payloadVersion: true,
         status: true,
         revision: true,
         createdAt: true,
@@ -326,6 +351,7 @@ export class WebhooksService {
         id: true,
         eventType: true,
         eventId: true,
+        schemaVersion: true,
         attempt: true,
         status: true,
         statusCode: true,
@@ -337,6 +363,9 @@ export class WebhooksService {
         replayedBy: true,
         deliveredAt: true,
         nextRetryAt: true,
+        deadLetteredAt: true,
+        deadLetterReason: true,
+        redrivenAt: true,
         createdAt: true,
       },
     });

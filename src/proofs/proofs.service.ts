@@ -31,6 +31,9 @@ import { sha256 } from "../common/crypto/hash";
 import { PaymentEncryptionKeyringService } from "../common/crypto/payment-encryption-keyring.service";
 import { ApiErrorCode } from "../common/dto/api-error.dto";
 import { PrismaService } from "../database/prisma.service";
+import { OrganizationQuotaService } from "../quotas/organization-quota.service";
+import { WebhookDeliveryService } from "../webhooks/webhook-delivery.service";
+import { WebhookEventSource } from "../webhooks/webhook-event.types";
 import { AttestationsService } from "../attestations/attestations.service";
 import { WebhookDeliveryService } from "../webhooks/webhook-delivery.service";
 import {
@@ -206,6 +209,7 @@ export class ProofsService {
     private readonly prisma: PrismaService,
     configService: ConfigService,
     private readonly verificationEventService: VerificationEventService,
+    private readonly quotas: OrganizationQuotaService,
     private readonly attestationsService: AttestationsService,
     @Optional()
     private readonly contractAnchoringService?: ContractAnchoringService,
@@ -362,6 +366,9 @@ export class ProofsService {
     const commitment = `sha256:${sha256(credentialHash)}`;
 
     const proof = await this.prisma.$transaction(async (tx) => {
+      // Charged inside the issuing transaction: a rejected or failed issuance
+      // consumes nothing, and concurrent requests cannot overshoot the quota.
+      await this.quotas.consumeForUser(tx, user.id, "proof_requests");
       const assetPolicy = await this.requireActiveAssetPolicy(tx, {
         code: payment.assetCode,
         issuer: payment.assetIssuer,
@@ -870,6 +877,9 @@ export class ProofsService {
     // The intent is enqueued here (PENDING) even before any external call so
     // that a crash after this point is recoverable by the worker.
     const proof = await this.prisma.$transaction(async (tx) => {
+      // Charged inside the issuing transaction: a rejected or failed issuance
+      // consumes nothing, and concurrent requests cannot overshoot the quota.
+      await this.quotas.consumeForUser(tx, user.id, "proof_requests");
       const assetPolicy = await this.requireActiveAssetPolicy(tx, {
         code: input.assetCode,
         issuer: input.assetIssuer ?? null,
@@ -1245,6 +1255,9 @@ export class ProofsService {
     const commitment = `sha256:${sha256(credentialHash)}`;
 
     const proof = await this.prisma.$transaction(async (tx) => {
+      // Charged inside the issuing transaction: a rejected or failed issuance
+      // consumes nothing, and concurrent requests cannot overshoot the quota.
+      await this.quotas.consumeForUser(tx, user.id, "proof_requests");
       const assetPolicy = await this.requireActiveAssetPolicy(tx, {
         code: input.assetCode,
         issuer: input.assetIssuer ?? null,
@@ -1380,10 +1393,13 @@ export class ProofsService {
         ? { anchored: false as const, reason: "pending" as const }
         : { anchored: false as const, reason: "disabled" as const };
 
-    this.emitWebhook(userId, "proof.revoked", {
-      proofId: updated.id,
-      status: updated.status,
-      revokedAt: updated.revokedAt?.toISOString() ?? new Date().toISOString(),
+    this.emitWebhook(userId, {
+      event: "proof.revoked",
+      source: {
+        proofId: updated.id,
+        status: updated.status,
+        revokedAt: updated.revokedAt ?? new Date(),
+      },
     });
 
     return {
@@ -1392,6 +1408,14 @@ export class ProofsService {
     };
   }
 
+  /**
+   * Verify a proof.
+   *
+   * `context.shareTokenId` is set when the verification arrived through a
+   * share link; it is recorded on the privacy-safe verification event so the
+   * owner can see link usage. It does not change the verification outcome.
+   */
+  async verifyProof(proofId: string, context: { shareTokenId?: string } = {}) {
   async verifyProof(
     proofId: string,
     clientContext?: VerificationClientContext,
@@ -1547,6 +1571,20 @@ export class ProofsService {
     // If event recording fails, the verification response is still returned.
     // This ensures verification availability over audit completeness.
     // Event recording errors are caught and logged by the service.
+    this.verificationEventService
+      .recordEvent(
+        outcome,
+        proof.id,
+        {
+          outcome: outcome,
+          timestamp: new Date(),
+        },
+        context,
+      )
+      .catch(() => {
+        // Error already logged by the service
+        // Verification continues unblocked
+      });
     const verificationEventService = this.verificationEventService as VerificationEventService & {
       tryConsumePrivacyBudget?: (proofId: string) => boolean;
     };
@@ -1569,10 +1607,9 @@ export class ProofsService {
       });
     }
 
-    this.emitWebhook(proof.userId, "proof.verified", {
-      proofId: proof.id,
-      result,
-      verifiedAt: new Date().toISOString(),
+    this.emitWebhook(proof.userId, {
+      event: "proof.verified",
+      source: { proofId: proof.id, result, verifiedAt: new Date() },
     });
 
     return {
@@ -1655,30 +1692,29 @@ export class ProofsService {
       createdAt: Date;
     },
   ) {
-    this.emitWebhook(userId, "proof.created", {
-      proofId: proof.id,
-      proofType: proof.proofType,
-      schemaVersion: proof.schemaVersion,
-      status: proof.status,
-      network: proof.network,
-      assetCode: proof.assetCode,
-      assetIssuer: proof.assetIssuer,
-      periodStart: proof.periodStart?.toISOString() ?? null,
-      periodEnd: proof.periodEnd?.toISOString() ?? null,
-      expiresAt: proof.expiresAt.toISOString(),
-      credentialHash: proof.credentialHash,
-      contractTransactionHash: proof.contractTransactionHash ?? null,
-      issuedAt: proof.createdAt.toISOString(),
+    this.emitWebhook(userId, {
+      event: "proof.created",
+      source: {
+        proofId: proof.id,
+        proofType: proof.proofType,
+        credentialSchemaVersion: proof.schemaVersion,
+        status: proof.status,
+        network: proof.network,
+        assetCode: proof.assetCode,
+        assetIssuer: proof.assetIssuer,
+        periodStart: proof.periodStart,
+        periodEnd: proof.periodEnd,
+        expiresAt: proof.expiresAt,
+        credentialHash: proof.credentialHash,
+        contractTransactionHash: proof.contractTransactionHash ?? null,
+        issuedAt: proof.createdAt,
+      },
     });
   }
 
-  private emitWebhook(
-    userId: string,
-    event: "proof.created" | "proof.revoked" | "proof.verified",
-    data: Record<string, unknown>,
-  ) {
+  private emitWebhook(userId: string, domainEvent: WebhookEventSource) {
     this.webhookDeliveryService
-      ?.enqueueForUser(userId, event, { event, data } as never)
+      ?.enqueueForUser(userId, domainEvent)
       .catch(() => undefined);
   }
 

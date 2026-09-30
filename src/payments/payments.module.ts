@@ -1,3 +1,4 @@
+import { QuotasModule } from "../quotas/quotas.module";
 import { Module } from "@nestjs/common";
 import { AuthModule } from "../auth/auth.module";
 import { StellarModule } from "../stellar/stellar.module";
@@ -7,7 +8,7 @@ import { PaymentsService } from "./payments.service";
 import { PaymentClassificationHistoryService } from "./payment-classification-history.service";
 
 @Module({
-  imports: [AuthModule, StellarModule],
+  imports: [AuthModule, StellarModule, QuotasModule],
   controllers: [PaymentsController],
   providers: [PaymentsService, PaymentFinalityService],
   providers: [PaymentsService, PaymentClassificationHistoryService],

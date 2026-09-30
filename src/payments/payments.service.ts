@@ -10,6 +10,7 @@ import { canonicalAssetId } from "../common/assets/asset-identifier";
 import { encryptProtectedAmount } from "../common/crypto/protected-amount";
 import { PaymentEncryptionKeyringService } from "../common/crypto/payment-encryption-keyring.service";
 import { PrismaService } from "../database/prisma.service";
+import { OrganizationQuotaService } from "../quotas/organization-quota.service";
 import { StellarService } from "../stellar/stellar.service";
 import { normalizeMemo } from "../stellar/memo-normalizer";
 import { ledgerSequenceFromPagingToken } from "../stellar/ledger-finality";

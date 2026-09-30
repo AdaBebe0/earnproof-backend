@@ -4,11 +4,15 @@ import {
   Delete,
   ForbiddenException,
   Get,
+  NotFoundException,
   HttpCode,
   HttpStatus,
   Param,
+  HttpCode,
+  HttpStatus,
   Patch,
   Post,
+  Query,
   UseGuards,
 } from "@nestjs/common";
 import {
@@ -30,6 +34,11 @@ import { PrismaService } from "../database/prisma.service";
 import { ApiErrorDto } from "../common/dto/api-error.dto";
 import { SESSION_AUTH_SCHEME } from "../common/swagger/security-schemes";
 import { CreateWebhookDto } from "./dto/create-webhook.dto";
+import {
+  ListDeadLettersQueryDto,
+  RedriveDeadLetterDto,
+  RedriveDeadLettersBatchDto,
+} from "./dto/dead-letter.dto";
 import { UpdateWebhookEventsDto } from "./dto/update-webhook-events.dto";
 import { UpdateWebhookCircuitConfigDto } from "./dto/webhook-circuit-config.dto";
 import { WebhookCircuitStatsDto } from "./dto/webhook-circuit-stats.dto";
@@ -64,6 +73,88 @@ export class WebhooksController {
     private readonly circuitBreakerService: WebhookCircuitBreakerService,
     private readonly prisma: PrismaService,
   ) {}
+
+  // ---------------------------------------------------------------------------
+  // Dead letters (operator: DEVELOPER or ADMIN, own organisation only)
+  //
+  // Declared before the `:id` routes so `dead-letters` is never captured as a
+  // webhook id.
+  // ---------------------------------------------------------------------------
+
+  @Get("dead-letters")
+  @ApiOperation({
+    summary: "List dead-lettered deliveries for your organisation (DEVELOPER or ADMIN)",
+  })
+  async listDeadLetters(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query() query: ListDeadLettersQueryDto,
+  ) {
+    this.requirePrivilegedRole(user);
+    const orgId = await this.requireOrgId(user);
+    return this.deadLetters.list(orgId, query);
+  }
+
+  @Post("dead-letters/redrive")
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: "Redrive a bounded batch of dead-lettered deliveries (DEVELOPER or ADMIN)",
+    description:
+      "Each item is redriven independently and reported with a stable outcome code. " +
+      "An operator reason is required and audited.",
+  })
+  async redriveDeadLetters(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() body: RedriveDeadLettersBatchDto,
+  ) {
+    this.requirePrivilegedRole(user);
+    const orgId = await this.requireOrgId(user);
+    return this.deadLetters.redriveBatch(
+      orgId,
+      body.deliveryIds,
+      user.id,
+      body.reason,
+    );
+  }
+
+  @Get("dead-letters/:deliveryId")
+  @ApiOperation({
+    summary: "Inspect a dead-lettered delivery and its attempt history (DEVELOPER or ADMIN)",
+  })
+  async getDeadLetter(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("deliveryId") deliveryId: string,
+  ) {
+    this.requirePrivilegedRole(user);
+    const orgId = await this.requireOrgId(user);
+    return this.deadLetters.get(orgId, deliveryId);
+  }
+
+  @Post("dead-letters/:deliveryId/redrive")
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: "Redrive one dead-lettered delivery (DEVELOPER or ADMIN)",
+    description:
+      "Creates a new delivery carrying the original event id and payload bytes. " +
+      "Idempotent: a second redrive of the same dead letter returns the first one.",
+  })
+  async redriveDeadLetter(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("deliveryId") deliveryId: string,
+    @Body() body: RedriveDeadLetterDto,
+  ) {
+    this.requirePrivilegedRole(user);
+    const orgId = await this.requireOrgId(user);
+    const result = await this.deadLetters.redrive(
+      orgId,
+      deliveryId,
+      user.id,
+      body.reason,
+    );
+    if (result.outcome === "not_found") {
+      throw new NotFoundException("Dead-lettered delivery not found");
+    }
+    return result;
+  }
 
   // ---------------------------------------------------------------------------
   // Endpoint management
@@ -593,6 +684,7 @@ export class WebhooksController {
   ): void {
     if (user.role !== "DEVELOPER" && user.role !== "ADMIN") {
       throw new ForbiddenException(
+        "Only DEVELOPER or ADMIN users may inspect, replay, or redrive webhook deliveries",
         `Only DEVELOPER or ADMIN users may ${action}`,
       );
     }

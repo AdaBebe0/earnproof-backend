@@ -10,6 +10,7 @@ import {
 } from "@prisma/client";
 import { ApiErrorCode } from "../common/dto/api-error.dto";
 import { ProofsService } from "./proofs.service";
+import { unlimitedQuotas } from "../testing/quotas";
 import { AttestationsService } from "../attestations/attestations.service";
 
 describe("ProofsService payment-receipt proofs", () => {
@@ -124,6 +125,7 @@ describe("ProofsService payment-receipt proofs", () => {
       prisma as never,
       harnessConfig as never,
       events as never,
+      unlimitedQuotas() as never,
       mockAttestationsService,
       contract as never,
     );
