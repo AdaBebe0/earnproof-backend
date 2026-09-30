@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ForbiddenException,
   Injectable,
   NotFoundException,
@@ -11,7 +12,9 @@ import { PrismaService } from "../database/prisma.service";
 import { ConflictException } from "../common/exceptions/domain.exceptions";
 import { CreateWebhookDto } from "./dto/create-webhook.dto";
 import { UpdateWebhookEventsDto } from "./dto/update-webhook-events.dto";
+import { OrganizationQuotaService } from "../quotas/organization-quota.service";
 import { WebhookDeliveryService } from "./webhook-delivery.service";
+import { WebhookCircuitBreakerService } from "./webhook-circuit-breaker.service";
 
 /** Signing secret length in bytes (produces a 64-char hex string). */
 const SECRET_BYTES = 32;
@@ -23,7 +26,9 @@ export class WebhooksService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly deliveryService: WebhookDeliveryService,
+    private readonly circuitBreaker: WebhookCircuitBreakerService,
     configService: ConfigService,
+    private readonly quotas: OrganizationQuotaService,
   ) {
     this.paymentEncryptionKeyring = new PaymentEncryptionKeyringService(
       configService,
@@ -43,6 +48,27 @@ export class WebhooksService {
     // De-duplicate events list
     const events = [...new Set(dto.events)];
 
+    // Quota check and creation commit together; see OrganizationQuotaService.
+    const webhook = await this.prisma.$transaction(async (tx) => {
+      await this.quotas.assertCapacity(tx, organizationId, "webhooks");
+      return tx.webhook.create({
+        data: {
+          organizationId,
+          url: dto.url,
+          secretEncrypted,
+          events,
+          payloadVersion: dto.payloadVersion ?? CURRENT_WEBHOOK_PAYLOAD_VERSION,
+          status: ResourceStatus.ACTIVE,
+        },
+        select: {
+          id: true,
+          url: true,
+          events: true,
+          payloadVersion: true,
+          status: true,
+          createdAt: true,
+        },
+      });
     const webhook = await this.prisma.webhook.create({
       data: {
         organizationId,
@@ -62,6 +88,9 @@ export class WebhooksService {
       },
     });
 
+    // Initialize circuit breaker for new webhook
+    await this.circuitBreaker.initializeCircuit(webhook.id);
+
     return {
       ...webhook,
       // Returned once at creation time only.
@@ -78,6 +107,7 @@ export class WebhooksService {
         id: true,
         url: true,
         events: true,
+        payloadVersion: true,
         status: true,
         revision: true,
         createdAt: true,
@@ -95,6 +125,7 @@ export class WebhooksService {
         organizationId: true,
         url: true,
         events: true,
+        payloadVersion: true,
         status: true,
         revision: true,
         createdAt: true,
@@ -210,6 +241,9 @@ export class WebhooksService {
       },
     });
 
+    // Clean up circuit breaker state
+    await this.circuitBreaker.deleteCircuitState(webhookId);
+
     return { deleted: true, webhookId };
   }
 
@@ -270,6 +304,38 @@ export class WebhooksService {
   }
 
   /**
+   * Send a synthetic, signed `webhook.test` event to an endpoint and return
+   * redacted delivery diagnostics.
+   *
+   * Role authorization (DEVELOPER or ADMIN) is enforced in the controller; this
+   * asserts the endpoint belongs to the caller's organisation and is active,
+   * the same preconditions a replay has. Nothing is persisted: see
+   * `WebhookDeliveryService.sendTestDelivery`.
+   */
+  async sendTestDelivery(organizationId: string, webhookId: string) {
+    const webhook = await this.prisma.webhook.findUnique({
+      where: { id: webhookId },
+      select: {
+        id: true,
+        organizationId: true,
+        url: true,
+        secretEncrypted: true,
+        status: true,
+      },
+    });
+
+    this.assertOwnership(webhook, organizationId, webhookId);
+
+    if (webhook!.status !== ResourceStatus.ACTIVE) {
+      throw new BadRequestException(
+        "Cannot send a test delivery to a disabled webhook endpoint",
+      );
+    }
+
+    return this.deliveryService.sendTestDelivery(webhook!);
+  }
+
+  /**
    * List delivery records for a webhook endpoint.
    * Response body and sensitive headers are never stored in delivery rows,
    * so this is safe to return directly.
@@ -285,6 +351,7 @@ export class WebhooksService {
         id: true,
         eventType: true,
         eventId: true,
+        schemaVersion: true,
         attempt: true,
         status: true,
         statusCode: true,
@@ -296,6 +363,9 @@ export class WebhooksService {
         replayedBy: true,
         deliveredAt: true,
         nextRetryAt: true,
+        deadLetteredAt: true,
+        deadLetterReason: true,
+        redrivenAt: true,
         createdAt: true,
       },
     });
