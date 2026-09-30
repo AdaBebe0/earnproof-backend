@@ -150,6 +150,43 @@ function makeCreatePrisma(
 }
 
 describe("ProofsService", () => {
+  it("refuses a minimum-income proof over a payment held pending ledger reconciliation", async () => {
+    const prisma = {
+      payment: {
+        findMany: jest.fn().mockResolvedValue([
+          {
+            id: "payment_1",
+            assetCode: "XLM",
+            assetIssuer: null,
+            amountEncrypted: `redacted:${Buffer.from("250").toString("base64url")}`,
+            classification: PaymentClassification.INCOME,
+            isEligible: true,
+            finalityHoldAt: new Date("2026-08-02T00:00:00.000Z"),
+            occurredAt: new Date("2026-08-01T00:00:00.000Z"),
+          },
+        ]),
+      },
+      $transaction: jest.fn(),
+    };
+    const service = new ProofsService(prisma as never, config as never, mockVerificationEventService, mockAttestationsService);
+
+    await expect(
+      service.createMinimumIncomeProof(user, {
+        selectedPaymentIds: ["payment_1"],
+        thresholdAmount: "100",
+        assetCode: "XLM",
+        periodStart: "2026-08-01T00:00:00.000Z",
+        periodEnd: "2026-08-31T23:59:59.000Z",
+      }),
+    ).rejects.toThrow("pending ledger reconciliation");
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+    expect(prisma.payment.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        select: expect.objectContaining({ finalityHoldAt: true }),
+      }),
+    );
+  });
+
   it("rejects selected payments below the requested threshold", async () => {
     const prisma = {
       payment: {

@@ -219,6 +219,24 @@ describe("ProofsService payment-receipt proofs", () => {
     }
   });
 
+  it("refuses a payment held pending ledger reconciliation", async () => {
+    const held = harness({
+      ...payment,
+      finalityHoldAt: new Date("2026-08-02T00:00:00.000Z"),
+    } as typeof payment);
+
+    await expect(
+      held.service.createPaymentReceiptProof(user, { paymentId: "payment_1" }),
+    ).rejects.toMatchObject({
+      constructor: UnprocessableEntityException,
+      response: {
+        code: ApiErrorCode.PAYMENT_NOT_ELIGIBLE,
+        message: "Payment is pending ledger reconciliation",
+      },
+    });
+    expect(held.prisma.proof.create).not.toHaveBeenCalled();
+  });
+
   it("rejects ineligibility before exclusion and uses stable codes", async () => {
     const both = harness({
       ...payment,

@@ -75,6 +75,7 @@ describe("ProofsService lifecycle", () => {
     ["ineligible", { isEligible: false }, "eligible income"],
     ["mixed asset", { assetCode: "USDC" }, "requested asset"],
     ["non-owned", { userId: "another_user" }, "invalid"],
+    ["ledger-held", { finalityHoldAt: new Date("2026-07-01T00:00:00.000Z") }, "pending ledger reconciliation"],
   ])("rejects a %s selected payment", async (_case, change, message) => {
     const store = createRecurringProofStore();
     Object.assign(store.payments[1], change);

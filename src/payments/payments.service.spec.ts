@@ -1,6 +1,29 @@
 import { PaymentClassification, ResourceStatus } from "@prisma/client";
 import { PaymentsService } from "./payments.service";
 
+/**
+ * Finality stub for tests about the write path. Checkpoint behaviour has its own
+ * suite (payment-finality.service.spec.ts); here every sync is an initial one.
+ */
+function finalityStub() {
+  return {
+    plan: jest.fn().mockResolvedValue({ mode: "initial" }),
+    readOptions: jest.fn().mockReturnValue({}),
+    inspect: jest.fn().mockReturnValue(null),
+    replacements: jest.fn().mockReturnValue(new Set()),
+    settle: jest.fn().mockResolvedValue({
+      status: "unverified",
+      heldPayments: 0,
+      orphanedPayments: 0,
+    }),
+  };
+}
+
+/** The read result shape `readIncomingPayments` resolves with. */
+function readOf(payments: unknown[]) {
+  return { payments, stopReason: "exhausted", lastCursor: null };
+}
+
 describe("PaymentsService", () => {
   const config = {
     getOrThrow: jest.fn((key: string) => {
@@ -28,18 +51,20 @@ describe("PaymentsService", () => {
       },
     };
     const stellar = {
-      fetchIncomingPayments: jest.fn().mockResolvedValue([
-        {
-          operationId: "op_1",
-          stellarTransactionHash: "tx_1",
-          sourceAddress: "GA",
-          destinationAddress: "GB",
-          assetCode: "XLM",
-          assetIssuer: null,
-          amount: "10",
-          occurredAt: new Date("2026-07-13T00:00:00Z"),
-        },
-      ]),
+      readIncomingPayments: jest.fn().mockResolvedValue(
+        readOf([
+          {
+            operationId: "op_1",
+            stellarTransactionHash: "tx_1",
+            sourceAddress: "GA",
+            destinationAddress: "GB",
+            assetCode: "XLM",
+            assetIssuer: null,
+            amount: "10",
+            occurredAt: new Date("2026-07-13T00:00:00Z"),
+          },
+        ]),
+      ),
       fetchTransaction: jest.fn().mockResolvedValue({
         memo_type: "text",
         memo: "Salary June",
@@ -49,6 +74,7 @@ describe("PaymentsService", () => {
       prisma as never,
       stellar as never,
       config as never,
+      finalityStub() as never,
     );
 
     await expect(
@@ -59,6 +85,7 @@ describe("PaymentsService", () => {
       updated: 0,
       skipped: 0,
       enrichmentErrors: 0,
+      finality: { status: "unverified", heldPayments: 0, orphanedPayments: 0 },
       conflicts: 0,
     });
 
@@ -101,7 +128,7 @@ describe("PaymentsService", () => {
       },
     };
     const stellar = {
-      fetchIncomingPayments: jest.fn().mockResolvedValue(payments),
+      readIncomingPayments: jest.fn().mockResolvedValue(readOf(payments)),
       fetchTransaction: jest
         .fn()
         .mockResolvedValue({ memo_type: "id", memo: "42" }),
@@ -110,6 +137,7 @@ describe("PaymentsService", () => {
       prisma as never,
       stellar as never,
       config as never,
+      finalityStub() as never,
     );
 
     const result = await service.syncPayments({
@@ -135,18 +163,20 @@ describe("PaymentsService", () => {
       },
     };
     const stellar = {
-      fetchIncomingPayments: jest.fn().mockResolvedValue([
-        {
-          operationId: "op_1",
-          stellarTransactionHash: "tx_1",
-          sourceAddress: "GA",
-          destinationAddress: "GB",
-          assetCode: "XLM",
-          assetIssuer: null,
-          amount: "10",
-          occurredAt: new Date("2026-07-13T00:00:00Z"),
-        },
-      ]),
+      readIncomingPayments: jest.fn().mockResolvedValue(
+        readOf([
+          {
+            operationId: "op_1",
+            stellarTransactionHash: "tx_1",
+            sourceAddress: "GA",
+            destinationAddress: "GB",
+            assetCode: "XLM",
+            assetIssuer: null,
+            amount: "10",
+            occurredAt: new Date("2026-07-13T00:00:00Z"),
+          },
+        ]),
+      ),
       fetchTransaction:
         transactionResult instanceof Error
           ? jest.fn().mockRejectedValue(transactionResult)
@@ -156,6 +186,7 @@ describe("PaymentsService", () => {
       prisma as never,
       stellar as never,
       config as never,
+      finalityStub() as never,
     );
 
     await expect(
@@ -191,6 +222,7 @@ describe("PaymentsService", () => {
       prisma as never,
       {} as never,
       config as never,
+      {} as never,
     );
 
     await expect(
@@ -248,6 +280,7 @@ describe("PaymentsService", () => {
       prisma as never,
       {} as never,
       config as never,
+      {} as never,
     );
 
     const [listed] = await service.listPayments("user_1", {});
@@ -286,6 +319,7 @@ describe("PaymentsService", () => {
       prisma as never,
       {} as never,
       config as never,
+      {} as never,
     );
 
     const updated = await service.updateClassification(

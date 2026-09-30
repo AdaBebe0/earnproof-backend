@@ -30,6 +30,17 @@ export const configuration = () => ({
     networkPassphrase:
       process.env.STELLAR_NETWORK_PASSPHRASE ??
       "Test SDF Network ; September 2015",
+    finality: {
+      // How far behind the last verified checkpoint a ledger divergence can
+      // reach. Payments in this window are held and re-verified; anything
+      // older is treated as final. 17,280 ledgers is roughly one day at ~5s.
+      historyLedgers: Number(
+        process.env.STELLAR_FINALITY_HISTORY_LEDGERS ?? 17_280,
+      ),
+      // Pages one reconciliation read may walk. A window deeper than this
+      // stays held and is resumed on the next sync rather than read unbounded.
+      reconciliationMaxPages: Number(
+        process.env.STELLAR_FINALITY_RECONCILIATION_MAX_PAGES ?? 10,
     // Per-network circuit breaker around Horizon transport calls. Defaults are
     // conservative: five consecutive transient failures open the circuit for
     // 30s, then a single probe must succeed twice to close it.

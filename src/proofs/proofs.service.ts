@@ -277,6 +277,7 @@ export class ProofsService {
         amountEncrypted: true,
         classification: true,
         isEligible: true,
+        finalityHoldAt: true,
         occurredAt: true,
       },
     });
@@ -291,6 +292,14 @@ export class ProofsService {
       throw new UnprocessableEntityException({
         code: ApiErrorCode.PAYMENT_NOT_ELIGIBLE,
         message: "Payment is not eligible for proof issuance",
+      });
+    }
+    if (payment.finalityHoldAt) {
+      // The ledger view this payment came from is unreconciled; issuing now
+      // could commit to a payment the canonical ledger does not contain.
+      throw new UnprocessableEntityException({
+        code: ApiErrorCode.PAYMENT_NOT_ELIGIBLE,
+        message: "Payment is pending ledger reconciliation",
       });
     }
     if (payment.classification === PaymentClassification.EXCLUDED) {
@@ -757,6 +766,7 @@ export class ProofsService {
         amountEncrypted: true,
         classification: true,
         isEligible: true,
+        finalityHoldAt: true,
         occurredAt: true,
       },
     });
@@ -774,6 +784,11 @@ export class ProofsService {
       ) {
         throw new BadRequestException(
           "Selected payments must be eligible income payments",
+        );
+      }
+      if (payment.finalityHoldAt) {
+        throw new BadRequestException(
+          "Selected payments are pending ledger reconciliation",
         );
       }
 
@@ -1129,6 +1144,7 @@ export class ProofsService {
         assetIssuer: true,
         classification: true,
         isEligible: true,
+        finalityHoldAt: true,
         occurredAt: true,
       },
     });
@@ -1146,6 +1162,11 @@ export class ProofsService {
       ) {
         throw new BadRequestException(
           "Selected payments must be eligible income payments",
+        );
+      }
+      if (payment.finalityHoldAt) {
+        throw new BadRequestException(
+          "Selected payments are pending ledger reconciliation",
         );
       }
       if (
