@@ -1765,3 +1765,94 @@ model SecretRetrievalReceipt {
   @@index([organizationId, status, expiresAt])
   @@index([organizationId, createdAt])
 }
+
+enum RevocationCheckpointStatus {
+  ACCEPTED
+  QUARANTINED
+}
+
+enum RevocationCheckpointQuarantineReason {
+  LOWER_SEQUENCE
+  SEQUENCE_CONFLICT
+  STALE_OBSERVED_TIME
+  MALFORMED_INPUT
+  ALGORITHM_UNKNOWN
+  WRONG_CONTRACT_ID
+  WRONG_LEDGER
+  REPLAY_DUPLICATE
+}
+
+/// Indexed revocation checkpoints with monotonic enforcement.
+/// Checkpoints commit to a revocation root at a specific sequence per (ledger, contractIdentity, algorithm) stream.
+/// 
+/// Design:
+/// - ledger: Chain identifier (e.g., "stellar", "ethereum")
+/// - contractIdentity: Contract address or identifier
+/// - algorithm: Root computation algorithm (e.g., "sha256", "merkle-tree-v1")
+/// - sequence: Monotonically increasing position in the stream
+/// - root: Hex-encoded commitment root
+/// - observedAt: Timestamp when checkpoint was observed on-chain
+/// - status: ACCEPTED (head advancing) or QUARANTINED (regressed or conflict)
+/// - quarantineReason: Enum reason if quarantined
+/// - quarantineDetails: Bounded message (e.g., "lower by 5 sequences")
+/// - acceptedAt/quarantinedAt: Timestamps for lifecycle tracking
+///
+/// Monotonicity enforcement:
+/// - (ledger, contractIdentity, algorithm, sequence, root) unique constraint ensures idempotency
+/// - Concurrent writers safe via PostgreSQL unique constraint (mutual exclusion)
+/// - Sequence must strictly increase or replay must be identical (same sequence + root)
+///
+/// Quarantine semantics:
+/// - Regressed roots (lower sequence or same sequence, different root) are quarantined
+/// - Quarantined checkpoints never advance the accepted head
+/// - Quarantine persisted for audit and operator review
+model RevocationCheckpoint {
+  id                      String                                  @id @default(cuid())
+  ledger                  String                                  // "stellar", "ethereum", etc.
+  contractIdentity        String                                  // Contract address
+  algorithm               String                                  // "sha256", "merkle-tree-v1", etc.
+  sequence                BigInt                                  // Monotonically increasing per stream
+  root                    String                                  // Hex-encoded commitment root
+  observedAt              DateTime                                // Timestamp when observed on-chain
+  status                  RevocationCheckpointStatus              @default(ACCEPTED)
+  acceptedAt              DateTime                                @default(now())
+  quarantineReason        RevocationCheckpointQuarantineReason?
+  quarantineDetails       String?                                 // Bounded message for diagnostics
+  quarantinedAt           DateTime?
+  createdAt               DateTime                                @default(now())
+  updatedAt               DateTime                                @updatedAt
+
+  // Idempotency constraint: prevents duplicate acceptance of same checkpoint
+  @@unique([ledger, contractIdentity, algorithm, sequence, root], name: "checkpoint_idempotency")
+  // Query index for stream head lookups
+  @@index([ledger, contractIdentity, algorithm, status, sequence], name: "stream_head_query")
+  @@index([status, quarantineReason])
+  @@index([observedAt])
+}
+
+/// Denormalized stream head for O(1) freshness queries.
+/// Tracks the latest accepted checkpoint per (ledger, contractIdentity, algorithm) stream.
+/// Updated atomically when a new checkpoint advances the stream.
+///
+/// Design:
+/// - (ledger, contractIdentity, algorithm) uniquely identifies a stream
+/// - sequence, root, observedAt always point to the current accepted head
+/// - version supports optimistic locking if needed in future
+/// - acceptedAt tracks freshness (staleness = now - acceptedAt)
+model RevocationCheckpointStreamHead {
+  id                    String    @id @default(cuid())
+  ledger                String    // "stellar", "ethereum", etc.
+  contractIdentity      String    // Contract address
+  algorithm             String    // "sha256", "merkle-tree-v1", etc.
+  sequence              BigInt    // Current accepted head sequence
+  root                  String    // Current accepted head root
+  observedAt            DateTime  // Timestamp from head checkpoint
+  acceptedAt            DateTime  // When this head was accepted
+  version               Int       @default(0)  // Optimistic concurrency version
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  // Unique constraint on stream identity
+  @@unique([ledger, contractIdentity, algorithm], name: "stream_unique")
+  @@index([ledger, contractIdentity, algorithm, sequence])
+}
