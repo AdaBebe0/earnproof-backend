@@ -1647,6 +1647,7 @@ model Organization {
   members     OrganizationMember[]
   idempotencyRecords IdempotencyRecord[]
   disputes    ProofDispute[]
+  secretRetrievalReceipts SecretRetrievalReceipt[]
 
   @@index([status])
 }
@@ -1679,4 +1680,54 @@ model Proof {
   @@index([userId, createdAt, id])
   @@index([proofType])
   @@index([expiresAt])
+}
+
+/// One-time secret retrieval receipts.
+/// Persists immutable evidence that a one-time secret (API key, webhook signing secret,
+/// or export token) was revealed to a user or client, without storing the secret itself.
+///
+/// Design:
+/// - secretType: Type of secret revealed (api_key | webhook | export)
+/// - resourceId: ID of the resource (API key ID, webhook ID, export job ID)
+/// - resourceReference: Human-readable identifier (e.g., API key prefix, webhook URL) for user reference
+/// - recipientId: Who received the secret (user ID, API key prefix, or null for capability URLs)
+/// - deliveryChannel: How the secret was delivered (http_response | download_url | email)
+/// - revealedAt: Exact timestamp when the secret was revealed
+/// - acknowledgementHash: SHA-256(resourceId | secretType | revealedAt | orgSalt)
+///   This hash cannot be reversed to recover the secret; it's purely evidence of revelation
+/// - status: Lifecycle status (ACTIVE | EXPIRED | REVOKED)
+/// - expiresAt: When the receipt itself expires (independent of secret expiry)
+/// - metadata: JSON for optional context (IP, user agent, reason, etc.)
+/// - hash/hashVersion/prevHash: Audit chain fields (like AuditLog pattern)
+///
+/// Atomicity:
+/// - Receipt creation always occurs in the same transaction as secret creation
+/// - Successful secret reveal → successful receipt creation (or entire transaction fails)
+model SecretRetrievalReceipt {
+  id                  String        @id @default(cuid())
+  organizationId      String
+  organization        Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  secretType          String        // api_key | webhook | export
+  resourceId          String
+  resourceReference   String?       // prefix, URL, or category summary for user reference
+  recipientId         String?       // user ID, API key prefix, or null for capability URLs
+  deliveryChannel     String        @default("http_response")  // http_response | download_url | email
+  revealedAt          DateTime
+  acknowledgementHash String        // SHA-256(resourceId | secretType | revealedAt | orgSalt)
+  status              String        @default("ACTIVE")  // ACTIVE | EXPIRED | REVOKED
+  expiresAt           DateTime?     // when the receipt expires (independent of secret expiry)
+  metadata            Json          @default("{}")  // optional context: IP, user agent, reason, etc.
+  hashVersion         Int           @default(1)  // for audit chain compatibility
+  prevHash            String?       // previous hash in audit chain
+  hash                String        // SHA-256 of this receipt's state
+  createdAt           DateTime      @default(now())
+  updatedAt           DateTime      @updatedAt
+
+  // Unique constraint to prevent duplicate receipts for the same secret revelation
+  @@unique([organizationId, resourceId, secretType, revealedAt])
+  
+  // Indexes for common query patterns
+  @@index([organizationId, secretType, resourceId])
+  @@index([organizationId, status, expiresAt])
+  @@index([organizationId, createdAt])
 }
