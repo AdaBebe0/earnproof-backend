@@ -221,6 +221,40 @@ enum PolicyStatus {
 enum ConsentAction {
   ACCEPT
   WITHDRAW
+}
+
+/// Verification failure codes for contract state checkpoint digest comparisons.
+/// Fail-closed: unknown versions, network/contract mismatches, and staleness failures
+/// prevent comparison and are recorded as verification failures, never as mismatches.
+enum ContractStateVerificationFailureCode {
+  /// Digest version in response not recognized by backend.
+  UNKNOWN_VERSION
+  /// Digest network claim does not match expected network.
+  NETWORK_MISMATCH
+  /// Digest contract ID does not match expected contract ID.
+  CONTRACT_MISMATCH
+  /// RPC request exceeded timeout (5 seconds) or failed with transient error.
+  FETCH_TIMEOUT
+  /// Transient RPC error (classified via HorizonFault): rate_limited, server_error, network_error.
+  RPC_TRANSIENT_ERROR
+  /// Permanent RPC error: malformed request, connection refused, etc.
+  RPC_PERMANENT_ERROR
+  /// Response could not be JSON-decoded or is malformed.
+  PARSE_ERROR
+  /// Checkpoint digest is stale (older than configured threshold, e.g., > 1 hour).
+  STALE_CONTRACT_STATE
+}
+
+/// Comparison result status codes.
+enum ContractStateComparisonStatus {
+  /// All components match between backend projection and live contract.
+  MATCH
+  /// One or more component values differ.
+  MISMATCH
+  /// Backend projection is newer than contract checkpoint (stale contract).
+  STALE_PROJECTION
+}
+
 model ApiKey {
   id           String   @id @default(uuid())
   key          String   @unique
