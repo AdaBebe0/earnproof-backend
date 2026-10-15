@@ -163,6 +163,9 @@ enum ApiKeyScope {
   PROOF_READ
   PROOF_VERIFY
 
+  // Offline bundles (bounded offline verification)
+  BUNDLES_CREATE
+
   // Payment management and reading
   PAYMENT_READ
   PAYMENT_WRITE
@@ -1855,4 +1858,57 @@ model RevocationCheckpointStreamHead {
   // Unique constraint on stream identity
   @@unique([ledger, contractIdentity, algorithm], name: "stream_unique")
   @@index([ledger, contractIdentity, algorithm, sequence])
+}
+
+/// Bounded offline verification bundles.
+/// A bundle is a time-limited, signed package containing authorized disclosures,
+/// verification keys, and revocation checkpoints enabling offline proof verification.
+///
+/// Design:
+/// - immutable after issuance (update not supported)
+/// - bundleId is user-facing, unique per organization
+/// - scope JSON encodes proofIds, operations, and permissions
+/// - contentsHash (SHA-256 of contents) bound to manifest via signature
+/// - signature covers the entire manifest (HMAC-SHA256, versioned for key rotation)
+/// - issuedAt/expiresAt define validity window; maxFreshnessSeconds bounds checkpoint age
+/// - @@unique([organizationId, bundleId]) enforces idempotency for deterministic generation
+/// - revokedAt/revocationReason for future revocation support (bundles inherit revocation from included proofs)
+model OfflineBundle {
+  id                    String   @id @default(cuid())
+  /// User-facing bundle identifier (e.g., "obb_abc123def456")
+  bundleId              String
+  organizationId        String
+  /// API key ID that requested this bundle (audit trail)
+  requestingApiKeyId    String?
+  /// Bundle format version (e.g., "earnproof.offline-bundle.v1")
+  version               String   @default("earnproof.offline-bundle.v1")
+  /// JSON: { proofIds, operations, organizationId }
+  scope                 Json
+  /// HMAC signature version identifier (e.g., "v1")
+  signatureVersion      String
+  /// Manifest signature (HMAC-SHA256, versioned, "hmac-sha256:v1=..." format)
+  signature             String
+  /// SHA-256 hash of contents object ("sha256:..." format, hex-encoded)
+  contentsHash          String
+  /// JSON contents: { credentials, verificationKeys, checkpoints }
+  contents              Json
+  /// ISO-8601 UTC timestamp when bundle was created
+  issuedAt              DateTime
+  /// ISO-8601 UTC timestamp when bundle expires (inclusive boundary: now >= expiresAt => expired)
+  expiresAt             DateTime
+  /// Maximum age in seconds for included checkpoints to be treated as current
+  maxFreshnessSeconds   Int
+  /// Optional revocation: if proof is revoked, inherited revocation timestamp
+  revokedAt             DateTime?
+  /// Optional revocation reason (if any included proof was revoked)
+  revocationReason      String?
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  // Idempotency: bundleId unique per organization enables same request to return same bundle
+  @@unique([organizationId, bundleId], name: "offline_bundle_idempotency")
+  // Query indexes for common operations
+  @@index([organizationId, expiresAt])
+  @@index([organizationId, createdAt])
+  @@index([expiresAt])
 }
