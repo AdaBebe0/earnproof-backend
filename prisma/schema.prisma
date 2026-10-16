@@ -385,6 +385,12 @@ model ApiKeyScopeAssignment {
   @@unique([apiKeyId, scope])
 }
 
+enum WebhookSecretState {
+  ACTIVE
+  OVERLAP
+  RETIRED
+}
+
 model Webhook {
   id               String            @id @default(cuid())
   organizationId   String
@@ -396,8 +402,36 @@ model Webhook {
   createdAt        DateTime          @default(now())
   updatedAt        DateTime          @updatedAt
   deliveries       WebhookDelivery[]
+  secretVersions   WebhookSecretVersion[]
 
   @@index([organizationId, status])
+}
+
+/**
+ * Versioned signing secrets for a webhook.
+ *
+ * Enables controlled rotation with overlap windows:
+ * - ACTIVE: Primary signing key; all new deliveries use this
+ * - OVERLAP: Can be used by retries and replays; for window when both keys accepted
+ * - RETIRED: No longer used; kept for audit trail
+ *
+ * keyId is a non-secret identifier returned in signature headers for key identification.
+ */
+model WebhookSecretVersion {
+  id                  String                @id @default(cuid())
+  webhookId           String
+  webhook             Webhook               @relation(fields: [webhookId], references: [id], onDelete: Cascade)
+  keyId               String                // Non-secret identifier for this key version
+  secretEncrypted     String                // AES-256-GCM encrypted signing secret
+  state               WebhookSecretState    @default(ACTIVE)
+  activatedAt         DateTime              @default(now())
+  overlapExpiresAt    DateTime?             // When OVERLAP state expires; becomes RETIRED if set and passes
+  createdAt           DateTime              @default(now())
+  updatedAt           DateTime              @updatedAt
+
+  @@unique([webhookId, keyId])
+  @@index([webhookId, state])
+  @@index([webhookId, activatedAt])
 }
 
 enum WebhookDeliveryStatus {
@@ -407,24 +441,25 @@ enum WebhookDeliveryStatus {
 }
 
 model WebhookDelivery {
-  id             String                @id @default(cuid())
-  webhookId      String
-  webhook        Webhook               @relation(fields: [webhookId], references: [id])
-  eventType      String
-  eventId        String
-  payload        Json
-  attempt        Int                   @default(1)
-  status         WebhookDeliveryStatus @default(PENDING)
-  statusCode     Int?
-  responseBody   String?
-  durationMs     Int?
-  failureReason  String?
-  replayOf       String?
-  replayedBy     String?
-  replayKey      String?               @unique
-  deliveredAt    DateTime?
-  nextRetryAt    DateTime?
-  createdAt      DateTime              @default(now())
+  id              String                @id @default(cuid())
+  webhookId       String
+  webhook         Webhook               @relation(fields: [webhookId], references: [id])
+  eventType       String
+  eventId         String
+  payload         Json
+  attempt         Int                   @default(1)
+  status          WebhookDeliveryStatus @default(PENDING)
+  statusCode      Int?
+  responseBody    String?
+  durationMs      Int?
+  failureReason   String?
+  replayOf        String?
+  replayedBy      String?
+  replayKey       String?               @unique
+  signedKeyId     String?               // Key ID used for signing this delivery
+  deliveredAt     DateTime?
+  nextRetryAt     DateTime?
+  createdAt       DateTime              @default(now())
 
   @@index([webhookId, createdAt])
   @@index([eventId])
