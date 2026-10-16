@@ -284,6 +284,9 @@ model User {
   createdAccessReviews    AccessReviewCampaign[] @relation("CreatedAccessReviews")
   reviewedAccessEntries   AccessReviewEntry[]    @relation("ReviewedAccessEntries")
   consentRecords          ConsentRecord[]
+  paymentCheckpointHealthSnapshots PaymentCheckpointHealthSnapshot[]
+  proofExpirationReminderPreference ProofExpirationReminderPreference?
+  proofExpirationReminderDeliveries ProofExpirationReminderDelivery[]
   sessionRiskEvents       SessionRiskEvent[]
 
   @@index([walletHash])
@@ -411,6 +414,7 @@ model Organization {
   residencyAssignments DataResidencyAssignment[]
   schemaImportJobs     SchemaImportJob[]
   supportAccessGrants  SupportAccessGrant[]
+  paymentCheckpointHealthSnapshots PaymentCheckpointHealthSnapshot[]
   transactionConfirmations TransactionConfirmation[]
   domainEventsOutbox       DomainEventOutbox[]
   bulkAdminJobs        BulkAdminJob[]
@@ -769,6 +773,7 @@ model Proof {
   sharingEvents           ProofSharingEvent[]
   disclosureReceipts      DisclosureReceipt[]
   disputes                ProofDispute[]
+  expirationReminderDeliveries ProofExpirationReminderDelivery[]
 
   @@index([userId, status])
   @@index([userId, createdAt, id])
@@ -993,11 +998,19 @@ model AuditLog {
   prevHash       String?
   hash           String        @default("")
 
+  // Correlation graph fields (#283)
+  correlationId  String?
+  parentId       String?
+  parent         AuditLog?     @relation("AuditLogLineage", fields: [parentId], references: [id])
+  children       AuditLog[]    @relation("AuditLogLineage")
+
   @@unique([chainKey, sequence])
   @@index([actorType, actorId])
   @@index([resourceType, resourceId])
   @@index([createdAt])
   @@index([organizationId, createdAt])
+  @@index([organizationId, correlationId])
+  @@index([parentId])
 }
 
 /// Per-chain append cursor for the AuditLog hash chain.
@@ -2123,6 +2136,89 @@ model ProtocolSchema {
   @@index([network, status])
 }
 
+// ---------------------------------------------------------------------------
+// Payment Sync Checkpoint Health Snapshots (#280)
+// ---------------------------------------------------------------------------
+
+enum CheckpointHealthClassification {
+  NORMAL_LAG
+  STALLED_INGESTION
+  HORIZON_OUTAGE
+  RATE_LIMITING
+  REORGANIZATION_RECOVERY
+}
+
+model PaymentCheckpointHealthSnapshot {
+  id                String                         @id @default(cuid())
+  userId            String
+  user              User                           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organizationId    String?
+  organization      Organization?                  @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+  network           String
+  walletAddressHash String
+  ledgerSequence    Int
+  latestKnownLedger Int
+  ledgerLag         Int
+  classification    CheckpointHealthClassification @default(NORMAL_LAG)
+  pagingToken       String
+  isStalled         Boolean                        @default(false)
+  isReorganizing    Boolean                        @default(false)
+  recoveryAttempts  Int                            @default(0)
+  lastRecoveredAt   DateTime?
+  metadata          Json?
+  recordedAt        DateTime                       @default(now())
+  createdAt         DateTime                       @default(now())
+
+  @@index([userId, recordedAt])
+  @@index([network, classification])
+  @@index([organizationId, recordedAt])
+}
+
+// ---------------------------------------------------------------------------
+// Proof Expiration Reminders (#281)
+// ---------------------------------------------------------------------------
+
+enum ReminderDeliveryStatus {
+  SCHEDULED
+  ENQUEUED
+  DELIVERED
+  CANCELLED
+}
+
+model ProofExpirationReminderPreference {
+  id            String    @id @default(cuid())
+  userId        String    @unique
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  enabled       Boolean   @default(true)
+  leadTimeHours Int[]     @default([24, 72, 168])
+  optedOutAt    DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@index([userId, enabled])
+}
+
+model ProofExpirationReminderDelivery {
+  id                 String                 @id @default(cuid())
+  proofId            String
+  proof              Proof                  @relation(fields: [proofId], references: [id], onDelete: Cascade)
+  userId             String
+  user               User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  windowHours        Int
+  targetDate         DateTime
+  status             ReminderDeliveryStatus @default(SCHEDULED)
+  scheduledFor       DateTime
+  deliveredAt        DateTime?
+  cancelledAt        DateTime?
+  cancellationReason String?
+  notificationRecord Json?
+  retryCount         Int                    @default(0)
+  createdAt          DateTime               @default(now())
+  updatedAt          DateTime               @updatedAt
+
+  @@unique([proofId, windowHours])
+  @@index([status, scheduledFor])
+  @@index([userId, status])
 enum TransactionConfirmationStatus {
   SUBMITTED
   PENDING

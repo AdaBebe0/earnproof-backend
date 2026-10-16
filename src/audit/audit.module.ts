@@ -4,13 +4,16 @@ import { AuditAdminService } from "./audit-admin.service";
 import { AuditVerificationService } from "./audit-verification.service";
 import { VerificationEventService } from "./verification-event.service";
 
+import { AuditGraphService } from "./audit-graph.service";
+
 @Module({
   controllers: [AuditAdminController],
   providers: [
     VerificationEventService,
     AuditAdminService,
     AuditVerificationService,
+    AuditGraphService,
   ],
-  exports: [VerificationEventService, AuditVerificationService],
+  exports: [VerificationEventService, AuditVerificationService, AuditGraphService],
 })
 export class AuditModule {}

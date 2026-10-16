@@ -832,3 +832,40 @@ export function verificationOutcomeToAuditOutcome(
 ): AuditOutcome {
   return outcome === VerificationOutcome.VALID ? "success" : "denied";
 }
+
+// ---------------------------------------------------------------------------
+// Audit Correlation Graph Types (#283)
+// ---------------------------------------------------------------------------
+
+export type AuditMissingLinkReason =
+  | "RETENTION_EXPIRED"
+  | "CROSS_TENANT_BLOCKED"
+  | "NOT_FOUND"
+  | "DEPTH_LIMIT_REACHED";
+
+export interface AuditCorrelationGraphNode {
+  id: string;
+  action: string;
+  domain?: string;
+  actorType: string;
+  actorId: string | null;
+  resourceType: string;
+  resourceId: string | null;
+  correlationId: string | null;
+  parentId: string | null;
+  depth: number;
+  createdAt: string;
+  metadata: Record<string, unknown> | null;
+}
+
+export interface AuditCorrelationEdge {
+  fromNodeId: string;
+  toNodeId: string;
+  relationship: "PARENT" | "CHILD" | "CORRELATION";
+}
+
+export interface AuditMissingLink {
+  sourceNodeId: string;
+  targetId: string;
+  reason: AuditMissingLinkReason;
+}
