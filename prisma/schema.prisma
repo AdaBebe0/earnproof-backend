@@ -2457,3 +2457,114 @@ model SecurityNotification {
   @@index([type, createdAt])
   @@index([retainUntil])
 }
+
+
+// ---------------------------------------------------------------------------
+// Contract Successor Migration Readiness Assessment (#306)
+// ---------------------------------------------------------------------------
+
+/// Enum for contract successor finding acknowledgement states.
+/// Used to track lifecycle of operator acknowledgements for readiness findings.
+enum SuccessorFindingSeverity {
+  BLOCKING
+  ADVISORY
+  INFORMATIONAL
+}
+
+/// Acknowledgements of contract successor readiness findings.
+/// Operators can acknowledge expected blocking findings for a bounded time (max 7 days).
+/// This allows planned migrations to proceed despite temporary conditions.
+model ContractSuccessorFindingAcknowledgement {
+  id             String   @id @default(cuid())
+  /// Fully-qualified finding key: network:contractId:findingKey
+  findingKey     String
+  /// Who acknowledged it (actorId from the audit system — never raw PII).
+  acknowledgedBy String
+  /// Human-readable note stored for the audit trail.
+  note           String
+  /// When this acknowledgement expires. After this time it is ignored.
+  expiresAt      DateTime
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([findingKey, expiresAt])
+  @@index([acknowledgedBy, createdAt])
+}
+
+/// Contract successor migration checkpoint.
+/// Immutable record of passed/failed validation gates during successor assessment.
+/// Each successful assessment creates a new checkpoint for audit trail.
+model ContractSuccessorMigrationCheckpoint {
+  id             String   @id @default(cuid())
+  /// Composite key: network:contractId
+  contractKey    String
+  network        String
+  contractId     String
+  /// Ledger sequence observed during checkpoint validation
+  observedLedger BigInt
+  /// Which validation gates were passed (JSON array)
+  passedGates    String[]
+  /// Which validation gates failed (JSON array)
+  failedGates    String[]
+  /// Who initiated the checkpoint (actorId from audit system)
+  initiatedBy    String
+  createdAt      DateTime @default(now())
+
+  @@unique([network, contractId, observedLedger])
+  @@index([network, contractId, createdAt])
+  @@index([observedLedger])
+}
+
+/// Contract successor readiness assessment cache.
+/// Stores the last assessed readiness state for each successor contract.
+/// Cache is invalidated when acknowledgements change or assessment ages beyond threshold.
+model ContractSuccessorReadinessCache {
+  id             String   @id @default(cuid())
+  /// Composite key: network:contractId:version
+  cacheKey       String   @unique
+  network        String
+  contractId     String
+  expectedVersion Int
+  /// Latest assessment verdict: ready | not_ready
+  status         String   @db.VarChar(16)
+  /// Reason if not ready (deterministic status code, never raw error)
+  reason         String?
+  /// Serialized findings (JSON array)
+  findings       Json
+  /// Overall severity: blocking | advisory | informational | none
+  overall        String   @db.VarChar(16)
+  /// When the assessment was performed
+  assessedAt     DateTime
+  /// Latest passed checkpoint (JSON)
+  latestCheckpoint Json?
+  /// How long the assessment remains valid (ms)
+  cacheTtlMs     Int      @default(5000)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([network, contractId])
+  @@index([status, createdAt])
+  @@index([updatedAt])
+}
+
+/// Contract identity and versioning for successor tracking.
+/// Maps network + contractId to schema versions for compatibility checks.
+model ContractVersion {
+  id             String   @id @default(cuid())
+  network        String
+  contractId     String
+  /// Schema version deployed on this contract
+  schemaVersion  Int
+  /// When this version was observed live
+  observedAt     DateTime
+  /// Ledger sequence when first observed
+  observedLedger BigInt?
+  /// Whether this version is still current
+  isCurrent      Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([network, contractId, schemaVersion])
+  @@index([network, contractId, isCurrent])
+  @@index([network, isCurrent])
+}
