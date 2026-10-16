@@ -12,6 +12,7 @@ import { StructuredLogger } from "../common/logger";
 import { PrismaService } from "../database/prisma.service";
 import { WebhookEnvelope, WebhookEventType } from "./webhook-event.types";
 import { WebhookSigningService } from "./webhook-signing.service";
+import { WebhookSecretVersioningService } from "./webhook-secret-versioning.service";
 import {
   SsrfBlockedError,
   assertSafeWebhookDestination,
@@ -60,6 +61,7 @@ export class WebhookDeliveryService implements OnModuleInit {
   constructor(
     private readonly prisma: PrismaService,
     private readonly signing: WebhookSigningService,
+    private readonly secretVersioning: WebhookSecretVersioningService,
     configService: ConfigService,
   ) {
     this.paymentEncryptionKeyring = new PaymentEncryptionKeyringService(
@@ -288,7 +290,6 @@ export class WebhookDeliveryService implements OnModuleInit {
           select: {
             id: true,
             url: true,
-            secretEncrypted: true,
             status: true,
           },
         },
@@ -313,24 +314,69 @@ export class WebhookDeliveryService implements OnModuleInit {
     }
 
     const url = delivery.webhook.url;
-    const secretEncrypted = delivery.webhook.secretEncrypted;
 
-    // Decrypt signing secret — never stored in plain text or in delivery logs.
-    let signingSecret: string;
-    try {
-      signingSecret = this.paymentEncryptionKeyring.decrypt(secretEncrypted);
-    } catch (err) {
-      this.logger.error(
-        `Failed to decrypt signing secret for webhook ${delivery.webhook.id}: ${String(err)}`,
-      );
-      await this.prisma.webhookDelivery.update({
-        where: { id: deliveryId },
-        data: {
-          status: WebhookDeliveryStatus.FAILED,
-          failureReason: "signing secret decryption failure",
-        },
-      });
-      return;
+    // Determine which key to use for signing:
+    // - On first attempt (attempt === 1): use ACTIVE key
+    // - On retries: preserve the original key if it's still usable (ACTIVE or OVERLAP),
+    //              otherwise upgrade to ACTIVE key
+    let signedKeyId: string | undefined;
+    let signingSecret: string | undefined;
+
+    if (delivery.attempt === 1) {
+      // First attempt: always use the ACTIVE key
+      const activeSecret = await this.secretVersioning.getActiveSecret(delivery.webhookId);
+      if (!activeSecret) {
+        this.logger.error(
+          `No ACTIVE signing secret found for webhook ${delivery.webhookId}; skipping delivery`,
+        );
+        await this.prisma.webhookDelivery.update({
+          where: { id: deliveryId },
+          data: {
+            status: WebhookDeliveryStatus.FAILED,
+            failureReason: "no active signing secret",
+          },
+        });
+        return;
+      }
+      signedKeyId = activeSecret.keyId;
+      signingSecret = activeSecret.rawSecret;
+    } else {
+      // Retry: try to preserve the original key, but upgrade if needed
+      const originalKeyId = delivery.signedKeyId;
+
+      if (originalKeyId) {
+        // Try to use the original key if still usable
+        const originalSecret = await this.secretVersioning.getSecretByKeyId(
+          delivery.webhookId,
+          originalKeyId,
+        );
+
+        if (originalSecret && originalSecret.state !== "RETIRED") {
+          signedKeyId = originalKeyId;
+          signingSecret = originalSecret.rawSecret;
+        }
+      }
+
+      // If original key is no longer usable, upgrade to ACTIVE
+      if (!signingSecret) {
+        const activeSecret = await this.secretVersioning.getActiveSecret(delivery.webhookId);
+        if (!activeSecret) {
+          this.logger.error(
+            `No ACTIVE signing secret found for webhook ${delivery.webhookId} on retry; skipping delivery`,
+          );
+          await this.prisma.webhookDelivery.update({
+            where: { id: deliveryId },
+            data: {
+              status: WebhookDeliveryStatus.FAILED,
+              failureReason: "no active signing secret on retry",
+            },
+          });
+          return;
+        }
+        signedKeyId = activeSecret.keyId;
+        signingSecret = activeSecret.rawSecret;
+        // Note: we update the delivery to track the upgraded key
+      }
     }
 
     // The full public payload is persisted, so retries and crash recovery
@@ -340,7 +386,13 @@ export class WebhookDeliveryService implements OnModuleInit {
     const body = JSON.stringify(envelope);
     const timestamp = Math.floor(Date.now() / 1000);
 
-    const signature = this.signing.sign(signingSecret, timestamp, delivery.eventId, body);
+    const signature = this.signing.sign(
+      signingSecret,
+      timestamp,
+      delivery.eventId,
+      signedKeyId,
+      body,
+    );
 
     let statusCode: number | undefined;
     let responseBody: Prisma.InputJsonValue | undefined;
@@ -391,6 +443,7 @@ export class WebhookDeliveryService implements OnModuleInit {
             durationMs,
             failureReason,
             deliveredAt: new Date(),
+            signedKeyId,
           },
         });
         this.logger.warn(`Delivery ${deliveryId} blocked by SSRF guard: ${failureReason}`);
@@ -412,10 +465,11 @@ export class WebhookDeliveryService implements OnModuleInit {
           responseBody,
           durationMs,
           deliveredAt: new Date(),
+          signedKeyId,
         },
       });
       this.logger.log(
-        `Delivery ${deliveryId} succeeded (attempt ${delivery.attempt}, ${durationMs}ms, HTTP ${statusCode})`,
+        `Delivery ${deliveryId} succeeded (attempt ${delivery.attempt}, keyId=${signedKeyId}, ${durationMs}ms, HTTP ${statusCode})`,
       );
       return;
     }
@@ -431,6 +485,7 @@ export class WebhookDeliveryService implements OnModuleInit {
           durationMs,
           failureReason,
           deliveredAt: new Date(),
+          signedKeyId,
         },
       });
       this.logger.warn(
@@ -455,6 +510,7 @@ export class WebhookDeliveryService implements OnModuleInit {
         durationMs,
         failureReason,
         deliveredAt: new Date(),
+        signedKeyId,
       },
     });
 
@@ -467,13 +523,14 @@ export class WebhookDeliveryService implements OnModuleInit {
         attempt: nextAttempt,
         status: WebhookDeliveryStatus.PENDING,
         replayOf: delivery.replayOf, // carry through if this is a replay
+        signedKeyId, // preserve the key version for the retry
         nextRetryAt,
       },
       select: { id: true },
     });
 
     this.logger.log(
-      `Delivery ${deliveryId} failed (attempt ${delivery.attempt}); retrying as ${retryDelivery.id} in ${delay}ms`,
+      `Delivery ${deliveryId} failed (attempt ${delivery.attempt}, keyId=${signedKeyId}); retrying as ${retryDelivery.id} in ${delay}ms`,
     );
 
     if (holdAggregateQueue) {
