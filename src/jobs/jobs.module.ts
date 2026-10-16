@@ -24,6 +24,7 @@ import { ProofSharingCleanupJob } from "./proof-sharing-cleanup.job";
 import { RetentionCleanupService } from "./retention/retention-cleanup.service";
 import { RetentionJob } from "./retention/retention.job";
 import { WebhookCertificateExpiryJob } from "./webhook-certificate-expiry.job";
+import { DomainEventOutboxWorkerService } from "./domain-event-outbox-worker.service";
 
 @Module({
   imports: [
@@ -40,6 +41,7 @@ import { WebhookCertificateExpiryJob } from "./webhook-certificate-expiry.job";
     ContractAnchoringService,
     AnchoringWorkerService,
     PaymentBackfillWorkerService,
+    DomainEventOutboxWorkerService,
     AnchoringReconcilerService,
     IssuerAddressRotationJob,
     ProofExpirationReconcilerService,
@@ -57,6 +59,8 @@ import { WebhookCertificateExpiryJob } from "./webhook-certificate-expiry.job";
   ],
   exports: [
     AnchoringWorkerService,
+    PaymentBackfillWorkerService,
+    DomainEventOutboxWorkerService,
     AnchoringReconcilerService,
     ProofExpirationReconcilerService,
     ProofSharingCleanupJob,
