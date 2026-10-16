@@ -407,6 +407,7 @@ model Organization {
   accessReviews AccessReviewCampaign[]
   disputes    ProofDispute[]
   supportedAssets SupportedAsset[]
+  supportAccessGrants SupportAccessGrant[]
 
   @@index([status])
   @@index([archivedAt])
@@ -1857,4 +1858,39 @@ model PaymentBackfillJob {
 
   @@index([userId, status])
   @@index([status, leaseExpiresAt])
+}
+
+// ---------------------------------------------------------------------------
+// Time-limited support access grants (#318)
+// ---------------------------------------------------------------------------
+
+enum SupportAccessStatus {
+  PENDING
+  APPROVED
+  ACTIVE
+  REVOKED
+  EXPIRED
+}
+
+model SupportAccessGrant {
+  id               String              @id @default(cuid())
+  organizationId   String
+  organization     Organization        @relation(fields: [organizationId], references: [id])
+  supportUserId    String
+  requestedById    String
+  approvedById     String?
+  reason           String
+  capabilities     Json
+  status           SupportAccessStatus @default(PENDING)
+  expiresAt        DateTime
+  activatedAt      DateTime?
+  revokedAt        DateTime?
+  revokedById      String?
+  revocationReason String?
+  createdAt        DateTime            @default(now())
+  updatedAt        DateTime            @updatedAt
+
+  @@index([organizationId, status])
+  @@index([supportUserId, status])
+  @@index([expiresAt])
 }
