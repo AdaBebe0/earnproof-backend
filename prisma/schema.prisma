@@ -233,6 +233,23 @@ enum PolicyStatus {
 enum ConsentAction {
   ACCEPT
   WITHDRAW
+}
+
+enum InvitationDeliveryOutcome {
+  SENT
+  BOUNCED
+  COMPLAINT
+  SUPPRESSED
+  RATE_LIMITED
+  FAILED
+}
+
+enum InvitationOverrideReason {
+  COMPLIANCE_REVIEW
+  CUSTOMER_REQUEST
+  FRAUD_INVESTIGATION
+  TECHNICAL_RECOVERY
+  POLICY_EXCEPTION
 model ApiKey {
   id           String   @id @default(uuid())
   key          String   @unique
@@ -1801,6 +1818,13 @@ model Organization {
   members     OrganizationMember[]
   idempotencyRecords IdempotencyRecord[]
   disputes    ProofDispute[]
+  invitationSuppressions InvitationDeliverySuppression[]
+  invitationOutcomes InvitationDeliveryOutcomeRecord[]
+  invitationCooldowns InvitationResendCooldown[]
+  invitationAttemptWindows InvitationResendAttemptWindow[]
+  invitationQuota InvitationDeliveryQuota?
+  invitationOverrides InvitationDeliveryOverride[]
+  invitationAuditEvents InvitationDeliveryAuditEvent[]
 
   @@index([status])
 }
@@ -1833,4 +1857,177 @@ model Proof {
   @@index([userId, createdAt, id])
   @@index([proofType])
   @@index([expiresAt])
+}
+
+/// Hashed email suppression entries to prevent delivery to bounced/complained addresses.
+/// Stores salted SHA-256 hashes to prevent enumeration while enabling deduplication.
+/// Tenant-scoped: one organization cannot see another's suppression list.
+model InvitationDeliverySuppression {
+  id                String          @id @default(cuid())
+  organizationId    String
+  organization      Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  /// SHA-256 hash of (email + organizationSecret) to prevent enumeration across tenants.
+  recipientEmailHash String
+  /// Reason for suppression: BOUNCED, COMPLAINT, MANUAL_REMOVAL, POLICY_VIOLATION
+  reason            String
+  /// Original delivery outcome that caused suppression (if applicable).
+  sourceOutcome     InvitationDeliveryOutcome?
+  /// ISO timestamp when the suppression was triggered.
+  suppressedAt      DateTime        @default(now())
+  /// When the suppression should expire (null = permanent).
+  expiresAt         DateTime?
+  /// Free-form operator note (bounded, redacted).
+  note              String?         @db.VarChar(500)
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  /// Compound unique: organization + email hash prevents duplicate suppressions per tenant.
+  @@unique([organizationId, recipientEmailHash])
+  @@index([organizationId, expiresAt])
+  @@index([suppressedAt])
+}
+
+/// Per-tenant invitation delivery outcome tracking.
+/// Records delivery attempts and their outcomes for audit and abuse detection.
+model InvitationDeliveryOutcomeRecord {
+  id                String          @id @default(cuid())
+  organizationId    String
+  organization      Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  /// SHA-256 hash of (recipient email + organizationSecret).
+  recipientEmailHash String
+  /// Delivery outcome: SENT, BOUNCED, COMPLAINT, SUPPRESSED, RATE_LIMITED, FAILED.
+  outcome           InvitationDeliveryOutcome
+  /// HTTP status code (if applicable).
+  statusCode        Int?
+  /// Bounded failure reason (never raw error message).
+  failureReason     String?         @db.VarChar(200)
+  /// Number of delivery attempts for this invitation.
+  attemptCount      Int             @default(1)
+  /// ISO timestamp of the delivery attempt.
+  attemptedAt       DateTime        @default(now())
+  /// When this outcome should be cleaned up for retention.
+  expiresAt         DateTime
+  createdAt         DateTime        @default(now())
+
+  @@index([organizationId, recipientEmailHash, createdAt])
+  @@index([organizationId, outcome, attemptedAt])
+  @@index([expiresAt])
+}
+
+/// Per-recipient resend cooldown to prevent delivery storms.
+/// Resets when cooldown period expires or when an override is applied.
+model InvitationResendCooldown {
+  id                String          @id @default(cuid())
+  organizationId    String
+  organization      Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  /// SHA-256 hash of (recipient email + organizationSecret).
+  recipientEmailHash String
+  /// Last invitation sent to this recipient (for cooldown calculation).
+  lastSentAt        DateTime
+  /// When the cooldown period expires and resend becomes available.
+  availableAt       DateTime
+  /// Optional reason cooldown was set (e.g., "BOUNCE_DETECTED").
+  reason            String?
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  /// Compound unique: organization + email hash ensures one cooldown per recipient per tenant.
+  @@unique([organizationId, recipientEmailHash])
+  @@index([organizationId, availableAt])
+}
+
+/// Per-recipient, per-hour resend attempts counter for rate limiting.
+/// Resets on hourly boundary. Used to enforce per-recipient limits.
+model InvitationResendAttemptWindow {
+  id                String          @id @default(cuid())
+  organizationId    String
+  organization      Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  /// SHA-256 hash of (recipient email + organizationSecret).
+  recipientEmailHash String
+  /// Start of the hourly window (ISO timestamp).
+  windowStart       DateTime
+  /// Number of delivery attempts in this window.
+  attemptCount      Int             @default(0)
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  /// Compound unique: organization + email hash + window ensures one counter per window.
+  @@unique([organizationId, recipientEmailHash, windowStart])
+  @@index([organizationId, windowStart])
+}
+
+/// Per-tenant invitation delivery quota tracking (e.g., invitations per day).
+/// Fixed-window counter; resets daily.
+model InvitationDeliveryQuota {
+  organizationId    String          @id
+  organization      Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  /// Start of the current quota window (ISO date at midnight UTC).
+  windowStart       DateTime
+  /// Number of invitations sent in this window.
+  count             Int             @default(0)
+  /// Maximum invitations allowed per day (null = unlimited).
+  limit             Int?
+  updatedAt         DateTime        @updatedAt
+
+  @@index([organizationId, windowStart])
+}
+
+/// Authorized override of suppression or rate limits.
+/// Requires recent authorization (recent signed assertion). Single-use.
+/// Reviewed and audited; only ADMIN+ can create.
+model InvitationDeliveryOverride {
+  id                String          @id @default(cuid())
+  organizationId    String
+  organization      Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  /// SHA-256 hash of (recipient email + organizationSecret).
+  recipientEmailHash String
+  /// What is being overridden: SUPPRESSION, RATE_LIMIT, COOLDOWN.
+  overrideType      String
+  /// Reason: COMPLIANCE_REVIEW, CUSTOMER_REQUEST, FRAUD_INVESTIGATION, etc.
+  reason            InvitationOverrideReason
+  /// Who authorized this override (user id, never raw PII).
+  authorizedById    String
+  /// ISO timestamp of the authorization (must be recent, e.g. < 1 hour).
+  authorizedAt      DateTime
+  /// SHA-256 of the recent authorization assertion token.
+  assertionTokenHash String
+  /// Optional description of the override decision.
+  description       String?         @db.VarChar(1000)
+  /// When this override expires (null = permanent until manually cleared).
+  expiresAt         DateTime?
+  /// Set when the override is explicitly revoked or cleared.
+  revokedAt         DateTime?
+  /// Who revoked this override (if revoked).
+  revokedById       String?
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  @@index([organizationId, recipientEmailHash])
+  @@index([organizationId, overrideType, expiresAt])
+  @@index([authorizedById, createdAt])
+  @@index([expiresAt])
+}
+
+/// Audit trail for invitation delivery control changes.
+/// Links to Organization AuditLog via chainKey for tamper detection.
+model InvitationDeliveryAuditEvent {
+  id                String          @id @default(cuid())
+  organizationId    String
+  organization      Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  /// Action: ADD_SUPPRESSION, REMOVE_SUPPRESSION, APPLY_OVERRIDE, REVOKE_OVERRIDE, RESET_COOLDOWN.
+  action            String
+  /// Hash of recipient email (for sensitive PII protection).
+  recipientEmailHash String?
+  /// Actor: user id, never raw PII.
+  actorId           String
+  /// Override reason if applicable.
+  overrideReason    String?
+  /// Metadata: { suppressionReason, outcomeCode, limitExceeded, etc. }
+  metadata          Json?
+  /// When the event occurred.
+  occurredAt        DateTime        @default(now())
+  createdAt         DateTime        @default(now())
+
+  @@index([organizationId, action, occurredAt])
+  @@index([actorId, occurredAt])
 }
