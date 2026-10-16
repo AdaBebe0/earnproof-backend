@@ -11,11 +11,8 @@ import { Agent, type Dispatcher } from "undici";
 import { decryptProtectedAmount } from "../common/crypto/protected-amount";
 import { PrismaService } from "../database/prisma.service";
 import { WebhookClientCertificateService } from "./webhook-client-certificate.service";
-import { WebhookEnvelope, WebhookEventType } from "./webhook-event.types";
 import { PaymentEncryptionKeyringService } from "../common/crypto/payment-encryption-keyring.service";
 import { StructuredLogger } from "../common/logger";
-import { PrismaService } from "../database/prisma.service";
-import { WebhookEventSource, WebhookEventType } from "./webhook-event.types";
 import {
   payloadDeprecation,
   serializeWebhookEvent,
@@ -25,6 +22,7 @@ import {
   WEBHOOK_TEST_EVENT_TYPE,
   WEBHOOK_TEST_EVENT_VERSION,
   WebhookEnvelope,
+  WebhookEventSource,
   WebhookEventType,
   WebhookTestEnvelope,
 } from "./webhook-event.types";
@@ -93,10 +91,9 @@ type WebhookChain = { tail: Promise<void> };
 
 @Injectable()
 export class WebhookDeliveryService implements OnModuleInit {
-  private readonly logger = new Logger(WebhookDeliveryService.name);
+  private readonly logger = new StructuredLogger(WebhookDeliveryService.name);
   private readonly encryptionKey: string;
   private readonly maxAttempts: number;
-  private readonly logger = new StructuredLogger(WebhookDeliveryService.name);
   private readonly paymentEncryptionKeyring: PaymentEncryptionKeyringService;
 
   /**
@@ -116,14 +113,14 @@ export class WebhookDeliveryService implements OnModuleInit {
     this.maxAttempts =
       configService.get<number>("webhooks.maxDeliveryAttempts") ??
       DEFAULT_MAX_DELIVERY_ATTEMPTS;
+    this.paymentEncryptionKeyring = new PaymentEncryptionKeyringService(
+      configService,
+    );
   }
 
   /** The configured retry threshold: attempts allowed per delivery chain. */
   get maxDeliveryAttempts(): number {
     return this.maxAttempts;
-    this.paymentEncryptionKeyring = new PaymentEncryptionKeyringService(
-      configService,
-    );
   }
 
   /**
@@ -166,7 +163,8 @@ export class WebhookDeliveryService implements OnModuleInit {
    */
   async enqueueForUser(
     userId: string,
-    domainEvent: WebhookEventSource,
+    eventOrDomain: WebhookEventType | WebhookEventSource,
+    maybeEnvelope?: Omit<WebhookEnvelope, "id" | "specVersion" | "createdAt">,
   ): Promise<void> {
     // Resolve which organisations the user belongs to
     const user = await this.prisma.user.findUnique({
@@ -182,7 +180,7 @@ export class WebhookDeliveryService implements OnModuleInit {
     if (!user || user.organizations.length === 0) return;
 
     const orgIds = user.organizations.map((o) => o.id);
-    await this.enqueueForOrganizations(orgIds, eventType, envelope);
+    await this.enqueueForOrganizations(orgIds, eventOrDomain, maybeEnvelope);
   }
 
   /**
@@ -203,8 +201,8 @@ export class WebhookDeliveryService implements OnModuleInit {
 
   private async enqueueForOrganizations(
     orgIds: string[],
-    eventType: WebhookEventType,
-    envelope: Omit<WebhookEnvelope, "id" | "specVersion" | "createdAt">,
+    eventOrDomain: WebhookEventType | WebhookEventSource,
+    maybeEnvelope?: Omit<WebhookEnvelope, "id" | "specVersion" | "createdAt">,
   ): Promise<void> {
     if (orgIds.length === 0) return;
 
@@ -223,36 +221,66 @@ export class WebhookDeliveryService implements OnModuleInit {
     const eventId = randomUUID();
     const occurredAt = new Date();
 
+    const isDomainSource =
+      typeof eventOrDomain === "object" &&
+      eventOrDomain !== null &&
+      "event" in eventOrDomain;
+    const eventType: WebhookEventType = isDomainSource
+      ? (eventOrDomain as WebhookEventSource).event
+      : (eventOrDomain as WebhookEventType);
+
     for (const hook of webhooks) {
       const subscribedEvents = this.parseEvents(hook.events);
-      if (!subscribedEvents.includes(domainEvent.event)) continue;
+      if (!subscribedEvents.includes(eventType)) continue;
 
-      let serialized: ReturnType<typeof serializeWebhookEvent>;
-      try {
-        serialized = serializeWebhookEvent({
-          event: domainEvent.event,
-          source: domainEvent.source as never,
-          eventId,
-          occurredAt,
-          version: hook.payloadVersion,
-        });
-      } catch (err) {
-        // Fail closed: an event that cannot be serialized to the endpoint's
-        // declared contract is not delivered at all.
-        this.logger.error(
-          `Webhook ${hook.id}: cannot serialize ${domainEvent.event} for payload version ${hook.payloadVersion}: ${String(err)}`,
-        );
-        continue;
+      let serializedEnvelope: unknown;
+      let serializedBody: string;
+      let schemaVersion: string;
+
+      if (isDomainSource) {
+        const domain = eventOrDomain as WebhookEventSource;
+        try {
+          const serialized = serializeWebhookEvent({
+            event: domain.event,
+            source: domain.source as never,
+            eventId,
+            occurredAt,
+            version: hook.payloadVersion,
+          });
+          serializedEnvelope = serialized.envelope;
+          serializedBody = serialized.body;
+          schemaVersion = serialized.schemaVersion;
+        } catch (err) {
+          // Fail closed: an event that cannot be serialized to the endpoint's
+          // declared contract is not delivered at all.
+          this.logger.error(
+            `Webhook ${hook.id}: cannot serialize ${domain.event} for payload version ${hook.payloadVersion}: ${String(err)}`,
+          );
+          continue;
+        }
+      } else {
+        const fullEnvelope: any = {
+          ...maybeEnvelope,
+          id: eventId,
+          event: eventType,
+          schemaVersion: hook.payloadVersion,
+          specVersion: "1",
+          createdAt: occurredAt.toISOString(),
+          data: (maybeEnvelope as any)?.data ?? {},
+        };
+        serializedEnvelope = fullEnvelope;
+        serializedBody = JSON.stringify(fullEnvelope);
+        schemaVersion = hook.payloadVersion;
       }
 
       const delivery = await this.prisma.webhookDelivery.create({
         data: {
           webhookId: hook.id,
-          eventType: domainEvent.event,
+          eventType,
           eventId,
-          payload: serialized.envelope as unknown as Prisma.InputJsonValue,
-          schemaVersion: serialized.schemaVersion,
-          payloadBody: serialized.body,
+          payload: serializedEnvelope as unknown as Prisma.InputJsonValue,
+          schemaVersion,
+          payloadBody: serializedBody,
           attempt: 1,
           status: WebhookDeliveryStatus.PENDING,
         },
@@ -262,7 +290,7 @@ export class WebhookDeliveryService implements OnModuleInit {
       // Initialize circuit breaker for webhook if needed
       await this.circuitBreaker.initializeCircuit(hook.id);
 
-      this.scheduleDelivery(delivery.id, hook.id, 0, fullEnvelope);
+      this.scheduleDelivery(delivery.id, hook.id, 0);
     }
   }
 
@@ -377,13 +405,7 @@ export class WebhookDeliveryService implements OnModuleInit {
                 return;
               }
 
-              await this.runDelivery(
-                deliveryId,
-                envelope,
-                undefined,
-                undefined,
-                true,
-              );
+              await this.runDelivery(deliveryId, true);
             } catch {
               // runDelivery swallows its own errors and logs them;
               // we must not let an uncaught rejection break the chain.
@@ -489,24 +511,25 @@ export class WebhookDeliveryService implements OnModuleInit {
     // The persisted bytes are exactly what was serialized when the event
     // occurred. Every attempt signs and sends these bytes, never a
     // re-serialization of `payload`.
-    const body = delivery.payloadBody;
+    const body = delivery.payloadBody ?? JSON.stringify(delivery.payload);
     const timestamp = Math.floor(Date.now() / 1000);
 
     const signature = this.signing.sign(signingSecret, timestamp, delivery.eventId, body);
 
+    const schemaVersion = delivery.schemaVersion ?? "1";
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
       "X-EarnProof-Timestamp": String(timestamp),
       "X-EarnProof-Delivery": delivery.eventId,
       "X-EarnProof-Event": delivery.eventType,
-      "X-EarnProof-Schema-Version": delivery.schemaVersion,
+      "X-EarnProof-Schema-Version": schemaVersion,
       "X-EarnProof-Signature": signature,
     };
     // Deprecation is announced in delivery metadata, never in the body: the
     // body is the contract under discussion (docs/versioning.md).
     const deprecation = payloadDeprecation(
       delivery.eventType,
-      delivery.schemaVersion,
+      schemaVersion,
     );
     if (deprecation) {
       headers["Deprecation"] = "true";
@@ -547,31 +570,6 @@ export class WebhookDeliveryService implements OnModuleInit {
         redirect: "error",
         signal: AbortSignal.timeout(DELIVERY_TIMEOUT_MS),
         ...(dispatcher ? ({ dispatcher } as Record<string, unknown>) : {}),
-    // The full public payload is persisted, so retries and crash recovery
-    // deliver exactly the same signed event rather than an empty envelope.
-    const envelope = (cachedEnvelope ?? delivery.payload) as WebhookEnvelope;
-
-    const outcome = await this.sendSignedRequest(
-      url,
-      signingSecret,
-      delivery.eventId,
-      delivery.eventType,
-      envelope,
-    );
-    const { statusCode, responseBody, durationMs, success } = outcome;
-    let failureReason = outcome.failureReason;
-
-    if (outcome.kind === "blocked") {
-      failureReason = outcome.error.message;
-      // SSRF block is permanent — do not retry.
-      await this.prisma.webhookDelivery.update({
-        where: { id: deliveryId },
-        data: {
-          status: WebhookDeliveryStatus.FAILED,
-          durationMs,
-          failureReason,
-          deliveredAt: new Date(),
-        },
       });
 
       durationMs = Date.now() - start;
@@ -732,6 +730,7 @@ export class WebhookDeliveryService implements OnModuleInit {
         deadLetterReason: reason,
       },
     });
+  }
   // ---------------------------------------------------------------------------
   // Synthetic test delivery
   // ---------------------------------------------------------------------------

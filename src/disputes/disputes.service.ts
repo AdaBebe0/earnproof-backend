@@ -438,7 +438,7 @@ export class DisputesService {
       throw new NotFoundException("Dispute not found");
     }
 
-    if (!dispute.status || ![DisputeStatus.OPEN, DisputeStatus.ASSIGNED].includes(dispute.status)) {
+    if (!dispute.status || (dispute.status !== DisputeStatus.OPEN && dispute.status !== DisputeStatus.ASSIGNED)) {
       throw new BadRequestException("Only open or assigned disputes can be resolved");
     }
 
@@ -584,9 +584,9 @@ export class DisputesService {
     eventType: string,
     data: Record<string, any>,
   ): void {
-    this.webhookDeliveryService
-      ?.enqueueForOrganization(organizationId, eventType, { event: eventType, data } as never)
-      .catch((error) => {
+    (this.webhookDeliveryService as any)
+      ?.enqueueForOrganization(organizationId, eventType as any, { event: eventType, data } as never)
+      .catch((error: any) => {
         this.logger.warn("Failed to enqueue webhook event", {
           organizationId,
           eventType,

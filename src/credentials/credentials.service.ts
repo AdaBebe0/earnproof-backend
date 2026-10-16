@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   Injectable,
+  Logger,
   Optional,
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
@@ -82,18 +83,13 @@ const MinimumIncomeCredentialSchema = z.object({
   expiresAt: z.string().datetime({ offset: true }),
   // The signature proof block appended when a credential is issued.
   // `keyId` is optional for backward compatibility: a credential issued
+  // The signature proof block appended when a credential is issued
   // before key rotation existed has no keyId and is treated as signed by
   // key version 0.
-  proof: z.object({
-    type: z.literal("HMAC-SHA256"),
-    keyId: z.string().min(1).optional(),
-    credentialHash: z.string().min(1),
-    signature: z.string().min(1),
-  }).strict(),
-  // The signature proof block appended when a credential is issued
   proof: z.union([
     z.object({
       type: z.literal("HMAC-SHA256"),
+      keyId: z.string().min(1).optional(),
       credentialHash: z.string().min(1),
       signature: z.string().min(1),
     }).strict(),
@@ -130,10 +126,8 @@ function objectDepth(value: unknown, current = 0): number {
 
 @Injectable()
 export class CredentialsService {
-  private readonly logger = new Logger(CredentialsService.name);
   private readonly signingKeyring: CredentialSigningKeyringService;
-  private readonly logger = new StructuredLogger(CredentialsService.name);
-  private readonly signingSecret: string;
+  private readonly logger = new Logger(CredentialsService.name);
 
   constructor(
     private readonly prisma: PrismaService,
@@ -330,12 +324,7 @@ export class CredentialsService {
           credentialBody,
           proof,
         )
-      : safeEqual(
-          `hmac-sha256:${createHmac("sha256", this.signingSecret)
-            .update(canonicalPayload)
-            .digest("base64url")}`,
-          proof.signature,
-        );
+      : safeEqual(expectedSignature, proof.signature);
 
     if (!signatureValid) {
       this.logger.log({
@@ -345,9 +334,6 @@ export class CredentialsService {
           this.credentialVerificationKeyService?.hasKey(proof.keyId) !== true
             ? "unsupported_key"
             : "invalid_signature",
-    if (!safeEqual(expectedSignature, proof.signature)) {
-      this.logger.warn("Credential verification failed", {
-        outcome: "invalid_signature",
         credentialHash,
       });
       return {

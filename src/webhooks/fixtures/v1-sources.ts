@@ -41,4 +41,13 @@ export const V1_FIXTURE_SOURCES: WebhookEventSources = {
     result: "VALID",
     verifiedAt: new Date("2026-09-03T15:45:00.000Z"),
   },
+  "attestation.expired": {
+    attestationId: "attest_123",
+    issuerId: "issuer_123",
+    subjectWalletHash: "sha256:abcd",
+    previousStatus: "ACTIVE",
+    effectiveStatus: "EXPIRED",
+    expiresAt: "2026-09-01T12:00:00.000Z",
+    reconciledAt: "2026-09-01T12:05:00.000Z",
+  },
 };

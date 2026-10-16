@@ -1,15 +1,23 @@
 import {
   CanActivate,
   ExecutionContext,
+  HttpException,
+  HttpStatus,
   Injectable,
   Logger,
-  TooManyRequestsException,
+  SetMetadata,
 } from "@nestjs/common";
 import { Reflector } from "@nestjs/core";
 import { ApiKeyScope } from "@prisma/client";
 import { Request } from "express";
 import { ApiKeyContext } from "../../api-keys/api-key.types";
 import { ApiKeyQuotaService } from "../../api-keys/api-key-quota.service";
+
+export class TooManyRequestsException extends HttpException {
+  constructor(message = "Too Many Requests", options?: any) {
+    super(message, HttpStatus.TOO_MANY_REQUESTS, options);
+  }
+}
 
 /**
  * Redis client interface for quota operations.
@@ -40,8 +48,8 @@ const REQUIRE_API_KEY_SCOPES = "requireApiKeyScopes";
  * 
  * @param scopes Required scopes for the endpoint
  */
-export const RequireApiKeyScopes = (...scopes: ApiKeyScope[]) =>
-  Reflector.createDecorator<ApiKeyScope[]>({ key: REQUIRE_API_KEY_SCOPES, value: scopes });
+export const RequireApiKeyScopes = (...scopes: (ApiKeyScope | string | (ApiKeyScope | string)[])[]) =>
+  SetMetadata(REQUIRE_API_KEY_SCOPES, scopes.flat());
 
 /**
  * API Key Quota Guard

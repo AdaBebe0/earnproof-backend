@@ -70,12 +70,20 @@ export interface WebhookEventSources {
   "proof.created": ProofCreatedSource;
   "proof.revoked": ProofRevokedSource;
   "proof.verified": ProofVerifiedSource;
+  "attestation.expired": AttestationExpiredPayload;
 }
 
 /** A domain event awaiting fan-out to subscribed endpoints. */
 export type WebhookEventSource = {
   [E in WebhookEventType]: { event: E; source: WebhookEventSources[E] };
 }[WebhookEventType];
+
+export interface WebhookPayloadsV1 {
+  "proof.created": ProofCreatedPayload;
+  "proof.revoked": ProofRevokedPayload;
+  "proof.verified": ProofVerifiedPayload;
+  "attestation.expired": AttestationExpiredPayload;
+}
 
 // ---------------------------------------------------------------------------
 // Version 1 payload shapes — only public / non-sensitive fields are included.
@@ -146,6 +154,7 @@ export interface WebhookEnvelope<E extends WebhookEventType = WebhookEventType> 
   specVersion: "1";
   id: string; // delivery eventId — idempotency key for the integrator
   event: WebhookEventType;
+  schemaVersion?: string;
   createdAt: string; // ISO-8601
   data:
     | ProofCreatedPayload

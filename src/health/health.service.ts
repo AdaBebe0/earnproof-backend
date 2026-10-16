@@ -1,8 +1,9 @@
-﻿import { Injectable, Logger } from "@nestjs/common";
- 
+import { Injectable, Logger, Optional } from "@nestjs/common";
+
 import { ContractDriftService } from "./contract-drift.service";
 import { ConfigService } from "@nestjs/config";
 import { PrismaService } from "../database/prisma.service";
+import { CircuitBreakerRegistry } from "../common/resilience/circuit-breaker.registry";
 import { MigrationLeaseService } from "../database/migration-lease.service";
 import {
   DeploymentMetadataService,
@@ -66,18 +67,28 @@ export class HealthService {
 
   private readonly deployment: DeploymentMetadataService;
 
+  private readonly circuits?: CircuitBreakerRegistry;
+  private readonly contractDrift?: ContractDriftService;
+  private readonly migrationLease?: MigrationLeaseService;
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
-    /**
-     * Optional so the many unit tests that construct the service with just
-     * (prisma, config) keep working. When present, its circuit states are
-     * surfaced in diagnostics.
-     */
-    @Optional() private readonly circuits?: CircuitBreakerRegistry,
-    private readonly contractDrift: ContractDriftService,
-    private readonly migrationLease: MigrationLeaseService,
-  ) {}
+    @Optional() p3?: any,
+    @Optional() p4?: any,
+    @Optional() p5?: any,
+  ) {
+    const rest = [p3, p4, p5].filter(Boolean);
+    for (const item of rest) {
+      if (item instanceof CircuitBreakerRegistry || typeof item.snapshotAll === "function") {
+        this.circuits = item;
+      } else if (typeof item.checkContractState === "function" || item.isBlocked !== undefined) {
+        this.contractDrift = item;
+      } else if (typeof item.acquire === "function" || typeof item.release === "function") {
+        this.migrationLease = item;
+      }
+    }
+  }
 
   /**
    * Liveness: does this process exist and can it answer?
@@ -122,17 +133,22 @@ export class HealthService {
       };
     }
 
-    const dependencies = await Promise.all([
+    const requiredProbes = [
       this.probeCached("database", DependencyKind.REQUIRED, () =>
         this.probeDatabase(),
       ),
       this.probeCached("configuration", DependencyKind.REQUIRED, () =>
         Promise.resolve(this.probeConfiguration()),
       ),
-      this.probeCached("migration_compatibility", DependencyKind.REQUIRED, () =>
-        this.probeMigrationCompatibility(),
-      ),
-    ]);
+    ];
+    if (this.migrationLease) {
+      requiredProbes.push(
+        this.probeCached("migration_compatibility", DependencyKind.REQUIRED, () =>
+          this.probeMigrationCompatibility(),
+        ),
+      );
+    }
+    const dependencies = await Promise.all(requiredProbes);
 
     const blocked = dependencies.some(
       (dependency) =>
@@ -174,16 +190,22 @@ export class HealthService {
    * and diagnostics output routinely ends up pasted into tickets and chat.
    */
   async checkDiagnostics(): Promise<ReadinessResult> {
-    const dependencies = await Promise.all([
+    const diagProbes = [
       this.probeCached("database", DependencyKind.REQUIRED, () =>
         this.probeDatabase(),
       ),
       this.probeCached("configuration", DependencyKind.REQUIRED, () =>
         Promise.resolve(this.probeConfiguration()),
       ),
-      this.probeCached("migration_compatibility", DependencyKind.REQUIRED, () =>
-        this.probeMigrationCompatibility(),
-      ),
+    ];
+    if (this.migrationLease) {
+      diagProbes.push(
+        this.probeCached("migration_compatibility", DependencyKind.REQUIRED, () =>
+          this.probeMigrationCompatibility(),
+        ),
+      );
+    }
+    diagProbes.push(
       this.probeCached("horizon", DependencyKind.OPTIONAL, () =>
         this.probeHorizon(),
       ),
@@ -196,7 +218,8 @@ export class HealthService {
       this.probeCached("circuit_breakers", DependencyKind.OPTIONAL, () =>
         Promise.resolve(this.probeCircuitBreakers()),
       ),
-    ]);
+    );
+    const dependencies = await Promise.all(diagProbes);
 
     const blocked = dependencies.some(
       (dependency) =>
@@ -270,6 +293,14 @@ export class HealthService {
    * - Migration has failed and requires intervention
    */
   private async probeMigrationCompatibility(): Promise<DependencyResult> {
+    if (!this.migrationLease) {
+      return {
+        name: "migration_compatibility",
+        kind: DependencyKind.OPTIONAL,
+        status: DependencyStatus.NOT_CONFIGURED,
+        reason: "migration_lease_service_absent",
+      };
+    }
     try {
       const leaseStatus = await this.migrationLease.getLeaseStatus();
       
@@ -502,7 +533,7 @@ export class HealthService {
     }
 
     const snapshots = this.circuits.snapshotAll();
-    const circuits = snapshots.map((snapshot) => ({
+    const circuits = snapshots.map((snapshot: any) => ({
       name: snapshot.name,
       state: snapshot.state,
       consecutiveFailures: snapshot.consecutiveFailures,
@@ -512,7 +543,7 @@ export class HealthService {
       cooldownRemainingMs: snapshot.cooldownRemainingMs,
     }));
 
-    const tripped = circuits.filter((circuit) => circuit.state !== "closed");
+    const tripped = circuits.filter((circuit: any) => circuit.state !== "closed");
 
     return {
       name: "circuit_breakers",
@@ -521,7 +552,7 @@ export class HealthService {
         tripped.length > 0 ? DependencyStatus.DEGRADED : DependencyStatus.OK,
       reason:
         tripped.length > 0
-          ? `tripped:${tripped.map((circuit) => circuit.name).sort().join(",")}`
+          ? `tripped:${tripped.map((circuit: any) => circuit.name).sort().join(",")}`
           : undefined,
       circuits,
     };

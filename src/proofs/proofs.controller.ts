@@ -2,6 +2,7 @@ import {
   Body,
   Controller,
   Get,
+  Headers,
   HttpCode,
   HttpStatus,
   Param,
@@ -16,6 +17,7 @@ import {
 import {
   ApiBearerAuth,
   ApiBody,
+  ApiHeader,
   ApiOperation,
   ApiParam,
   ApiResponse,
@@ -45,9 +47,12 @@ import {
   SharingAccessQueryDto,
 } from "./dto/proof-sharing.dto";
 import { ThrottleCost } from "../common/rate-limit/throttle-cost.decorator";
+import { CreateAggregateEarningsProofDto } from "./dto/create-aggregate-earnings-proof.dto";
 import { CreateMinimumIncomeProofDto } from "./dto/create-minimum-income-proof.dto";
 import { CreatePaymentReceiptProofDto } from "./dto/create-payment-receipt-proof.dto";
 import { CreateRecurringIncomeProofDto } from "./dto/create-recurring-income-proof.dto";
+import { CreateEmployerPaymentProofDto } from "./dto/create-employer-payment-proof.dto";
+import { CreateEmploymentContinuityProofDto } from "./dto/create-employment-continuity-proof.dto";
 import { ListProofsDto } from "./dto/list-proofs.dto";
 import { ProofCreatedDto } from "./dto/proof-created.dto";
 import {
@@ -69,7 +74,6 @@ import { VerificationStatsDto } from "./dto/verification-stats.dto";
 import { ProofsService } from "./proofs.service";
 import { ProofSharingService } from "./proof-sharing.service";
 import { PrismaService } from "../database/prisma.service";
-import type { Request } from "express";
 
 @ApiTags("proofs")
 @Controller("proofs")
@@ -234,6 +238,7 @@ export class ProofsController {
     type: ApiErrorDto,
   })
   @UseGuards(AuthGuard)
+  @AuthenticatedRoute({ ownership: "user" })
   @Post("invoice-settlement")
   createInvoiceSettlementProof(
     @CurrentUser() user: AuthenticatedUser,
@@ -335,6 +340,7 @@ export class ProofsController {
     type: ApiErrorDto,
   })
   @UseGuards(AuthGuard)
+  @AuthenticatedRoute({ ownership: "user" })
   @Post("income-range")
   createIncomeRangeProof(
     @CurrentUser() user: AuthenticatedUser,
@@ -421,6 +427,7 @@ export class ProofsController {
     type: ApiErrorDto,
   })
   @UseGuards(AuthGuard)
+  @AuthenticatedRoute({ ownership: "user" })
   @SkipThrottle({ default: true, verification: true })
   @Throttle({ strict: {} })
   @Post("aggregate-earnings")
@@ -429,6 +436,126 @@ export class ProofsController {
     @Body() body: CreateAggregateEarningsProofDto,
   ) {
     return this.proofsService.createAggregateEarningsProof(user, body);
+  }
+
+  @ApiOperation({
+    summary: "Create an employer-payment proof",
+    description:
+      "Issues a credential stating that the caller received an eligible income payment from a " +
+      "verified employer source within the specified period. The credential commits only to " +
+      "the employer's identity, the asset, the period, and the policy parameters. Exact amounts, " +
+      "source accounts, and individual payments are not disclosed.",
+  })
+  @ApiBearerAuth()
+  @ApiResponse({
+    status: HttpStatus.CREATED,
+    description: "Employer-payment proof created.",
+    type: ProofCreatedDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.BAD_REQUEST,
+    description:
+      "The period is invalid, longer than 366 days, or ends in the future.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.NOT_FOUND,
+    description: "Trusted source does not exist or belongs to another user.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.UNPROCESSABLE_ENTITY,
+    description:
+      "The source is untrusted, revoked or ambiguous (EMPLOYER_SOURCE_UNTRUSTED, EMPLOYER_SOURCE_AMBIGUOUS), " +
+      "no eligible payment falls inside the period (EMPLOYER_PAYMENT_NOT_FOUND), or request validation failed.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.UNAUTHORIZED,
+    description: "Bearer token is missing, malformed, invalid, or expired.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.CONFLICT,
+    description: "Idempotency key was used with a different request payload.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.REQUEST_TIMEOUT,
+    description: "Previous idempotent request is still being processed.",
+    type: ApiErrorDto,
+  })
+  @UseGuards(AuthGuard)
+  @SkipThrottle({ default: true, verification: true })
+  @Throttle({ strict: {} })
+  @Idempotent({ headerName: "idempotency-key", required: true })
+  @Post("employer-payment")
+  @AuthenticatedRoute({ ownership: "user" })
+  createEmployerPaymentProof(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() body: CreateEmployerPaymentProofDto,
+  ) {
+    return this.proofsService.createEmployerPaymentProof(user, body);
+  }
+
+  @ApiOperation({
+    summary: "Create an employment-continuity proof",
+    description:
+      "Issues a credential stating that corroborated income payments from one verified employer source cover " +
+      "a completed window of consecutive UTC calendar months, allowing at most one missing month and requiring " +
+      "the first and last months to be covered. The credential commits only to the continuity result and the " +
+      "policy version and parameters it was evaluated under.",
+  })
+  @ApiBearerAuth()
+  @ApiResponse({
+    status: HttpStatus.CREATED,
+    description: "Employment-continuity proof created.",
+    type: ProofCreatedDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.BAD_REQUEST,
+    description:
+      "periodStart is not the first instant of a UTC month, observedPeriods is out of range, or the window has not ended.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.NOT_FOUND,
+    description: "Trusted source does not exist or belongs to another user.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.UNPROCESSABLE_ENTITY,
+    description:
+      "The source is untrusted, revoked or ambiguous, the continuity rule is not met (CONTINUITY_NOT_SATISFIED), " +
+      "the window holds too many payments (CONTINUITY_LIMIT_EXCEEDED), or request validation failed.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.UNAUTHORIZED,
+    description: "Bearer token is missing, malformed, invalid, or expired.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.CONFLICT,
+    description: "Idempotency key was used with a different request payload.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.REQUEST_TIMEOUT,
+    description: "Previous idempotent request is still being processed.",
+    type: ApiErrorDto,
+  })
+  @UseGuards(AuthGuard)
+  @SkipThrottle({ default: true, verification: true })
+  @Throttle({ strict: {} })
+  @Idempotent({ headerName: "idempotency-key", required: true })
+  @Post("employment-continuity")
+  @AuthenticatedRoute({ ownership: "user" })
+  createEmploymentContinuityProof(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() body: CreateEmploymentContinuityProofDto,
+  ) {
+    return this.proofsService.createEmploymentContinuityProof(user, body);
   }
 
   @ApiOperation({
@@ -466,13 +593,17 @@ export class ProofsController {
     type: ApiErrorDto,
   })
   @UseGuards(AuthGuard)
+  @AuthenticatedRoute({ ownership: "user" })
   @Patch(":id/revoke")
   revokeProof(
     @CurrentUser() user: AuthenticatedUser,
     @Param("id") id: string,
     @Body() body?: RevokeProofDto,
   ) {
-    return this.proofsService.revokeProof(user, id, body);
+    if (body !== undefined) {
+      return this.proofsService.revokeProof(user, id, body);
+    }
+    return this.proofsService.revokeProof(user, id);
   }
 
   @ApiOperation({
@@ -505,6 +636,7 @@ export class ProofsController {
     type: ApiErrorDto,
   })
   @UseGuards(AuthGuard)
+  @AuthenticatedRoute({ ownership: "user" })
   @Get(":id/anchoring")
   getProofAnchoringStatus(
     @CurrentUser() user: AuthenticatedUser,
@@ -556,6 +688,7 @@ export class ProofsController {
     type: ApiErrorDto,
   })
   @UseGuards(AuthGuard)
+  @AuthenticatedRoute({ ownership: "user" })
   @Post(":id/anchoring/:intentId/retry")
   retryProofAnchoring(
     @CurrentUser() user: AuthenticatedUser,
@@ -608,6 +741,7 @@ export class ProofsController {
     type: ApiErrorDto,
   })
   @UseGuards(AuthGuard)
+  @AuthenticatedRoute({ ownership: "user" })
   @Post(":id/anchoring/:intentId/abandon")
   abandonProofAnchoring(
     @CurrentUser() user: AuthenticatedUser,
@@ -615,9 +749,6 @@ export class ProofsController {
     @Param("intentId") intentId: string,
   ) {
     return this.proofsService.abandonProofAnchoring(user, id, intentId);
-  @AuthenticatedRoute({ ownership: "user" })
-  revokeProof(@CurrentUser() user: AuthenticatedUser, @Param("id") id: string) {
-    return this.proofsService.revokeProof(user.id, id);
   }
 
   @ApiBearerAuth()
@@ -650,6 +781,7 @@ export class ProofsController {
     type: ApiErrorDto,
   })
   @UseGuards(AuthGuard)
+  @AuthenticatedRoute({ ownership: "user" })
   @Get(":id/renewal-eligibility")
   getRenewalEligibility(
     @CurrentUser() user: AuthenticatedUser,
@@ -714,6 +846,7 @@ export class ProofsController {
     type: ApiErrorDto,
   })
   @UseGuards(AuthGuard)
+  @AuthenticatedRoute({ ownership: "user" })
   // Renewal issues a credential, so it shares proof creation's strict budget.
   @SkipThrottle({ default: true, verification: true })
   @Throttle({ strict: {} })
@@ -764,8 +897,8 @@ export class ProofsController {
         },
       );
 
-      if (sharingResult.proofId && sharingResult.outcome === "ACCEPTED") {
-        actualProofId = sharingResult.proofId;
+      if (sharingResult.isValid && (sharingResult.proof as any)?.id) {
+        actualProofId = (sharingResult.proof as any).id;
         usedSharingToken = true;
       } else {
         // Sharing token verification failed
@@ -826,6 +959,7 @@ export class ProofsController {
     const proofIds = (request.body as { proofIds?: unknown[] })?.proofIds;
     return Array.isArray(proofIds) ? proofIds.length : 1;
   })
+  @PublicRoute()
   @HttpCode(HttpStatus.OK)
   @Post("verify/batch")
   verifyProofsBatch(
@@ -910,6 +1044,7 @@ export class ProofsController {
     @CurrentUser() user: AuthenticatedUser,
     @Param("id") proofId: string,
     @Body() body: CreateSharingTokenDto,
+    @Req() request: Request,
   ): Promise<SharingTokenResponseDto> {
     // Get user's organization (simplified - assumes single org membership)
     const orgMember = await this.getUserPrimaryOrganization(user.id);
@@ -979,14 +1114,36 @@ export class ProofsController {
       organizationId = orgMember.organizationId;
     }
 
-    const summary = await this.proofSharingService.getSharingEvents(
+    const events = await this.proofSharingService.getSharingEvents(
       organizationId,
       {
         proofId: query.proofId,
       },
     );
 
-    return summary;
+    const aggregateMap = new Map<string, { count: number; lastAccessedAt: Date | null }>();
+    for (const event of events) {
+      const existing = aggregateMap.get(event.outcome) ?? { count: 0, lastAccessedAt: null };
+      existing.count += 1;
+      if (!existing.lastAccessedAt || event.createdAt > existing.lastAccessedAt) {
+        existing.lastAccessedAt = event.createdAt;
+      }
+      aggregateMap.set(event.outcome, existing);
+    }
+
+    const aggregates = Array.from(aggregateMap.entries()).map(([outcome, data]) => ({
+      outcome: outcome as any,
+      count: data.count,
+      lastAccessedAt: data.lastAccessedAt,
+    }));
+
+    const recentEvents = events.slice(0, 50).map((event: any) => ({
+      proofId: event.proofId,
+      outcome: event.outcome,
+      accessedAt: event.createdAt,
+    }));
+
+    return { aggregates, recentEvents };
   }
 
   /**

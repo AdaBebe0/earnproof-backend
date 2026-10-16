@@ -7,22 +7,19 @@ import {
 import { ConfigService } from "@nestjs/config";
 import { WebhookCertificateStatus, WebhookClientCertificate } from "@prisma/client";
 import { X509Certificate, createHash } from "crypto";
-import {
-  decryptProtectedAmount,
-  encryptProtectedAmount,
-} from "../common/crypto/protected-amount";
+import { PaymentEncryptionKeyringService } from "../common/crypto/payment-encryption-keyring.service";
 import { PrismaService } from "../database/prisma.service";
 import { AddClientCertificateDto } from "./dto/add-client-certificate.dto";
 
 @Injectable()
 export class WebhookClientCertificateService {
-  private readonly encryptionKey: string;
+  private readonly keyring: PaymentEncryptionKeyringService;
 
   constructor(
     private readonly prisma: PrismaService,
     configService: ConfigService,
   ) {
-    this.encryptionKey = configService.getOrThrow<string>("paymentEncryptionKey");
+    this.keyring = new PaymentEncryptionKeyringService(configService);
   }
 
   /**
@@ -68,7 +65,7 @@ export class WebhookClientCertificateService {
       .update(cert.raw)
       .digest("hex");
 
-    const privateKeyEncrypted = encryptProtectedAmount(dto.privateKeyPem, this.encryptionKey);
+    const privateKeyEncrypted = this.keyring.encrypt(dto.privateKeyPem);
 
     const created = await this.prisma.webhookClientCertificate.create({
       data: {
@@ -157,7 +154,7 @@ export class WebhookClientCertificateService {
 
     return {
       certificatePem: active.certificatePem,
-      privateKeyPem: decryptProtectedAmount(active.privateKeyEncrypted, this.encryptionKey),
+      privateKeyPem: this.keyring.decrypt(active.privateKeyEncrypted),
     };
   }
 

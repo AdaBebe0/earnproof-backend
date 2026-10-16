@@ -1,4 +1,4 @@
-﻿import {
+import {
   ForbiddenException,
   Injectable,
   Logger,
@@ -76,15 +76,6 @@ export class ApiKeyService {
     return sha256(secret);
   }
 
-  verifySecret(secret: string, storedHash: string): boolean {
-    const computedHash = this.hashSecret(secret);
-    const isValidFormat = /^[a-f0-9]{64}$/i.test(storedHash);
-    const hashBufferToCompare = isValidFormat
-      ? Buffer.from(storedHash, "hex")
-      : Buffer.alloc(32);
-    try {
-      return timingSafeEqual(Buffer.from(computedHash, "hex"), hashBufferToCompare);
-    } catch {
   /**
    * Verify a presented secret against a stored hash.
    * Returns true if they match (constant-time comparison).
@@ -240,36 +231,7 @@ export class ApiKeyService {
             name: created.name,
             organizationId: created.organizationId,
             scopes: created.scopeAssignments.map((sa) => sa.scope),
-            expiresAt: created.expiresAt?.toISOString(),
           },
-    const apiKey = await this.prisma.apiKey.create({
-      data: {
-        organizationId: input.organizationId,
-        createdById: input.createdBy,
-        name: input.name,
-        prefix,
-        keyHash,
-        expiresAt: input.expiresAt,
-        scopeAssignments: input.scopes
-          ? { createMany: { data: input.scopes.map((scope) => ({ scope })) } }
-          : undefined,
-      },
-      include: { scopeAssignments: { select: { scope: true } } },
-    });
-
-    await this.prisma.auditLog.create({
-      data: {
-        actorType: "user",
-        actorId: input.createdBy,
-        action: "api_key.created",
-        resourceType: "api_key",
-        resourceId: apiKey.id,
-        metadata: {
-          prefix: apiKey.prefix,
-          name: apiKey.name,
-          organizationId: apiKey.organizationId,
-          scopes: apiKey.scopeAssignments.map((sa) => sa.scope),
-          expiresAt: apiKey.expiresAt?.toISOString(),
         },
       });
 

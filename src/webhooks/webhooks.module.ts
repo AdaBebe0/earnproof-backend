@@ -11,19 +11,21 @@ import { WebhooksController } from "./webhooks.controller";
 import { WebhooksService } from "./webhooks.service";
 
 @Module({
-  imports: [AuthModule],
-  controllers: [WebhooksController, WebhookClientCertificatesController],
   imports: [AuthModule, QuotasModule],
-  controllers: [WebhooksController],
+  controllers: [WebhooksController, WebhookClientCertificatesController],
   providers: [
     WebhooksService,
     WebhookDeliveryService,
     WebhookSigningService,
     WebhookClientCertificateService,
-  ],
-  exports: [WebhookDeliveryService, WebhookClientCertificateService],
     WebhookCircuitBreakerService,
+    WebhookDeadLetterService,
   ],
-  exports: [WebhookDeliveryService, WebhookCircuitBreakerService],
+  exports: [
+    WebhookDeliveryService,
+    WebhookClientCertificateService,
+    WebhookCircuitBreakerService,
+    WebhooksService,
+  ],
 })
 export class WebhooksModule {}

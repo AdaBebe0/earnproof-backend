@@ -140,12 +140,19 @@ const encryptionKey = z.string().refine((value) => {
 }, "PAYMENT_ENCRYPTION_KEY must be 32 bytes encoded as base64 or 64-char hex");
 
 // ── Helper: Positive integer (for ports, limits) ──
-const positiveInt = (fieldName: string) =>
-  z
+const positiveInt = (fieldNameOrMin: string | number, max?: number, defaultValue?: number) => {
+  if (typeof fieldNameOrMin === "number") {
+    let schema = z.coerce.number().int().min(fieldNameOrMin);
+    if (max !== undefined) schema = schema.max(max);
+    if (defaultValue !== undefined) return schema.default(defaultValue);
+    return schema;
+  }
+  return z
     .coerce.number()
-    .int(`${fieldName} must be an integer`)
-    .positive(`${fieldName} must be a positive integer`)
-    .finite(`${fieldName} must be a finite number`);
+    .int(`${fieldNameOrMin} must be an integer`)
+    .positive(`${fieldNameOrMin} must be a positive integer`)
+    .finite(`${fieldNameOrMin} must be a finite number`);
+};
 
 // ── Helper: Non-negative integer (includes zero) ──
 const nonnegativeInt = (fieldName: string) =>
@@ -164,9 +171,6 @@ const retentionDays = (fieldName: string) =>
     .max(3650, `${fieldName} must be at most 3650 days (maximum 10 years)`)
     .finite(`${fieldName} must be a finite number`);
 
-/** Optional bounded integer with a default, for operational limits. */
-const positiveInt = (min: number, max: number, fallback: number) =>
-  z.coerce.number().int().min(min).max(max).optional().default(fallback);
 
 // ── Helper: Rate limit counter validator ──
 // Bounds: 1–1000 per window. Higher values defeat the purpose of rate limiting.
@@ -442,11 +446,6 @@ const envSchema = z.object({
   QUOTA_MAX_WEBHOOKS: positiveInt(1, 1_000, 10),
   QUOTA_PROOF_REQUESTS_PER_DAY: positiveInt(1, 10_000_000, 1_000),
   QUOTA_SYNCS_PER_HOUR: positiveInt(1, 3_600, 12),
-  VERIFICATION_HASH_SALT_VERSION: z.coerce
-    .number()
-    .int()
-    .nonnegative()
-    .optional()
 
   /** Hash salt version for verification metadata privacy */
   VERIFICATION_HASH_SALT_VERSION: nonnegativeInt(

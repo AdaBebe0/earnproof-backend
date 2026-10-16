@@ -107,14 +107,16 @@ export class AuthService {
     return challenge;
   }
 
-  async verifyChallenge(input: {
-    challengeId: string;
-    walletAddress: string;
-    signature: string;
-    clientMetadata?: string;
-  }, headers?: SessionDeviceHeaders) {
-    requestOrigin?: string;
-  }) {
+  async verifyChallenge(
+    input: {
+      challengeId: string;
+      walletAddress: string;
+      signature: string;
+      clientMetadata?: string;
+      requestOrigin?: string;
+    },
+    headers?: SessionDeviceHeaders,
+  ) {
     this.assertValidPublicKey(input.walletAddress);
 
     // Check rate limits before verification attempt
@@ -209,14 +211,6 @@ export class AuthService {
 
     if (!challenge) {
       // Should never happen: we just consumed this row atomically above.
-      throw new UnauthorizedException("Challenge is expired or unavailable");
-    }
-
-      // Unreachable unless the row was deleted between the two statements;
-      // safeguarded rather than dereferenced.
-      // Should be unreachable: updateMany just matched and updated this row,
-      // so it exists. Safeguard against a concurrent deletion between the
-      // two statements.
       throw new UnauthorizedException("Challenge is expired or unavailable");
     }
 

@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Regression Tests for Proof Issuance with Attestation Integration
  *
  * Verifies that adding attestation lifecycle validation to proof issuance
@@ -232,7 +232,7 @@ describe("Proofs Service - Attestation Integration Regression Tests", () => {
       (prisma.proof.update as jest.Mock).mockResolvedValue(revokedProof);
       (prisma.anchoringIntent.create as jest.Mock).mockResolvedValue({});
 
-      const result = await service.revokeProof(mockUser.id, "proof-1");
+      const result = await service.revokeProof(mockUser as any, "proof-1");
 
       expect(result).toHaveProperty("id");
       expect(result).toHaveProperty("status");
@@ -357,7 +357,7 @@ describe("Proofs Service - Attestation Integration Regression Tests", () => {
       (prisma.proof.update as jest.Mock).mockResolvedValue(revokedProof);
       (prisma.anchoringIntent.create as jest.Mock).mockResolvedValue({});
 
-      const result = await service.revokeProof(mockUser.id, "proof-1");
+      const result = await service.revokeProof(mockUser as any, "proof-1");
 
       // Response should have expected structure
       expect(result).toHaveProperty("id");

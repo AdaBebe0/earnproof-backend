@@ -32,6 +32,7 @@ import { TrustedSourcesModule } from "./trusted-sources/trusted-sources.module";
 import { UsersModule } from "./users/users.module";
 import { WebhooksModule } from "./webhooks/webhooks.module";
 import { SupportedAssetsModule } from "./supported-assets/supported-assets.module";
+import { GovernanceModule } from "./governance/governance.module";
 
 @Module({
   imports: [
@@ -67,6 +68,7 @@ import { SupportedAssetsModule } from "./supported-assets/supported-assets.modul
     JobsModule,
     WebhooksModule,
     SupportedAssetsModule,
+    GovernanceModule,
   ],
   providers: [
     {

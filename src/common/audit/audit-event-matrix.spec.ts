@@ -873,6 +873,9 @@ const scenarios: Scenario[] = [
       return new UsersService(prisma as never).changeRole(ADMIN, "user_target", {
         role: "DEVELOPER",
       } as never);
+    },
+  },
+  {
     event: "operator.payment_backfill_requested",
     outcome: "success",
     name: "requesting a payment backfill",
