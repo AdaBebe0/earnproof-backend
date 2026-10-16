@@ -903,8 +903,28 @@ model Webhook {
   deliveries         WebhookDelivery[]
   clientCertificates WebhookClientCertificate[]
   circuitBreaker     WebhookCircuit?
+  verificationChallenges WebhookVerificationChallenge[]
 
   @@index([organizationId, status])
+}
+
+/// Proves control of a webhook destination before real event deliveries begin.
+/// Only a SHA-256 hash of the opaque challenge token is stored — the raw token
+/// is never written to the database or to any application log. `url` is the
+/// destination this challenge was issued for, so a later destination change
+/// can be told apart from (and invalidates) challenges issued for the old one.
+model WebhookVerificationChallenge {
+  id          String    @id @default(cuid())
+  webhookId   String
+  webhook     Webhook   @relation(fields: [webhookId], references: [id])
+  tokenHash   String    @unique
+  url         String
+  expiresAt   DateTime
+  usedAt      DateTime?
+  createdAt   DateTime  @default(now())
+
+  @@index([webhookId])
+  @@index([expiresAt])
 }
 
 enum WebhookDeliveryStatus {

@@ -12,9 +12,12 @@ import { PrismaService } from "../database/prisma.service";
 import { ConflictException } from "../common/exceptions/domain.exceptions";
 import { CreateWebhookDto } from "./dto/create-webhook.dto";
 import { UpdateWebhookEventsDto } from "./dto/update-webhook-events.dto";
+import { UpdateWebhookUrlDto } from "./dto/update-webhook-url.dto";
+import { VerifyWebhookDto } from "./dto/verify-webhook.dto";
 import { OrganizationQuotaService } from "../quotas/organization-quota.service";
 import { WebhookDeliveryService } from "./webhook-delivery.service";
 import { WebhookCircuitBreakerService } from "./webhook-circuit-breaker.service";
+import { WebhookVerificationService } from "./webhook-verification.service";
 import { CURRENT_WEBHOOK_PAYLOAD_VERSION } from "./webhook-event.types";
 
 /** Signing secret length in bytes (produces a 64-char hex string). */
@@ -28,6 +31,7 @@ export class WebhooksService {
     private readonly prisma: PrismaService,
     private readonly deliveryService: WebhookDeliveryService,
     private readonly circuitBreaker: WebhookCircuitBreakerService,
+    private readonly verificationService: WebhookVerificationService,
     configService: ConfigService,
     private readonly quotas: OrganizationQuotaService,
   ) {
@@ -38,6 +42,10 @@ export class WebhooksService {
 
   /**
    * Create a webhook endpoint for the given organisation.
+   *
+   * The endpoint starts `PENDING`: no real event deliveries go out until the
+   * destination's ownership is verified (see `verify`). A verification
+   * challenge is issued and sent immediately.
    *
    * Returns the raw signing secret ONCE — it is never retrievable again.
    * The caller must store it securely.
@@ -50,6 +58,8 @@ export class WebhooksService {
     const events = [...new Set(dto.events)];
 
     // Quota check and creation commit together; see OrganizationQuotaService.
+    // Starts PENDING: no real event deliveries go out until the destination's
+    // ownership is verified (see `verify`).
     const webhook = await this.prisma.$transaction(async (tx) => {
       await this.quotas.assertCapacity(tx, organizationId, "webhooks");
       return tx.webhook.create({
@@ -59,7 +69,7 @@ export class WebhooksService {
           secretEncrypted,
           events,
           payloadVersion: dto.payloadVersion ?? CURRENT_WEBHOOK_PAYLOAD_VERSION,
-          status: ResourceStatus.ACTIVE,
+          status: ResourceStatus.PENDING,
           revision: 0,
         },
         select: {
@@ -77,11 +87,103 @@ export class WebhooksService {
     // Initialize circuit breaker for new webhook
     await this.circuitBreaker.initializeCircuit(webhook.id);
 
+    await this.verificationService.issueChallenge(webhook.id, dto.url, rawSecret);
+
     return {
       ...webhook,
       // Returned once at creation time only.
       signingSecret: rawSecret,
     };
+  }
+
+  /**
+   * Change a webhook's destination URL.
+   *
+   * The endpoint reverts to `PENDING` and a fresh verification challenge is
+   * issued for the new destination — any verification of the previous URL
+   * no longer authorises deliveries, since a destination change always
+   * requires re-proving control of the new one.
+   */
+  async updateUrl(
+    organizationId: string,
+    webhookId: string,
+    dto: UpdateWebhookUrlDto,
+  ) {
+    const webhook = await this.assertOwnedWebhookFull(organizationId, webhookId);
+
+    const updated = await this.prisma.webhook.update({
+      where: { id: webhookId },
+      data: {
+        url: dto.url,
+        status: ResourceStatus.PENDING,
+        revision: webhook.revision + 1,
+      },
+      select: {
+        id: true,
+        url: true,
+        events: true,
+        status: true,
+        revision: true,
+        updatedAt: true,
+      },
+    });
+
+    const signingSecret = this.paymentEncryptionKeyring.decrypt(
+      webhook.secretEncrypted,
+    );
+    await this.verificationService.issueChallenge(webhookId, dto.url, signingSecret);
+
+    return updated;
+  }
+
+  /**
+   * Re-send a verification challenge for a webhook that has not yet been
+   * verified (e.g. the previous challenge expired or was never delivered).
+   */
+  async resendVerification(organizationId: string, webhookId: string) {
+    const webhook = await this.assertOwnedWebhookFull(organizationId, webhookId);
+
+    if (webhook.status !== ResourceStatus.PENDING) {
+      throw new BadRequestException(
+        "Only a webhook awaiting verification can have its challenge re-sent",
+      );
+    }
+
+    const signingSecret = this.paymentEncryptionKeyring.decrypt(
+      webhook.secretEncrypted,
+    );
+    const { expiresAt } = await this.verificationService.issueChallenge(
+      webhookId,
+      webhook.url,
+      signingSecret,
+    );
+
+    return { webhookId, status: webhook.status, expiresAt };
+  }
+
+  /**
+   * Acknowledge a verification challenge. On success the webhook becomes
+   * `ACTIVE` and real event deliveries begin.
+   */
+  async verify(
+    organizationId: string,
+    webhookId: string,
+    dto: VerifyWebhookDto,
+  ) {
+    const existing = await this.assertOwnedWebhook(organizationId, webhookId);
+
+    await this.verificationService.verifyChallenge(webhookId, dto.token);
+
+    const webhook = await this.prisma.webhook.update({
+      where: { id: webhookId },
+      data: {
+        status: ResourceStatus.ACTIVE,
+        revision: existing.revision + 1,
+      },
+      select: { id: true, status: true, revision: true, updatedAt: true },
+    });
+
+    return webhook;
   }
 
   /** List all webhook endpoints for an organisation. */
@@ -360,6 +462,23 @@ export class WebhooksService {
   // ---------------------------------------------------------------------------
   // Helpers
   // ---------------------------------------------------------------------------
+
+  /** Like `assertOwnedWebhook`, but also returns `url` and `secretEncrypted`. */
+  private async assertOwnedWebhookFull(organizationId: string, webhookId: string) {
+    const webhook = await this.prisma.webhook.findUnique({
+      where: { id: webhookId },
+      select: {
+        id: true,
+        organizationId: true,
+        url: true,
+        secretEncrypted: true,
+        status: true,
+        revision: true,
+      },
+    });
+    this.assertOwnership(webhook, organizationId, webhookId);
+    return webhook!;
+  }
 
   private async assertOwnedWebhook(organizationId: string, webhookId: string) {
     const webhook = await this.prisma.webhook.findUnique({

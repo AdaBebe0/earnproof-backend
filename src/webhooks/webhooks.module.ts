@@ -7,6 +7,7 @@ import { WebhookClientCertificatesController } from "./webhook-client-certificat
 import { WebhookDeadLetterService } from "./webhook-dead-letter.service";
 import { WebhookDeliveryService } from "./webhook-delivery.service";
 import { WebhookSigningService } from "./webhook-signing.service";
+import { WebhookVerificationService } from "./webhook-verification.service";
 import { WebhooksController } from "./webhooks.controller";
 import { WebhooksService } from "./webhooks.service";
 
@@ -20,6 +21,7 @@ import { WebhooksService } from "./webhooks.service";
     WebhookClientCertificateService,
     WebhookCircuitBreakerService,
     WebhookDeadLetterService,
+    WebhookVerificationService,
   ],
   exports: [
     WebhookDeliveryService,
