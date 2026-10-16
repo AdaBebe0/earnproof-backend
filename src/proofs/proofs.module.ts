@@ -1,4 +1,5 @@
 import { QuotasModule } from "../quotas/quotas.module";
+import { HealthModule } from "../health/health.module";
 import { Module } from "@nestjs/common";
 import { AuditModule } from "../audit/audit.module";
 import { AuthModule } from "../auth/auth.module";
@@ -11,9 +12,17 @@ import { ProofsService } from "./proofs.service";
 import { ProofSharingService } from "./proof-sharing.service";
 import { ProofReconciliationService } from "./proof-reconciliation.service";
 import { ProofVerificationAbuseService } from "../common/rate-limit/proof-verification-abuse.service";
+import { ProofCapacityPreflightService } from "./proof-capacity-preflight.service";
 
 @Module({
-  imports: [AuthModule, AuditModule, AttestationsModule, WebhooksModule],
+  imports: [
+    AuthModule,
+    AuditModule,
+    AttestationsModule,
+    WebhooksModule,
+    QuotasModule,
+    HealthModule,
+  ],
   controllers: [ProofsController],
   providers: [
     ContractAnchoringService,
@@ -22,12 +31,14 @@ import { ProofVerificationAbuseService } from "../common/rate-limit/proof-verifi
     ProofSharingService,
     ProofVerificationAbuseService,
     ProofReconciliationService,
+    ProofCapacityPreflightService,
   ],
   exports: [
     ContractAnchoringService,
     CredentialVerificationKeyService,
     ProofSharingService,
     ProofReconciliationService,
+    ProofCapacityPreflightService,
   ],
 })
 export class ProofsModule {}

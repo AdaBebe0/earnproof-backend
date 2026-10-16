@@ -25,6 +25,8 @@ import { RetentionCleanupService } from "./retention/retention-cleanup.service";
 import { RetentionJob } from "./retention/retention.job";
 import { WebhookCertificateExpiryJob } from "./webhook-certificate-expiry.job";
 import { DomainEventOutboxWorkerService } from "./domain-event-outbox-worker.service";
+import { BulkAdminService } from "./bulk-admin/bulk-admin.service";
+import { BulkAdminController } from "./bulk-admin/bulk-admin.controller";
 
 @Module({
   imports: [
@@ -36,7 +38,7 @@ import { DomainEventOutboxWorkerService } from "./domain-event-outbox-worker.ser
     WebhooksModule,
     ApiKeysModule,
   ],
-  controllers: [JobExecutionController],
+  controllers: [JobExecutionController, BulkAdminController],
   providers: [
     ContractAnchoringService,
     AnchoringWorkerService,
@@ -56,6 +58,7 @@ import { DomainEventOutboxWorkerService } from "./domain-event-outbox-worker.ser
     JobExecutionService,
     JobExecutionMaintenanceJob,
     AttestationReconcilerService,
+    BulkAdminService,
   ],
   exports: [
     AnchoringWorkerService,
@@ -69,6 +72,7 @@ import { DomainEventOutboxWorkerService } from "./domain-event-outbox-worker.ser
     IssuerReconciliationService,
     RetentionCleanupService,
     JobExecutionService,
+    BulkAdminService,
   ],
 })
 export class JobsModule {}

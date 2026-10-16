@@ -284,6 +284,7 @@ model User {
   createdAccessReviews    AccessReviewCampaign[] @relation("CreatedAccessReviews")
   reviewedAccessEntries   AccessReviewEntry[]    @relation("ReviewedAccessEntries")
   consentRecords          ConsentRecord[]
+  sessionRiskEvents       SessionRiskEvent[]
 
   @@index([walletHash])
   @@index([status])
@@ -412,6 +413,8 @@ model Organization {
   supportAccessGrants  SupportAccessGrant[]
   transactionConfirmations TransactionConfirmation[]
   domainEventsOutbox       DomainEventOutbox[]
+  bulkAdminJobs        BulkAdminJob[]
+  securityNotifications SecurityNotification[]
 
   @@index([status])
   @@index([archivedAt])
@@ -2204,3 +2207,157 @@ model DomainEventConsumerRecord {
   @@index([consumerName, processedAt])
 }
 
+// ---------------------------------------------------------------------------
+// Session Risk Events and Reauthentication History (#284)
+// ---------------------------------------------------------------------------
+
+enum SessionRiskType {
+  WALLET_MISMATCH
+  ORIGIN_ANOMALY
+  REPLAY_SUSPECTED
+  ROTATION_ANOMALY
+  UNRECOGNIZED_DEVICE
+  CONCURRENT_GEO_ANOMALY
+}
+
+enum SessionRiskSeverity {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+model SessionRiskEvent {
+  id          String              @id @default(cuid())
+  userId      String
+  user        User                @relation(fields: [userId], references: [id])
+  sessionId   String?
+  riskType    SessionRiskType
+  severity    SessionRiskSeverity @default(LOW)
+  signals     Json
+  resolvedAt  DateTime?
+  retainUntil DateTime
+  createdAt   DateTime            @default(now())
+
+  @@index([userId, createdAt])
+  @@index([sessionId])
+  @@index([riskType, createdAt])
+  @@index([retainUntil])
+}
+
+// ---------------------------------------------------------------------------
+// Bounded Bulk Administration Jobs (#290)
+// ---------------------------------------------------------------------------
+
+enum BulkAdminJobType {
+  MEMBER_ROLE_UPDATE
+  ISSUER_STATUS_UPDATE
+  KEY_ROTATION
+  WEBHOOK_CONFIG_UPDATE
+}
+
+enum BulkAdminJobStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  CANCELLED
+  FAILED
+}
+
+enum BulkAdminItemStatus {
+  PENDING
+  SUCCESS
+  FAILED
+  SKIPPED
+}
+
+model BulkAdminJob {
+  id                String             @id @default(cuid())
+  organizationId    String
+  organization      Organization       @relation(fields: [organizationId], references: [id])
+  requestedById     String
+  jobType           BulkAdminJobType
+  status            BulkAdminJobStatus @default(PENDING)
+  atomic            Boolean            @default(false)
+  totalItems        Int                @default(0)
+  processedItems    Int                @default(0)
+  succeededItems    Int                @default(0)
+  failedItems       Int                @default(0)
+  idempotencyKey    String             @unique
+  leaseOwner        String?
+  leaseExpiresAt    DateTime?
+  cancelRequestedAt DateTime?
+  retainUntil       DateTime
+  items             BulkAdminJobItem[]
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+  completedAt       DateTime?
+
+  @@index([organizationId, status])
+  @@index([status, leaseExpiresAt])
+  @@index([retainUntil])
+}
+
+model BulkAdminJobItem {
+  id            String              @id @default(cuid())
+  jobId         String
+  job           BulkAdminJob        @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  itemIndex     Int
+  action        String
+  resourceId    String
+  payload       Json
+  status        BulkAdminItemStatus @default(PENDING)
+  errorCategory String?
+  errorMessage  String?
+  retries       Int                 @default(0)
+  completedAt   DateTime?
+  createdAt     DateTime            @default(now())
+
+  @@unique([jobId, itemIndex])
+  @@index([jobId, status])
+}
+
+// ---------------------------------------------------------------------------
+// Tenant-Scoped Security Notification Inbox (#293)
+// ---------------------------------------------------------------------------
+
+enum SecurityNotificationType {
+  SUSPICIOUS_LOGIN
+  API_KEY_EXHAUSTED
+  KEY_ROTATION_REQUIRED
+  ACCESS_REVIEW_REQUIRED
+  CIRCUIT_BREAKER_TRIPPED
+  DISPUTE_FILED
+  SYSTEM_SECURITY_ALERT
+}
+
+enum SecurityNotificationSeverity {
+  INFO
+  WARNING
+  HIGH
+  CRITICAL
+}
+
+model SecurityNotification {
+  id               String                       @id @default(cuid())
+  organizationId   String
+  organization     Organization                 @relation(fields: [organizationId], references: [id])
+  userId           String?
+  type             SecurityNotificationType
+  severity         SecurityNotificationSeverity @default(INFO)
+  title            String                       @db.VarChar(128)
+  summary          String                       @db.VarChar(512)
+  data             Json
+  acknowledgedAt   DateTime?
+  acknowledgedById String?
+  resolutionUrl    String?                      @db.VarChar(256)
+  retainUntil      DateTime
+  createdAt        DateTime                     @default(now())
+  updatedAt        DateTime                     @updatedAt
+
+  @@index([organizationId, createdAt])
+  @@index([organizationId, acknowledgedAt])
+  @@index([userId, createdAt])
+  @@index([type, createdAt])
+  @@index([retainUntil])
+}
