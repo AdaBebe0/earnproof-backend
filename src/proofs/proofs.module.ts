@@ -15,10 +15,6 @@ import { ProofReconciliationService } from "./proof-reconciliation.service";
 import { ProofVerificationAbuseService } from "../common/rate-limit/proof-verification-abuse.service";
 import { ProofExpirationReminderService } from "./proof-expiration-reminder.service";
 import { ProofExpirationReminderController } from "./proof-expiration-reminder.controller";
-
-@Module({
-  imports: [AuthModule, AuditModule, AttestationsModule, WebhooksModule, NotificationsModule],
-  controllers: [ProofsController, ProofExpirationReminderController],
 import { ProofCapacityPreflightService } from "./proof-capacity-preflight.service";
 
 @Module({
@@ -27,10 +23,11 @@ import { ProofCapacityPreflightService } from "./proof-capacity-preflight.servic
     AuditModule,
     AttestationsModule,
     WebhooksModule,
+    NotificationsModule,
     QuotasModule,
     HealthModule,
   ],
-  controllers: [ProofsController],
+  controllers: [ProofsController, ProofExpirationReminderController],
   providers: [
     ContractAnchoringService,
     CredentialVerificationKeyService,

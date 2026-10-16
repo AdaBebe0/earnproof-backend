@@ -2219,6 +2219,8 @@ model ProofExpirationReminderDelivery {
   @@unique([proofId, windowHours])
   @@index([status, scheduledFor])
   @@index([userId, status])
+}
+
 enum TransactionConfirmationStatus {
   SUBMITTED
   PENDING
