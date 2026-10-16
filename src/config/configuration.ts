@@ -278,13 +278,11 @@ export const configuration = () => ({
   ),
   apiDeprecation: {
     allowedDocumentationOrigins: (
-      process.env.API_DEPRECATION_ALLOWED_DOCUMENTATION_ORIGINS ??
-      ""
+      process.env.API_DEPRECATION_ALLOWED_DOCUMENTATION_ORIGINS ?? ""
     )
       .split(",")
       .map((value) => value.trim())
       .filter(Boolean),
-
     routes: [],
   },
 });

@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   Injectable,
+  Logger,
   Optional,
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
@@ -80,7 +81,6 @@ const MinimumIncomeCredentialSchema = z.object({
   }).strict(),
   issuedAt: z.string().datetime({ offset: true }),
   expiresAt: z.string().datetime({ offset: true }),
-  // The signature proof block appended when a credential is issued.
   // `keyId` is optional on HMAC-SHA256 for backward compatibility: a credential
   // issued before key rotation existed has no keyId and is treated as signed by
   // key version 0.
@@ -296,7 +296,7 @@ export class CredentialsService {
     const keyVersion = proof.keyId ? versionFromKeyId(proof.keyId) : 0;
 
     if (keyVersion === null || !this.signingKeyring.isUsableForVerification(keyVersion)) {
-      this.logger.log({
+      this.logger.warn("Credential verification rejected: unsupported key", {
         event: "credential_verify",
         result: "unsupported_key",
         credentialHash,

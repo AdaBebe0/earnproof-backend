@@ -140,12 +140,19 @@ const encryptionKey = z.string().refine((value) => {
 }, "PAYMENT_ENCRYPTION_KEY must be 32 bytes encoded as base64 or 64-char hex");
 
 // ── Helper: Positive integer (for ports, limits) ──
-const positiveInt = (fieldName: string) =>
-  z
+const positiveInt = (fieldNameOrMin: string | number, max?: number, defaultValue?: number) => {
+  if (typeof fieldNameOrMin === "number") {
+    let schema = z.coerce.number().int().min(fieldNameOrMin);
+    if (max !== undefined) schema = schema.max(max);
+    if (defaultValue !== undefined) return schema.default(defaultValue);
+    return schema;
+  }
+  return z
     .coerce.number()
-    .int(`${fieldName} must be an integer`)
-    .positive(`${fieldName} must be a positive integer`)
-    .finite(`${fieldName} must be a finite number`);
+    .int(`${fieldNameOrMin} must be an integer`)
+    .positive(`${fieldNameOrMin} must be a positive integer`)
+    .finite(`${fieldNameOrMin} must be a finite number`);
+};
 
 // ── Helper: Non-negative integer (includes zero) ──
 const nonnegativeInt = (fieldName: string) =>

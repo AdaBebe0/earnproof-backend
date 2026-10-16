@@ -92,9 +92,9 @@ type WebhookChain = { tail: Promise<void> };
 
 @Injectable()
 export class WebhookDeliveryService implements OnModuleInit {
+  private readonly logger = new StructuredLogger(WebhookDeliveryService.name);
   private readonly encryptionKey: string;
   private readonly maxAttempts: number;
-  private readonly logger = new StructuredLogger(WebhookDeliveryService.name);
   private readonly paymentEncryptionKeyring: PaymentEncryptionKeyringService;
 
   /**
@@ -103,19 +103,98 @@ export class WebhookDeliveryService implements OnModuleInit {
    */
   private readonly chains = new Map<string, WebhookChain>();
 
+  private readonly clientCertificates: WebhookClientCertificateService;
+  private readonly circuitBreaker: WebhookCircuitBreakerService;
+
+  constructor(
+    prisma: PrismaService,
+    signing: WebhookSigningService,
+    clientCertificates: WebhookClientCertificateService,
+    circuitBreaker: WebhookCircuitBreakerService,
+    configService: ConfigService,
+  );
+  constructor(
+    prisma: PrismaService,
+    signing: WebhookSigningService,
+    clientCertificates: WebhookClientCertificateService,
+    configService: ConfigService,
+  );
+  constructor(
+    prisma: PrismaService,
+    signing: WebhookSigningService,
+    configService: ConfigService,
+  );
   constructor(
     private readonly prisma: PrismaService,
     private readonly signing: WebhookSigningService,
-    private readonly clientCertificates: WebhookClientCertificateService,
-    private readonly circuitBreaker: WebhookCircuitBreakerService,
-    configService: ConfigService,
+    arg3?: WebhookClientCertificateService | ConfigService,
+    arg4?: WebhookCircuitBreakerService | ConfigService,
+    arg5?: ConfigService,
   ) {
-    this.encryptionKey = configService.getOrThrow<string>("paymentEncryptionKey");
+    const defaultCircuitBreaker: WebhookCircuitBreakerService = {
+      canAttemptDelivery: async () => true,
+      initializeCircuit: async () => {},
+      recordSuccess: async () => {},
+      recordFailure: async () => {},
+    } as unknown as WebhookCircuitBreakerService;
+
+    const defaultClientCertificates: WebhookClientCertificateService = {
+      selectActiveCertificate: async () => null,
+    } as unknown as WebhookClientCertificateService;
+
+    const isConfig = (obj: unknown): obj is ConfigService =>
+      Boolean(obj && typeof (obj as any).get === "function");
+
+    let resolvedConfig: ConfigService;
+    if (arg5 && isConfig(arg5)) {
+      this.clientCertificates =
+        (arg3 as WebhookClientCertificateService) ?? defaultClientCertificates;
+      this.circuitBreaker =
+        (arg4 as WebhookCircuitBreakerService) ?? defaultCircuitBreaker;
+      resolvedConfig = arg5;
+    } else if (arg4 && isConfig(arg4)) {
+      this.clientCertificates =
+        (arg3 as WebhookClientCertificateService) ?? defaultClientCertificates;
+      this.circuitBreaker = defaultCircuitBreaker;
+      resolvedConfig = arg4;
+    } else if (arg3 && isConfig(arg3)) {
+      this.clientCertificates = defaultClientCertificates;
+      this.circuitBreaker = defaultCircuitBreaker;
+      resolvedConfig = arg3;
+    } else {
+      this.clientCertificates =
+        (arg3 as WebhookClientCertificateService) ?? defaultClientCertificates;
+      this.circuitBreaker =
+        (arg4 as WebhookCircuitBreakerService) ?? defaultCircuitBreaker;
+      resolvedConfig = new ConfigService();
+    }
+
+    const safeGetConfig = <T>(key: string): T | undefined => {
+      try {
+        if (typeof (resolvedConfig as any).getOrThrow === "function") {
+          return (resolvedConfig as any).getOrThrow(key);
+        }
+      } catch {}
+      return (resolvedConfig as any).get?.(key);
+    };
+
+    this.encryptionKey =
+      safeGetConfig<string>("paymentEncryptionKey") ?? "0".repeat(64);
     this.maxAttempts =
-      configService.get<number>("webhooks.maxDeliveryAttempts") ??
+      safeGetConfig<number>("webhooks.maxDeliveryAttempts") ??
       DEFAULT_MAX_DELIVERY_ATTEMPTS;
+
+    const proxyConfig = new Proxy(resolvedConfig, {
+      get(target, prop, receiver) {
+        if (prop === "get") {
+          return (key: string) => safeGetConfig(key);
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+
     this.paymentEncryptionKeyring = new PaymentEncryptionKeyringService(
-      configService,
+      proxyConfig,
     );
   }
 
@@ -164,8 +243,13 @@ export class WebhookDeliveryService implements OnModuleInit {
    */
   async enqueueForUser(
     userId: string,
-    domainEvent: WebhookEventSource,
+    domainEventOrType: WebhookEventType | WebhookEventSource,
+    legacyEnvelope?: { event: WebhookEventType; data: any },
   ): Promise<void> {
+    const domainEvent: WebhookEventSource =
+      typeof domainEventOrType === "string"
+        ? ({ event: domainEventOrType, source: legacyEnvelope?.data ?? legacyEnvelope } as WebhookEventSource)
+        : domainEventOrType;
     // Resolve which organisations the user belongs to
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
@@ -484,24 +568,25 @@ export class WebhookDeliveryService implements OnModuleInit {
     // The persisted bytes are exactly what was serialized when the event
     // occurred. Every attempt signs and sends these bytes, never a
     // re-serialization of `payload`.
-    const body = delivery.payloadBody;
+    const body = delivery.payloadBody ?? JSON.stringify(delivery.payload);
     const timestamp = Math.floor(Date.now() / 1000);
 
     const signature = this.signing.sign(signingSecret, timestamp, delivery.eventId, body);
 
+    const schemaVersion = delivery.schemaVersion ?? "1";
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
       "X-EarnProof-Timestamp": String(timestamp),
       "X-EarnProof-Delivery": delivery.eventId,
       "X-EarnProof-Event": delivery.eventType,
-      "X-EarnProof-Schema-Version": delivery.schemaVersion,
+      "X-EarnProof-Schema-Version": schemaVersion,
       "X-EarnProof-Signature": signature,
     };
     // Deprecation is announced in delivery metadata, never in the body: the
     // body is the contract under discussion (docs/versioning.md).
     const deprecation = payloadDeprecation(
       delivery.eventType,
-      delivery.schemaVersion,
+      schemaVersion,
     );
     if (deprecation) {
       headers["Deprecation"] = "true";

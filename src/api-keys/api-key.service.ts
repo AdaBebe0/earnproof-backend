@@ -231,7 +231,6 @@ export class ApiKeyService {
             name: created.name,
             organizationId: created.organizationId,
             scopes: created.scopeAssignments.map((sa) => sa.scope),
-            expiresAt: created.expiresAt?.toISOString(),
           },
         },
       });

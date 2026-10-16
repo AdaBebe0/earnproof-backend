@@ -57,7 +57,7 @@ export class DisclosureController {
    * Requires authentication and API key with disclosure permissions.
    */
   @Post("receipts")
-  @UseGuards(AuthGuard("jwt"), ApiKeyGuard)
+  @UseGuards(AuthGuard, ApiKeyGuard)
   @RequireApiKeyScopes("disclosure:create")
   @ApiBearerAuth()
   @ApiOperation({
@@ -183,7 +183,7 @@ export class DisclosureController {
    * Supports filtering by proof ID and pagination.
    */
   @Get("receipts")
-  @UseGuards(AuthGuard("jwt"), ApiKeyGuard)
+  @UseGuards(AuthGuard, ApiKeyGuard)
   @RequireApiKeyScopes("disclosure:read")
   @ApiBearerAuth()
   @ApiOperation({

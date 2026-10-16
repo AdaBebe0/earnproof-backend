@@ -88,6 +88,13 @@ export type WebhookEventSource = {
   [E in WebhookEventType]: { event: E; source: WebhookEventSources[E] };
 }[WebhookEventType];
 
+export interface WebhookPayloadsV1 {
+  "proof.created": ProofCreatedPayload;
+  "proof.revoked": ProofRevokedPayload;
+  "proof.verified": ProofVerifiedPayload;
+  "attestation.expired": AttestationExpiredPayload;
+}
+
 // ---------------------------------------------------------------------------
 // Version 1 payload shapes — only public / non-sensitive fields are included.
 // Private proof inputs (source transactions, exact aggregate income,

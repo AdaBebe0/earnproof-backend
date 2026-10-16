@@ -1,9 +1,32 @@
-import { Injectable } from "@nestjs/common";
+import { Injectable, Optional } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { VerificationOutcome } from "@prisma/client";
 import { createHmac } from "crypto";
 import { StructuredLogger } from "../common/logger";
+import { Clock, SystemClock } from "../common/time/clock";
 import { PrismaService } from "../database/prisma.service";
+import type { RetentionImpactReport } from "../jobs/retention/retention-report";
+
+/**
+ * Version of the expired-event cleanup rule: delete where `retainUntil < now`.
+ *
+ * Fixed rather than derived, because the rule has no tunable input — the
+ * retention duration is baked into each row's `retainUntil` at write time.
+ * Bump it if the selection predicate below ever changes.
+ */
+export const VERIFICATION_EVENT_CLEANUP_POLICY_VERSION =
+  "verification-events-retain-until-v1";
+
+/** Report category for the expired-event cleanup. */
+export const VERIFICATION_EVENT_CLEANUP_CATEGORY = "verification_events_expired";
+
+/** Options for {@link VerificationEventService.cleanupExpiredEvents}. */
+export interface ExpiredEventCleanupOptions {
+  /** Count what would be deleted, writing nothing. */
+  dryRun?: boolean;
+  /** Evaluation instant; defaults to the injected clock. */
+  now?: Date;
+}
 
 /**
  * Privacy-safe verification event recording.
@@ -42,6 +65,9 @@ export class VerificationEventService {
   constructor(
     private readonly prisma: PrismaService,
     configService: ConfigService,
+    // Not provided by AuditModule; defaults to the system clock. Tests pass a
+    // FixedClock (test/time/fixed-clock.ts) to pin the cleanup boundary.
+    @Optional() private readonly clock: Clock = new SystemClock(),
   ) {
     this.retentionDays =
       configService.get<number>("verificationEventRetentionDays") || 90;
@@ -82,17 +108,15 @@ export class VerificationEventService {
       if (fallbackSalt) {
         this.salts.set(0, fallbackSalt);
         this.logger.warn(
-          "Using credentialSigningSecret as fallback salt V0",
-          { context: "Configure VERIFICATION_HASH_SALT_V* for production" }
+          "Using credentialSigningSecret as fallback salt V0; configure VERIFICATION_HASH_SALT_V* for production",
         );
       }
     }
 
     if (!this.salts.has(this.currentSaltVersion)) {
-      this.logger.warn("Configured salt version is not available", {
-        configuredVersion: this.currentSaltVersion,
-        availableVersions: this.salts.size - 1,
-      });
+      this.logger.warn(
+        `Configured salt version ${this.currentSaltVersion} is not available`,
+      );
     }
   }
 
@@ -139,10 +163,9 @@ export class VerificationEventService {
       });
     } catch (error) {
       // Fail-open: log but do not throw
-      this.logger.warn("Failed to record verification event", {
-        proofId,
-        errorMessage: error instanceof Error ? error.message : String(error),
-      });
+      this.logger.warn(
+        `Failed to record verification event: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
   }
 
@@ -222,34 +245,77 @@ export class VerificationEventService {
    * - Via a cron job (e.g., daily at 2 AM)
    * - Or triggered manually for maintenance
    *
+   * With `dryRun`, counts the events that would be deleted and writes nothing.
+   *
    * Returns count for auditability; logs all cleanup operations.
    *
-   * @returns Number of records deleted
+   * @returns Number of records deleted (or, in a dry run, that would be)
    */
-  async cleanupExpiredEvents(): Promise<number> {
+  async cleanupExpiredEvents(
+    options: ExpiredEventCleanupOptions = {},
+  ): Promise<number> {
+    const report = await this.runExpiredEventsCleanup(options);
+    return report.mode === "dry_run"
+      ? report.totals.selected
+      : report.totals.affected;
+  }
+
+  /**
+   * The expired-event cleanup with its full impact report.
+   */
+  async runExpiredEventsCleanup(
+    options: ExpiredEventCleanupOptions = {},
+  ): Promise<RetentionImpactReport> {
+    const dryRun = options.dryRun ?? false;
+    const now = options.now ?? this.clock.now();
+    const where = expiredEventsFilter(now);
+    this.prunePrivacyBudget(now.getTime());
+
+    let selected = 0;
+    let affected = 0;
+    let failed = false;
+
     try {
-      const now = new Date();
-      this.prunePrivacyBudget(now.getTime());
-      const result = await this.prisma.verificationEventLog.deleteMany({
-        where: {
-          retainUntil: {
-            lt: now,
-          },
-        },
-      });
-
-      this.logger.log("Verification event cleanup completed", {
-        count: result.count,
-        timestamp: now.toISOString(),
-      });
-
-      return result.count;
+      if (dryRun) {
+        selected = await this.prisma.verificationEventLog.count({ where });
+        this.logger.log(
+          `Verification event cleanup (dry run): ${selected} records eligible (timestamp: ${now.toISOString()})`,
+        );
+      } else {
+        const result = await this.prisma.verificationEventLog.deleteMany({
+          where,
+        });
+        selected = result.count;
+        affected = result.count;
+        this.logger.log(
+          `Verification event cleanup: deleted ${result.count} records (timestamp: ${now.toISOString()})`,
+        );
+      }
     } catch (error) {
-      this.logger.error("Verification event cleanup failed", error, {
-        errorMessage: error instanceof Error ? error.message : String(error),
-      });
-      return 0;
+      failed = true;
+      this.logger.error("Verification event cleanup failed", error);
     }
+
+    return {
+      mode: dryRun ? "dry_run" : "execute",
+      policyVersion: VERIFICATION_EVENT_CLEANUP_POLICY_VERSION,
+      evaluatedAt: now.toISOString(),
+      categories: [
+        {
+          category: VERIFICATION_EVENT_CLEANUP_CATEGORY,
+          cutoff: now.toISOString(),
+          cutoffColumn: "retainUntil",
+          selected,
+          affected,
+          truncated: false,
+          failed,
+          organizations:
+            selected > 0 ? [{ organizationId: null, count: selected }] : [],
+          otherOrganizations: { buckets: 0, count: 0 },
+        },
+      ],
+      totals: { selected, affected },
+    };
   }
 
   private prunePrivacyBudget(now: number): void {
@@ -302,7 +368,7 @@ export class VerificationEventService {
 
       return stats as Record<VerificationOutcome, number>;
     } catch (error) {
-      this.logger.error("Failed to get verification stats", error, { proofId });
+      this.logger.error("Failed to get verification stats", error);
       // Return empty stats on error
       const empty: Record<string, number> = {};
       for (const outcome of Object.values(VerificationOutcome)) {
@@ -312,4 +378,15 @@ export class VerificationEventService {
     }
   }
 
+}
+
+/**
+ * Selection predicate shared by the dry run and the real cleanup.
+ *
+ * Strictly less-than: an event whose retainUntil equals `now` is kept.
+ */
+export function expiredEventsFilter(now: Date): {
+  retainUntil: { lt: Date };
+} {
+  return { retainUntil: { lt: now } };
 }

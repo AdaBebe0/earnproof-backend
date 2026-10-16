@@ -160,8 +160,7 @@ describe("Auth challenge replay and race-condition tests", () => {
         },
       };
 
-      const authService = buildAuthService(mockPrisma);
-      authService = buildAuthService(mockPrisma, mockConfig);
+      const authService = buildAuthService(mockPrisma, mockConfig);
 
       // First verification succeeds
       const result1 = await authService.verifyChallenge({
