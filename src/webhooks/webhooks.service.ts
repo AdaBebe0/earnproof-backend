@@ -15,8 +15,7 @@ import { UpdateWebhookEventsDto } from "./dto/update-webhook-events.dto";
 import { OrganizationQuotaService } from "../quotas/organization-quota.service";
 import { WebhookDeliveryService } from "./webhook-delivery.service";
 import { WebhookCircuitBreakerService } from "./webhook-circuit-breaker.service";
-import { SecretRetrievalReceiptService } from "../audit/secret-retrieval-receipt.service";
-import { SecretType, DeliveryChannel } from "../audit/types/secret-retrieval-receipt.types";
+import { CURRENT_WEBHOOK_PAYLOAD_VERSION } from "./webhook-event.types";
 
 /** Signing secret length in bytes (produces a 64-char hex string). */
 const SECRET_BYTES = 32;
@@ -73,38 +72,6 @@ export class WebhooksService {
           createdAt: true,
         },
       });
-
-      // Create receipt: immutable evidence that signing secret was revealed
-      const receipt = await this.secretRetrievalReceiptService.create(
-        {
-          organizationId,
-          secretType: SecretType.WEBHOOK,
-          resourceId: created.id,
-          resourceReference: dto.url,
-          recipientId: undefined, // webhook creation typically not attributed to a user
-          deliveryChannel: DeliveryChannel.HTTP_RESPONSE,
-          revealedAt: new Date(),
-        },
-        tx,
-      );
-
-      // Audit log: webhook created
-      await tx.auditLog.create({
-        data: {
-          actorType: "user",
-          action: "webhook.created",
-          resourceType: "webhook",
-          resourceId: created.id,
-          organizationId,
-          metadata: {
-            url: dto.url,
-            events,
-            receiptId: receipt.id,
-          },
-        },
-      });
-
-      return created;
     });
 
     // Initialize circuit breaker for new webhook (outside transaction for idempotency)

@@ -29,6 +29,7 @@ describe("IssuersController", () => {
     contractSyncState: "PENDING",
     contractTransactionHash: null,
     contractSyncedAt: null,
+    revision: 0,
     verifiedAt: null,
     suspendedAt: null,
     revokedAt: null,
@@ -109,6 +110,7 @@ describe("IssuersController", () => {
           description: "Updated description",
           logoUrl: "https://example.com/logo.png",
         },
+        expectedRevision: 0,
       };
 
       jest.spyOn(service, "updateIssuerMetadata").mockResolvedValue({
@@ -133,7 +135,7 @@ describe("IssuersController", () => {
 
   describe("updateIssuerStatus", () => {
     it("should call service and return result", async () => {
-      const input = { status: ResourceStatus.ACTIVE };
+      const input = { status: ResourceStatus.ACTIVE, expectedRevision: 0 };
 
       jest.spyOn(service, "updateIssuerStatus").mockResolvedValue({
         ...mockIssuer,

@@ -5,18 +5,16 @@ import { AuditVerificationService } from "./audit-verification.service";
 import { VerificationEventService } from "./verification-event.service";
 import { SecretRetrievalReceiptService } from "./secret-retrieval-receipt.service";
 
+import { AuditGraphService } from "./audit-graph.service";
+
 @Module({
   controllers: [AuditAdminController],
   providers: [
     VerificationEventService,
     AuditAdminService,
     AuditVerificationService,
-    SecretRetrievalReceiptService,
+    AuditGraphService,
   ],
-  exports: [
-    VerificationEventService,
-    AuditVerificationService,
-    SecretRetrievalReceiptService,
-  ],
+  exports: [VerificationEventService, AuditVerificationService, AuditGraphService],
 })
 export class AuditModule {}

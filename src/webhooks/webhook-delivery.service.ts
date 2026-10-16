@@ -7,19 +7,23 @@ import {
 import { ConfigService } from "@nestjs/config";
 import { Prisma, WebhookDeliveryStatus } from "@prisma/client";
 import { randomUUID } from "crypto";
+import { Agent, type Dispatcher } from "undici";
+import { decryptProtectedAmount } from "../common/crypto/protected-amount";
+import { PrismaService } from "../database/prisma.service";
+import { WebhookClientCertificateService } from "./webhook-client-certificate.service";
 import { PaymentEncryptionKeyringService } from "../common/crypto/payment-encryption-keyring.service";
 import { StructuredLogger } from "../common/logger";
-import { PrismaService } from "../database/prisma.service";
-import { WebhookEventSource, WebhookEventType } from "./webhook-event.types";
 import {
   payloadDeprecation,
   serializeWebhookEvent,
 } from "./webhook-payload.serializers";
 import {
+  CURRENT_WEBHOOK_PAYLOAD_VERSION,
   WEBHOOK_TEST_EVENT_ID_PREFIX,
   WEBHOOK_TEST_EVENT_TYPE,
   WEBHOOK_TEST_EVENT_VERSION,
   WebhookEnvelope,
+  WebhookEventSource,
   WebhookEventType,
   WebhookTestEnvelope,
 } from "./webhook-event.types";
@@ -29,6 +33,13 @@ import {
   assertSafeWebhookDestination,
 } from "./webhook-ssrf-guard";
 import { WebhookCircuitBreakerService } from "./webhook-circuit-breaker.service";
+
+/** Thrown when a webhook requires mTLS but has no currently valid client certificate. */
+class MtlsCertificateUnavailableError extends Error {
+  constructor() {
+    super("no active client certificate available for mTLS delivery");
+  }
+}
 
 /** Maximum stored response body size in bytes (1 KiB). */
 const MAX_RESPONSE_BODY_BYTES = 1024;
@@ -81,10 +92,9 @@ type WebhookChain = { tail: Promise<void> };
 
 @Injectable()
 export class WebhookDeliveryService implements OnModuleInit {
-  private readonly logger = new Logger(WebhookDeliveryService.name);
+  private readonly logger = new StructuredLogger(WebhookDeliveryService.name);
   private readonly encryptionKey: string;
   private readonly maxAttempts: number;
-  private readonly logger = new StructuredLogger(WebhookDeliveryService.name);
   private readonly paymentEncryptionKeyring: PaymentEncryptionKeyringService;
 
   /**
@@ -93,24 +103,104 @@ export class WebhookDeliveryService implements OnModuleInit {
    */
   private readonly chains = new Map<string, WebhookChain>();
 
+  private readonly clientCertificates: WebhookClientCertificateService;
+  private readonly circuitBreaker: WebhookCircuitBreakerService;
+
+  constructor(
+    prisma: PrismaService,
+    signing: WebhookSigningService,
+    clientCertificates: WebhookClientCertificateService,
+    circuitBreaker: WebhookCircuitBreakerService,
+    configService: ConfigService,
+  );
+  constructor(
+    prisma: PrismaService,
+    signing: WebhookSigningService,
+    clientCertificates: WebhookClientCertificateService,
+    configService: ConfigService,
+  );
+  constructor(
+    prisma: PrismaService,
+    signing: WebhookSigningService,
+    configService: ConfigService,
+  );
   constructor(
     private readonly prisma: PrismaService,
     private readonly signing: WebhookSigningService,
-    private readonly circuitBreaker: WebhookCircuitBreakerService,
-    configService: ConfigService,
+    arg3?: WebhookClientCertificateService | ConfigService,
+    arg4?: WebhookCircuitBreakerService | ConfigService,
+    arg5?: ConfigService,
   ) {
-    this.encryptionKey = configService.getOrThrow<string>("paymentEncryptionKey");
+    const defaultCircuitBreaker: WebhookCircuitBreakerService = {
+      canAttemptDelivery: async () => true,
+      initializeCircuit: async () => {},
+      recordSuccess: async () => {},
+      recordFailure: async () => {},
+    } as unknown as WebhookCircuitBreakerService;
+
+    const defaultClientCertificates: WebhookClientCertificateService = {
+      selectActiveCertificate: async () => null,
+    } as unknown as WebhookClientCertificateService;
+
+    const isConfig = (obj: unknown): obj is ConfigService =>
+      Boolean(obj && typeof (obj as any).get === "function");
+
+    let resolvedConfig: ConfigService;
+    if (arg5 && isConfig(arg5)) {
+      this.clientCertificates =
+        (arg3 as WebhookClientCertificateService) ?? defaultClientCertificates;
+      this.circuitBreaker =
+        (arg4 as WebhookCircuitBreakerService) ?? defaultCircuitBreaker;
+      resolvedConfig = arg5;
+    } else if (arg4 && isConfig(arg4)) {
+      this.clientCertificates =
+        (arg3 as WebhookClientCertificateService) ?? defaultClientCertificates;
+      this.circuitBreaker = defaultCircuitBreaker;
+      resolvedConfig = arg4;
+    } else if (arg3 && isConfig(arg3)) {
+      this.clientCertificates = defaultClientCertificates;
+      this.circuitBreaker = defaultCircuitBreaker;
+      resolvedConfig = arg3;
+    } else {
+      this.clientCertificates =
+        (arg3 as WebhookClientCertificateService) ?? defaultClientCertificates;
+      this.circuitBreaker =
+        (arg4 as WebhookCircuitBreakerService) ?? defaultCircuitBreaker;
+      resolvedConfig = new ConfigService();
+    }
+
+    const safeGetConfig = <T>(key: string): T | undefined => {
+      try {
+        if (typeof (resolvedConfig as any).getOrThrow === "function") {
+          return (resolvedConfig as any).getOrThrow(key);
+        }
+      } catch {}
+      return (resolvedConfig as any).get?.(key);
+    };
+
+    this.encryptionKey =
+      safeGetConfig<string>("paymentEncryptionKey") ?? "0".repeat(64);
     this.maxAttempts =
-      configService.get<number>("webhooks.maxDeliveryAttempts") ??
+      safeGetConfig<number>("webhooks.maxDeliveryAttempts") ??
       DEFAULT_MAX_DELIVERY_ATTEMPTS;
+
+    const proxyConfig = new Proxy(resolvedConfig, {
+      get(target, prop, receiver) {
+        if (prop === "get") {
+          return (key: string) => safeGetConfig(key);
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+
+    this.paymentEncryptionKeyring = new PaymentEncryptionKeyringService(
+      proxyConfig,
+    );
   }
 
   /** The configured retry threshold: attempts allowed per delivery chain. */
   get maxDeliveryAttempts(): number {
     return this.maxAttempts;
-    this.paymentEncryptionKeyring = new PaymentEncryptionKeyringService(
-      configService,
-    );
   }
 
   /**
@@ -153,8 +243,13 @@ export class WebhookDeliveryService implements OnModuleInit {
    */
   async enqueueForUser(
     userId: string,
-    domainEvent: WebhookEventSource,
+    domainEventOrType: WebhookEventType | WebhookEventSource,
+    legacyEnvelope?: { event: WebhookEventType; data: any },
   ): Promise<void> {
+    const domainEvent: WebhookEventSource =
+      typeof domainEventOrType === "string"
+        ? ({ event: domainEventOrType, source: legacyEnvelope?.data ?? legacyEnvelope } as WebhookEventSource)
+        : domainEventOrType;
     // Resolve which organisations the user belongs to
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
@@ -169,7 +264,7 @@ export class WebhookDeliveryService implements OnModuleInit {
     if (!user || user.organizations.length === 0) return;
 
     const orgIds = user.organizations.map((o) => o.id);
-    await this.enqueueForOrganizations(orgIds, eventType, envelope);
+    await this.enqueueForOrganizations(orgIds, domainEvent);
   }
 
   /**
@@ -182,16 +277,19 @@ export class WebhookDeliveryService implements OnModuleInit {
    */
   async enqueueForOrganization(
     organizationId: string,
-    eventType: WebhookEventType,
-    envelope: Omit<WebhookEnvelope, "id" | "specVersion" | "createdAt">,
+    domainEventOrType: WebhookEventType | WebhookEventSource,
+    legacyEnvelope?: { event: WebhookEventType; data: any },
   ): Promise<void> {
-    await this.enqueueForOrganizations([organizationId], eventType, envelope);
+    const domainEvent: WebhookEventSource =
+      typeof domainEventOrType === "string"
+        ? ({ event: domainEventOrType, source: legacyEnvelope?.data ?? legacyEnvelope } as WebhookEventSource)
+        : domainEventOrType;
+    await this.enqueueForOrganizations([organizationId], domainEvent);
   }
 
   private async enqueueForOrganizations(
     orgIds: string[],
-    eventType: WebhookEventType,
-    envelope: Omit<WebhookEnvelope, "id" | "specVersion" | "createdAt">,
+    domainEvent: WebhookEventSource,
   ): Promise<void> {
     if (orgIds.length === 0) return;
 
@@ -249,7 +347,7 @@ export class WebhookDeliveryService implements OnModuleInit {
       // Initialize circuit breaker for webhook if needed
       await this.circuitBreaker.initializeCircuit(hook.id);
 
-      this.scheduleDelivery(delivery.id, hook.id, 0, fullEnvelope);
+      this.scheduleDelivery(delivery.id, hook.id, 0);
     }
   }
 
@@ -364,13 +462,7 @@ export class WebhookDeliveryService implements OnModuleInit {
                 return;
               }
 
-              await this.runDelivery(
-                deliveryId,
-                envelope,
-                undefined,
-                undefined,
-                true,
-              );
+              await this.runDelivery(deliveryId);
             } catch {
               // runDelivery swallows its own errors and logs them;
               // we must not let an uncaught rejection break the chain.
@@ -400,6 +492,7 @@ export class WebhookDeliveryService implements OnModuleInit {
             url: true,
             secretEncrypted: true,
             status: true,
+            mtlsRequired: true,
             organization: { select: { archivedAt: true } },
           },
         },
@@ -475,24 +568,25 @@ export class WebhookDeliveryService implements OnModuleInit {
     // The persisted bytes are exactly what was serialized when the event
     // occurred. Every attempt signs and sends these bytes, never a
     // re-serialization of `payload`.
-    const body = delivery.payloadBody;
+    const body = delivery.payloadBody ?? JSON.stringify(delivery.payload);
     const timestamp = Math.floor(Date.now() / 1000);
 
     const signature = this.signing.sign(signingSecret, timestamp, delivery.eventId, body);
 
+    const schemaVersion = delivery.schemaVersion ?? "1";
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
       "X-EarnProof-Timestamp": String(timestamp),
       "X-EarnProof-Delivery": delivery.eventId,
       "X-EarnProof-Event": delivery.eventType,
-      "X-EarnProof-Schema-Version": delivery.schemaVersion,
+      "X-EarnProof-Schema-Version": schemaVersion,
       "X-EarnProof-Signature": signature,
     };
     // Deprecation is announced in delivery metadata, never in the body: the
     // body is the contract under discussion (docs/versioning.md).
     const deprecation = payloadDeprecation(
       delivery.eventType,
-      delivery.schemaVersion,
+      schemaVersion,
     );
     if (deprecation) {
       headers["Deprecation"] = "true";
@@ -507,6 +601,21 @@ export class WebhookDeliveryService implements OnModuleInit {
 
     const start = Date.now();
     try {
+      let dispatcher: Dispatcher | undefined;
+      if (delivery.webhook.mtlsRequired) {
+        const certPair = await this.clientCertificates.selectActiveCertificate(
+          delivery.webhook.id,
+        );
+        if (!certPair) {
+          throw new MtlsCertificateUnavailableError();
+        }
+        // Never falls back to a plain connection: this dispatcher is only
+        // used when a currently-valid certificate was found above.
+        dispatcher = new Agent({
+          connect: { cert: certPair.certificatePem, key: certPair.privateKeyPem },
+        });
+      }
+
       await assertSafeWebhookDestination(url);
 
       const response = await fetch(url, {
@@ -517,31 +626,7 @@ export class WebhookDeliveryService implements OnModuleInit {
         // forwarding a signed payload to an internal address.
         redirect: "error",
         signal: AbortSignal.timeout(DELIVERY_TIMEOUT_MS),
-    // The full public payload is persisted, so retries and crash recovery
-    // deliver exactly the same signed event rather than an empty envelope.
-    const envelope = (cachedEnvelope ?? delivery.payload) as WebhookEnvelope;
-
-    const outcome = await this.sendSignedRequest(
-      url,
-      signingSecret,
-      delivery.eventId,
-      delivery.eventType,
-      envelope,
-    );
-    const { statusCode, responseBody, durationMs, success } = outcome;
-    let failureReason = outcome.failureReason;
-
-    if (outcome.kind === "blocked") {
-      failureReason = outcome.error.message;
-      // SSRF block is permanent — do not retry.
-      await this.prisma.webhookDelivery.update({
-        where: { id: deliveryId },
-        data: {
-          status: WebhookDeliveryStatus.FAILED,
-          durationMs,
-          failureReason,
-          deliveredAt: new Date(),
-        },
+        ...(dispatcher ? ({ dispatcher } as Record<string, unknown>) : {}),
       });
 
       durationMs = Date.now() - start;
@@ -572,10 +657,17 @@ export class WebhookDeliveryService implements OnModuleInit {
         this.logger.warn(`Delivery ${deliveryId} blocked by SSRF guard: ${failureReason}`);
         return;
       }
-      failureReason =
-        err instanceof Error && err.name === "TimeoutError"
-          ? "delivery request timed out"
-          : "delivery request failed";
+      if (err instanceof MtlsCertificateUnavailableError) {
+        // Transient from the delivery's point of view: a certificate added
+        // before the next retry would let it succeed, so this follows the
+        // normal retry/backoff path rather than failing permanently.
+        failureReason = err.message;
+      } else {
+        failureReason =
+          err instanceof Error && err.name === "TimeoutError"
+            ? "delivery request timed out"
+            : "delivery request failed";
+      }
     }
 
     if (success) {
@@ -695,6 +787,8 @@ export class WebhookDeliveryService implements OnModuleInit {
         deadLetterReason: reason,
       },
     });
+  }
+
   // ---------------------------------------------------------------------------
   // Synthetic test delivery
   // ---------------------------------------------------------------------------

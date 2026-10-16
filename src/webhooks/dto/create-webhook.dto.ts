@@ -1,5 +1,4 @@
 import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
-import { ApiProperty } from "@nestjs/swagger";
 import {
   ArrayMaxSize,
   ArrayMinSize,
@@ -7,7 +6,10 @@ import {
   IsIn,
   IsOptional,
   IsUrl,
+  MaxLength,
 } from "class-validator";
+import { FIELD_LIMITS } from "../../common/limits/request-limits";
+import { IsSafeUrl } from "../../common/validation/url.validator";
 import {
   CURRENT_WEBHOOK_PAYLOAD_VERSION,
   WEBHOOK_EVENT_TYPES,
@@ -15,12 +17,6 @@ import {
   WebhookEventType,
   WebhookPayloadVersion,
 } from "../webhook-event.types";
-  IsUrl,
-  MaxLength,
-} from "class-validator";
-import { FIELD_LIMITS } from "../../common/limits/request-limits";
-import { IsSafeUrl } from "../../common/validation/url.validator";
-import { WEBHOOK_EVENT_TYPES, WebhookEventType } from "../webhook-event.types";
 
 export class CreateWebhookDto {
   @ApiProperty({

@@ -1,4 +1,4 @@
-﻿import {
+import {
   ForbiddenException,
   Injectable,
   Logger,
@@ -79,15 +79,6 @@ export class ApiKeyService {
     return sha256(secret);
   }
 
-  verifySecret(secret: string, storedHash: string): boolean {
-    const computedHash = this.hashSecret(secret);
-    const isValidFormat = /^[a-f0-9]{64}$/i.test(storedHash);
-    const hashBufferToCompare = isValidFormat
-      ? Buffer.from(storedHash, "hex")
-      : Buffer.alloc(32);
-    try {
-      return timingSafeEqual(Buffer.from(computedHash, "hex"), hashBufferToCompare);
-    } catch {
   /**
    * Verify a presented secret against a stored hash.
    * Returns true if they match (constant-time comparison).
@@ -257,8 +248,6 @@ export class ApiKeyService {
             name: created.name,
             organizationId: created.organizationId,
             scopes: created.scopeAssignments.map((sa) => sa.scope),
-            expiresAt: created.expiresAt?.toISOString(),
-            receiptId: receipt.id,
           },
         },
       });

@@ -35,6 +35,7 @@ describe("IssuersService", () => {
     slug: "test-org",
     website: "https://example.com",
     status: ResourceStatus.PENDING,
+    revision: 0,
     createdById: mockUser.id,
     createdAt: new Date("2026-01-01"),
     updatedAt: new Date("2026-01-01"),
@@ -77,7 +78,9 @@ describe("IssuersService", () => {
             issuer: {
               create: jest.fn(),
               update: jest.fn(),
+              updateMany: jest.fn().mockResolvedValue({ count: 1 }),
               findUnique: jest.fn(),
+              findUniqueOrThrow: jest.fn(),
               findMany: jest.fn(),
               count: jest.fn(),
             },
@@ -212,10 +215,11 @@ describe("IssuersService", () => {
 
   describe("updateIssuerStatus", () => {
     it("should transition from PENDING to ACTIVE", async () => {
-      const input = { status: ResourceStatus.ACTIVE };
+      const input = { status: ResourceStatus.ACTIVE, expectedRevision: 0 };
 
       jest.spyOn(prisma.issuer, "findUnique").mockResolvedValue(mockIssuer);
-      jest.spyOn(prisma.issuer, "update").mockResolvedValue({
+      jest.spyOn(prisma.issuer, "updateMany").mockResolvedValue({ count: 1 });
+      jest.spyOn(prisma.issuer, "findUniqueOrThrow").mockResolvedValue({
         ...mockIssuer,
         status: ResourceStatus.ACTIVE,
         verifiedAt: new Date(),
@@ -229,11 +233,11 @@ describe("IssuersService", () => {
       );
 
       expect(result.status).toBe(ResourceStatus.ACTIVE);
-      expect(prisma.issuer.update).toHaveBeenCalled();
+      expect(prisma.issuer.updateMany).toHaveBeenCalled();
     });
 
     it("should reject invalid status transition", async () => {
-      const input = { status: ResourceStatus.PENDING };
+      const input = { status: ResourceStatus.PENDING, expectedRevision: 0 };
       const activeIssuer = { ...mockIssuer, status: ResourceStatus.ACTIVE };
 
       jest.spyOn(prisma.issuer, "findUnique").mockResolvedValue(activeIssuer);
@@ -244,7 +248,7 @@ describe("IssuersService", () => {
     });
 
     it("should reject when user is not admin", async () => {
-      const input = { status: ResourceStatus.ACTIVE };
+      const input = { status: ResourceStatus.ACTIVE, expectedRevision: 0 };
 
       await expect(
         service.updateIssuerStatus(mockNonAdminUser, "issuer-1", input),
@@ -252,10 +256,11 @@ describe("IssuersService", () => {
     });
 
     it("should set verifiedAt when transitioning to ACTIVE", async () => {
-      const input = { status: ResourceStatus.ACTIVE };
+      const input = { status: ResourceStatus.ACTIVE, expectedRevision: 0 };
 
       jest.spyOn(prisma.issuer, "findUnique").mockResolvedValue(mockIssuer);
-      jest.spyOn(prisma.issuer, "update").mockResolvedValue({
+      jest.spyOn(prisma.issuer, "updateMany").mockResolvedValue({ count: 1 });
+      jest.spyOn(prisma.issuer, "findUniqueOrThrow").mockResolvedValue({
         ...mockIssuer,
         status: ResourceStatus.ACTIVE,
         verifiedAt: new Date(),
@@ -264,8 +269,8 @@ describe("IssuersService", () => {
 
       await service.updateIssuerStatus(mockUser, "issuer-1", input);
 
-      expect(prisma.issuer.update).toHaveBeenCalledWith({
-        where: { id: "issuer-1" },
+      expect(prisma.issuer.updateMany).toHaveBeenCalledWith({
+        where: { id: "issuer-1", revision: 0 },
         data: expect.objectContaining({
           status: ResourceStatus.ACTIVE,
           verifiedAt: expect.any(Date),
@@ -274,11 +279,12 @@ describe("IssuersService", () => {
     });
 
     it("should set suspendedAt when transitioning to SUSPENDED", async () => {
-      const input = { status: ResourceStatus.SUSPENDED };
+      const input = { status: ResourceStatus.SUSPENDED, expectedRevision: 0 };
       const activeIssuer = { ...mockIssuer, status: ResourceStatus.ACTIVE };
 
       jest.spyOn(prisma.issuer, "findUnique").mockResolvedValue(activeIssuer);
-      jest.spyOn(prisma.issuer, "update").mockResolvedValue({
+      jest.spyOn(prisma.issuer, "updateMany").mockResolvedValue({ count: 1 });
+      jest.spyOn(prisma.issuer, "findUniqueOrThrow").mockResolvedValue({
         ...activeIssuer,
         status: ResourceStatus.SUSPENDED,
         suspendedAt: new Date(),
@@ -287,8 +293,8 @@ describe("IssuersService", () => {
 
       await service.updateIssuerStatus(mockUser, "issuer-1", input);
 
-      expect(prisma.issuer.update).toHaveBeenCalledWith({
-        where: { id: "issuer-1" },
+      expect(prisma.issuer.updateMany).toHaveBeenCalledWith({
+        where: { id: "issuer-1", revision: 0 },
         data: expect.objectContaining({
           status: ResourceStatus.SUSPENDED,
           suspendedAt: expect.any(Date),
@@ -297,11 +303,12 @@ describe("IssuersService", () => {
     });
 
     it("should set revokedAt when transitioning to REVOKED", async () => {
-      const input = { status: ResourceStatus.REVOKED };
+      const input = { status: ResourceStatus.REVOKED, expectedRevision: 0 };
       const activeIssuer = { ...mockIssuer, status: ResourceStatus.ACTIVE };
 
       jest.spyOn(prisma.issuer, "findUnique").mockResolvedValue(activeIssuer);
-      jest.spyOn(prisma.issuer, "update").mockResolvedValue({
+      jest.spyOn(prisma.issuer, "updateMany").mockResolvedValue({ count: 1 });
+      jest.spyOn(prisma.issuer, "findUniqueOrThrow").mockResolvedValue({
         ...activeIssuer,
         status: ResourceStatus.REVOKED,
         revokedAt: new Date(),
@@ -310,8 +317,8 @@ describe("IssuersService", () => {
 
       await service.updateIssuerStatus(mockUser, "issuer-1", input);
 
-      expect(prisma.issuer.update).toHaveBeenCalledWith({
-        where: { id: "issuer-1" },
+      expect(prisma.issuer.updateMany).toHaveBeenCalledWith({
+        where: { id: "issuer-1", revision: 0 },
         data: expect.objectContaining({
           status: ResourceStatus.REVOKED,
           revokedAt: expect.any(Date),
