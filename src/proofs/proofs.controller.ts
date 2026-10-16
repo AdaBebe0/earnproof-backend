@@ -72,11 +72,13 @@ import { VerifyProofResponseDto } from "./dto/verify-proof-response.dto";
 import { VerifyProofsBatchResponseDto } from "./dto/verify-proofs-batch-response.dto";
 import { VerifyProofsBatchDto } from "./dto/verify-proofs-batch.dto";
 import { VerificationStatsDto } from "./dto/verification-stats.dto";
+import { RefreshProofRequestDto, RefreshProofResponseDto } from "./dto/refresh-proof.dto";
 import { ProofsService } from "./proofs.service";
 import { ProofSharingService } from "./proof-sharing.service";
 import { PrismaService } from "../database/prisma.service";
 import { ProofCapacityPreflightService } from "./proof-capacity-preflight.service";
 import { ProofCapacityPreflightDto } from "./dto/capacity-preflight.dto";
+import { BoundedRefreshService } from "./bounded-refresh.service";
 
 @ApiTags("proofs")
 @Controller("proofs")
@@ -85,6 +87,7 @@ export class ProofsController {
     private readonly proofsService: ProofsService,
     private readonly proofSharingService: ProofSharingService,
     private readonly prisma: PrismaService,
+    private readonly boundedRefreshService: BoundedRefreshService,
     private readonly preflightService?: ProofCapacityPreflightService,
   ) {}
 
@@ -1189,4 +1192,178 @@ export class ProofsController {
       },
     });
   }
+
+  /**
+   * Refresh verification for an authenticated user's proof.
+   * Allows explicit fresh-read path that bypasses stale cache under controlled latency and concurrency budgets.
+   */
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: "Refresh bounded live verification for a proof (authenticated owner)",
+    description:
+      "Allows proof owners to perform a fresh verification with source selection and latency bounds. " +
+      "Supports CACHE (local only), LIVE (on-chain within latency bound), or PREFER_LIVE (attempt live, fallback to cache). " +
+      "Result includes provenance metadata indicating whether source was live, cached, or fallback. " +
+      "On-chain invalidity (fail-closed) overrides local state. " +
+      "Live checks are subject to concurrency limits to prevent thundering herd. " +
+      "Endpoint respects global verification rate limits and cannot bypass abuse controls.",
+  })
+  @ApiParam({ name: "id", description: "Proof ID (uuid)." })
+  @ApiBody({
+    type: RefreshProofRequestDto,
+    description: "Refresh request with source selection and latency bounds.",
+  })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: "Verification result with freshness provenance.",
+    type: RefreshProofResponseDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.BAD_REQUEST,
+    description: "Invalid source selection or latency bounds.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.UNAUTHORIZED,
+    description: "Bearer token is missing, malformed, invalid, or expired.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.FORBIDDEN,
+    description: "The proof belongs to another user.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.NOT_FOUND,
+    description: "Proof not found.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.REQUEST_TIMEOUT,
+    description: "Live verification latency bound exceeded.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.TOO_MANY_REQUESTS,
+    description: "Rate limit exceeded or concurrency limit reached.",
+    type: ApiErrorDto,
+  })
+  @UseGuards(AuthGuard)
+  @SkipThrottle({ default: true, strict: true })
+  @Throttle({ verification: {} })
+  @AuthenticatedRoute({ ownership: "user" })
+  @HttpCode(HttpStatus.OK)
+  @Post(":id/verify/refresh")
+  async refreshProofAuthenticated(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("id") proofId: string,
+    @Body() request: RefreshProofRequestDto,
+    @Req() httpRequest: Request,
+  ): Promise<RefreshProofResponseDto> {
+    // Verify ownership and proof exists
+    const proof = await this.prisma.proof.findUnique({
+      where: { id: proofId },
+      select: { userId: true },
+    });
+
+    if (!proof) {
+      throw new ForbiddenException("Proof not found");
+    }
+
+    if (proof.userId !== user.id) {
+      throw new ForbiddenException("Proof belongs to another user");
+    }
+
+    // Perform bounded refresh
+    return this.boundedRefreshService.refreshProof(
+      proofId,
+      request,
+      {
+        ip: httpRequest.ip,
+      },
+    );
+  }
+
+  /**
+   * Refresh verification for a shared proof using sharing token.
+   * Allows verifiers with a sharing token to perform fresh verification.
+   */
+  @ApiOperation({
+    summary: "Refresh bounded live verification for a shared proof",
+    description:
+      "Allows verifiers with a valid sharing token to perform a fresh verification with source selection and latency bounds. " +
+      "Token is provided as URL query parameter and must be valid and not expired. " +
+      "Shares all safety guarantees with the authenticated refresh endpoint: " +
+      "Cannot bypass abuse limits, cannot report stale results as live, and deterministic timeout behavior.",
+  })
+  @ApiParam({ name: "id", description: "Proof ID (uuid) or sharing token (share_*)." })
+  @ApiBody({
+    type: RefreshProofRequestDto,
+    description: "Refresh request with source selection and latency bounds.",
+  })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: "Verification result with freshness provenance.",
+    type: RefreshProofResponseDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.BAD_REQUEST,
+    description: "Invalid source selection, latency bounds, or sharing token format.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.NOT_FOUND,
+    description: "Proof not found or sharing token invalid/expired.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.REQUEST_TIMEOUT,
+    description: "Live verification latency bound exceeded.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.TOO_MANY_REQUESTS,
+    description: "Rate limit exceeded or concurrency limit reached.",
+    type: ApiErrorDto,
+  })
+  @SkipThrottle({ default: true, strict: true })
+  @Throttle({ verification: {} })
+  @PublicRoute()
+  @HttpCode(HttpStatus.OK)
+  @Post(":id/verify/refresh")
+  async refreshProofShared(
+    @Param("id") proofIdOrToken: string,
+    @Body() request: RefreshProofRequestDto,
+    @Req() httpRequest: Request,
+  ): Promise<RefreshProofResponseDto> {
+    // Check if this is a sharing token
+    let actualProofId = proofIdOrToken;
+
+    if (proofIdOrToken.startsWith("share_")) {
+      // Verify sharing token and get the actual proof ID
+      const sharingResult = await this.proofSharingService.verifyWithSharingToken(
+        proofIdOrToken,
+        {
+          ipAddress: httpRequest.ip || "0.0.0.0",
+          userAgent: httpRequest.headers["user-agent"] || "unknown",
+        },
+      );
+
+      if (!sharingResult.isValid || !(sharingResult.proof as any)?.id) {
+        throw new ForbiddenException("Invalid or expired sharing token");
+      }
+
+      actualProofId = (sharingResult.proof as any).id;
+    }
+
+    // Perform bounded refresh with sharing context
+    return this.boundedRefreshService.refreshProof(
+      actualProofId,
+      request,
+      {
+        ip: httpRequest.ip,
+      },
+    );
+  }
 }
+

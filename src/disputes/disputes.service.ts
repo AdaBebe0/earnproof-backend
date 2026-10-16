@@ -10,6 +10,8 @@ import { PrismaService } from "../database/prisma.service";
 import { WebhookDeliveryService } from "../webhooks/webhook-delivery.service";
 import { sha256 } from "../common/crypto/hash";
 import { StructuredLogger } from "../common/logger";
+import { DomainEventOutboxService } from "../common/events/domain-event-outbox.service";
+import { DisputeDecisionNotificationPayload } from "./events/dispute-decision-notification.types";
 
 export type CreateDisputeDto = {
   proofId: string;
@@ -57,6 +59,7 @@ export class DisputesService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly webhookDeliveryService?: WebhookDeliveryService,
+    private readonly domainEventOutbox?: DomainEventOutboxService,
   ) {}
 
   /**
@@ -161,6 +164,28 @@ export class DisputesService {
             },
           },
         });
+
+        // Emit DISPUTE_FILED domain event for notifications
+        if (this.domainEventOutbox) {
+          await this.domainEventOutbox.publish<DisputeDecisionNotificationPayload>(tx, {
+            organizationId,
+            eventType: "DISPUTE_FILED",
+            aggregateType: "ProofDispute",
+            aggregateId: dispute.id,
+            payload: {
+              disputeId: dispute.id,
+              proofId: dispute.proofId,
+              organizationId,
+              category: dispute.category,
+              decisionType: "FILED",
+              status: dispute.status,
+              participants: {
+                proofOwnerId: dispute.proof.userId,
+                disputeSubmitterId: user.id,
+              },
+            },
+          });
+        }
 
         return dispute;
       });
@@ -301,6 +326,11 @@ export class DisputesService {
           status: DisputeStatus.WITHDRAWN,
           withdrawnAt: new Date(),
         },
+        include: {
+          proof: {
+            select: { userId: true },
+          },
+        },
       });
 
       // Create audit log
@@ -317,6 +347,30 @@ export class DisputesService {
           },
         },
       });
+
+      // Emit DISPUTE_WITHDRAWN domain event for notifications
+      if (this.domainEventOutbox) {
+        await this.domainEventOutbox.publish<DisputeDecisionNotificationPayload>(tx, {
+          organizationId,
+          eventType: "DISPUTE_WITHDRAWN",
+          aggregateType: "ProofDispute",
+          aggregateId: updated.id,
+          payload: {
+            disputeId: updated.id,
+            proofId: updated.proofId,
+            organizationId,
+            category: updated.category,
+            decisionType: "WITHDRAWN",
+            status: updated.status,
+            withdrawnBy: user.id,
+            withdrawnAt: updated.withdrawnAt?.toISOString(),
+            participants: {
+              proofOwnerId: updated.proof.userId,
+              disputeSubmitterId: updated.submittedBy,
+            },
+          },
+        });
+      }
 
       this.emitWebhookEvent(organizationId, "dispute.withdrawn", {
         disputeId: updated.id,
@@ -381,6 +435,11 @@ export class DisputesService {
           assignedTo: input.assignedTo,
           assignedAt: new Date(),
         },
+        include: {
+          proof: {
+            select: { userId: true },
+          },
+        },
       });
 
       // Create audit log
@@ -398,6 +457,29 @@ export class DisputesService {
           },
         },
       });
+
+      // Emit DISPUTE_ASSIGNED domain event
+      if (this.domainEventOutbox) {
+        await this.domainEventOutbox.publish<DisputeDecisionNotificationPayload>(tx, {
+          organizationId,
+          eventType: "DISPUTE_ASSIGNED",
+          aggregateType: "ProofDispute",
+          aggregateId: updated.id,
+          payload: {
+            disputeId: updated.id,
+            proofId: updated.proofId,
+            organizationId,
+            category: updated.category,
+            decisionType: "ASSIGNED",
+            status: updated.status,
+            participants: {
+              proofOwnerId: updated.proof.userId,
+              disputeSubmitterId: updated.submittedBy,
+              assignedReviewerId: input.assignedTo,
+            },
+          },
+        });
+      }
 
       this.emitWebhookEvent(organizationId, "dispute.assigned", {
         disputeId: updated.id,
@@ -468,6 +550,11 @@ export class DisputesService {
           resolvedBy: user.id,
           resolvedAt: new Date(),
         },
+        include: {
+          proof: {
+            select: { userId: true },
+          },
+        },
       });
 
       // Create audit log
@@ -485,6 +572,33 @@ export class DisputesService {
           },
         },
       });
+
+      // Emit DISPUTE_RESOLVED domain event for notifications
+      if (this.domainEventOutbox) {
+        await this.domainEventOutbox.publish<DisputeDecisionNotificationPayload>(tx, {
+          organizationId,
+          eventType: "DISPUTE_RESOLVED",
+          aggregateType: "ProofDispute",
+          aggregateId: updated.id,
+          payload: {
+            disputeId: updated.id,
+            proofId: updated.proofId,
+            organizationId,
+            category: updated.category,
+            decisionType: "RESOLVED",
+            status: updated.status,
+            resolutionOutcome: updated.resolutionOutcome,
+            resolutionReason: updated.resolutionReason,
+            resolvedBy: user.id,
+            resolvedAt: updated.resolvedAt?.toISOString(),
+            participants: {
+              proofOwnerId: updated.proof.userId,
+              disputeSubmitterId: updated.submittedBy,
+              assignedReviewerId: updated.assignedTo,
+            },
+          },
+        });
+      }
 
       this.emitWebhookEvent(organizationId, "dispute.resolved", {
         disputeId: updated.id,

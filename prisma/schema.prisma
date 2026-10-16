@@ -513,6 +513,7 @@ model Issuer {
   attestations            Attestation[]
   addressRotations        IssuerAddressRotation[]
   addressHistory          IssuerAddressHistory[]
+  policyCommitments       IssuerPolicyCommitment[]
   invoiceSettlements      ProofInvoiceSettlement[]
   signingKeys             IssuerSigningKey[]
 
@@ -567,6 +568,62 @@ model IssuerAddressHistory {
 
   @@index([issuerId, retiredAt])
   @@index([stellarAddress])
+}
+
+/// Immutable audit trail of issuer policy versions with deterministic commit hashes.
+/// Tracks exact issuer policy commitment version effective at proof issuance (#307).
+/// Captures issuer state (signing key, metadata, address) at each policy change.
+///
+/// Pattern: Similar to SupportedAsset → assetPolicySnapshot. Each issuer change
+/// creates a new commitment row; proofs reference the commitment by ID, enabling
+/// proof verification even after the issuer policy changes.
+model IssuerPolicyCommitment {
+  id                String   @id @default(cuid())
+  issuerId          String
+  issuer            Issuer   @relation(fields: [issuerId], references: [id])
+  
+  /// Version tracking: incremental per issuer. Monotonically increasing.
+  /// Combined with issuerId, enforces: reordered events cannot regress versions.
+  version           Int
+  
+  /// Commitment identification
+  /// SHA-256 hash of canonicalized policy inputs: "sha256:<hex>"
+  /// Deterministic: identical policy → identical hash → prevents duplicate rows.
+  commitment        String
+  /// SHA-256 hash of the canonical policy JSON snapshot for deduplication.
+  policyInputsHash  String
+  
+  /// Policy snapshot (immutable after creation)
+  /// Complete issuer state at this version: {signingKeyVersionId, address, metadata, ...}
+  /// Frozen at issuance time; proofs reference this snapshot, enabling verification
+  /// even if the live Issuer row later changes/deletes.
+  policySnapshot    Json
+  
+  /// Lifecycle markers
+  effectiveAt       DateTime
+  supersededAt      DateTime?  // NULL = current active commitment
+  
+  /// Audit & correlation
+  /// Links to domain event or audit log entry for full change history
+  correlationId     String?
+  createdAt         DateTime   @default(now())
+  
+  // Proofs that reference this commitment
+  proofs            Proof[]    @relation("ProofIssuerPolicyCommitment")
+
+  /// Unique constraints
+  /// Prevents version gaps and regressions: (issuerId, version) must be unique
+  @@unique([issuerId, version])
+  /// Prevents duplicate commits: commitment hash is globally unique
+  @@unique([commitment])
+  
+  /// Indexes for common queries
+  /// Current commitment: WHERE issuerId = ? AND supersededAt IS NULL
+  @@index([issuerId, effectiveAt])
+  /// Historical queries: WHERE issuerId = ? AND supersededAt IS NOT NULL
+  @@index([issuerId, supersededAt])
+  /// Lookups by commitment: WHERE commitment = ?
+  @@index([commitment])
 }
 
 model SupportedAsset {
@@ -739,6 +796,14 @@ model Proof {
   // (possibly since-changed) live SupportedAsset row.
   assetPolicyId           String?
   assetPolicySnapshot     Json?
+  // Snapshot of the issuer policy commitment that was active at proof issuance.
+  // Similar to assetPolicySnapshot: enables offline verification even if the
+  // issuer policy later changes. Null for proofs issued before this feature.
+  issuerPolicyCommitmentId String?
+  issuerPolicyCommitment  IssuerPolicyCommitment? @relation("ProofIssuerPolicyCommitment", fields: [issuerPolicyCommitmentId], references: [id])
+  // Complete issuer policy snapshot at issuance: {signingKeyVersionId, address, metadata, ...}
+  // Immutable after creation; used for offline verification and audit.
+  issuerPolicySnapshot    Json?
   revokedAt               DateTime?
   /// Class of principal that revoked this proof. Null until revoked.
   revokedByType           RevocationActorType?
@@ -780,6 +845,7 @@ model Proof {
   @@index([proofType])
   @@index([expiresAt])
   @@index([status, expiresAt])
+  @@index([issuerPolicyCommitmentId])
 }
 
 model ProofClaim {
@@ -826,6 +892,10 @@ model Attestation {
   type                 AttestationType
   schemaVersion        String          @default("1.0")
   signingKeyVersionId  String          @default("1")
+  /// Policy version captured at attestation issuance time, for versioned proofs.
+  /// Enables proofs to reference the exact attestation policy state when issued.
+  /// Null for attestations issued before this feature.
+  policyVersion        String?
   status               ResourceStatus  @default(ACTIVE)
   signedPayload        Json
   expiresAt            DateTime?
@@ -2456,4 +2526,115 @@ model SecurityNotification {
   @@index([userId, createdAt])
   @@index([type, createdAt])
   @@index([retainUntil])
+}
+
+
+// ---------------------------------------------------------------------------
+// Contract Successor Migration Readiness Assessment (#306)
+// ---------------------------------------------------------------------------
+
+/// Enum for contract successor finding acknowledgement states.
+/// Used to track lifecycle of operator acknowledgements for readiness findings.
+enum SuccessorFindingSeverity {
+  BLOCKING
+  ADVISORY
+  INFORMATIONAL
+}
+
+/// Acknowledgements of contract successor readiness findings.
+/// Operators can acknowledge expected blocking findings for a bounded time (max 7 days).
+/// This allows planned migrations to proceed despite temporary conditions.
+model ContractSuccessorFindingAcknowledgement {
+  id             String   @id @default(cuid())
+  /// Fully-qualified finding key: network:contractId:findingKey
+  findingKey     String
+  /// Who acknowledged it (actorId from the audit system — never raw PII).
+  acknowledgedBy String
+  /// Human-readable note stored for the audit trail.
+  note           String
+  /// When this acknowledgement expires. After this time it is ignored.
+  expiresAt      DateTime
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([findingKey, expiresAt])
+  @@index([acknowledgedBy, createdAt])
+}
+
+/// Contract successor migration checkpoint.
+/// Immutable record of passed/failed validation gates during successor assessment.
+/// Each successful assessment creates a new checkpoint for audit trail.
+model ContractSuccessorMigrationCheckpoint {
+  id             String   @id @default(cuid())
+  /// Composite key: network:contractId
+  contractKey    String
+  network        String
+  contractId     String
+  /// Ledger sequence observed during checkpoint validation
+  observedLedger BigInt
+  /// Which validation gates were passed (JSON array)
+  passedGates    String[]
+  /// Which validation gates failed (JSON array)
+  failedGates    String[]
+  /// Who initiated the checkpoint (actorId from audit system)
+  initiatedBy    String
+  createdAt      DateTime @default(now())
+
+  @@unique([network, contractId, observedLedger])
+  @@index([network, contractId, createdAt])
+  @@index([observedLedger])
+}
+
+/// Contract successor readiness assessment cache.
+/// Stores the last assessed readiness state for each successor contract.
+/// Cache is invalidated when acknowledgements change or assessment ages beyond threshold.
+model ContractSuccessorReadinessCache {
+  id             String   @id @default(cuid())
+  /// Composite key: network:contractId:version
+  cacheKey       String   @unique
+  network        String
+  contractId     String
+  expectedVersion Int
+  /// Latest assessment verdict: ready | not_ready
+  status         String   @db.VarChar(16)
+  /// Reason if not ready (deterministic status code, never raw error)
+  reason         String?
+  /// Serialized findings (JSON array)
+  findings       Json
+  /// Overall severity: blocking | advisory | informational | none
+  overall        String   @db.VarChar(16)
+  /// When the assessment was performed
+  assessedAt     DateTime
+  /// Latest passed checkpoint (JSON)
+  latestCheckpoint Json?
+  /// How long the assessment remains valid (ms)
+  cacheTtlMs     Int      @default(5000)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([network, contractId])
+  @@index([status, createdAt])
+  @@index([updatedAt])
+}
+
+/// Contract identity and versioning for successor tracking.
+/// Maps network + contractId to schema versions for compatibility checks.
+model ContractVersion {
+  id             String   @id @default(cuid())
+  network        String
+  contractId     String
+  /// Schema version deployed on this contract
+  schemaVersion  Int
+  /// When this version was observed live
+  observedAt     DateTime
+  /// Ledger sequence when first observed
+  observedLedger BigInt?
+  /// Whether this version is still current
+  isCurrent      Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([network, contractId, schemaVersion])
+  @@index([network, contractId, isCurrent])
+  @@index([network, isCurrent])
 }
