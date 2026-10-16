@@ -5,14 +5,16 @@ import {
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { AuthEventType } from "@prisma/client";
-import { Keypair, StrKey } from "@stellar/stellar-base";
-import { createHash, randomBytes } from "crypto";
+import { randomBytes } from "crypto";
+import { isValidWalletAddress, verifyWalletSignature } from "./wallet-signature";
 import { Logger } from "@nestjs/common";
 import { PrismaService } from "../database/prisma.service";
 import { sha256 } from "../common/crypto/hash";
 import { AuthAuditService } from "./auth-audit.service";
 import { AuthRateLimiterService } from "./auth-rate-limiter.service";
 import { SessionService } from "./session.service";
+import { canAuthenticate } from "./account-status.policy";
+import type { SessionDeviceHeaders } from "./session-device-metadata";
 import {
   normalizeOrigin,
   OriginValidationError,
@@ -105,13 +107,16 @@ export class AuthService {
     return challenge;
   }
 
-  async verifyChallenge(input: {
-    challengeId: string;
-    walletAddress: string;
-    signature: string;
-    clientMetadata?: string;
-    requestOrigin?: string;
-  }) {
+  async verifyChallenge(
+    input: {
+      challengeId: string;
+      walletAddress: string;
+      signature: string;
+      clientMetadata?: string;
+      requestOrigin?: string;
+    },
+    headers?: SessionDeviceHeaders,
+  ) {
     this.assertValidPublicKey(input.walletAddress);
 
     // Check rate limits before verification attempt
@@ -123,9 +128,6 @@ export class AuthService {
     // Atomically mark the challenge as consumed only if it exists, is not used,
     // and is not expired. This closes the TOCTOU window in which two concurrent
     // requests could both pass an existence check before either marked it used.
-    // Atomically mark challenge as consumed only if it exists, is not used, and is not expired.
-    // This prevents TOCTOU race conditions where multiple concurrent requests could both
-    // pass the existence check before any are marked as used.
     const consumedChallenge = await this.prisma.walletChallenge.updateMany({
       where: {
         id: input.challengeId,
@@ -141,6 +143,9 @@ export class AuthService {
     });
 
     if (consumedChallenge.count === 0) {
+      // Determine if the challenge was already used (replay) or is expired /
+      // never existed, purely for audit-trail accuracy — the caller always
+      // receives the same generic error either way.
       // Nothing was consumed: the challenge was already used (a replay), or it
       // expired or never existed. The two are audited separately; both return
       // the same message, so the caller learns nothing either way.
@@ -184,6 +189,9 @@ export class AuthService {
       throw new UnauthorizedException("Challenge is expired or unavailable");
     }
 
+    // Fetch the now-consumed challenge to get the message for signature
+    // verification. It is already marked as used, so even if verification
+    // fails below, it cannot be reused (no signature-oracle attack).
     // Fetch the challenge again to get the message for signature verification.
     // It is already marked used, so a failed verification cannot be retried.
     // The challenge is now marked as used, so even if verification fails, it cannot be reused.
@@ -194,11 +202,7 @@ export class AuthService {
     });
 
     if (!challenge) {
-      // Unreachable unless the row was deleted between the two statements;
-      // safeguarded rather than dereferenced.
-      // Should be unreachable: updateMany just matched and updated this row,
-      // so it exists. Safeguard against a concurrent deletion between the
-      // two statements.
+      // Should never happen: we just consumed this row atomically above.
       throw new UnauthorizedException("Challenge is expired or unavailable");
     }
 
@@ -261,6 +265,29 @@ export class AuthService {
       throw new UnauthorizedException("Invalid wallet signature");
     }
 
+    // A suspended, revoked or deleted account proves wallet control like any
+    // other, but must not be issued a session. Checked after the signature so
+    // the refusal reveals account state only to the wallet's own key holder.
+    const existingAccount = await this.prisma.user.findUnique({
+      where: { walletAddress: input.walletAddress },
+      select: { status: true },
+    });
+
+    if (existingAccount && !canAuthenticate(existingAccount.status)) {
+      await this.auditService.recordEvent(
+        AuthEventType.ACCOUNT_INACTIVE,
+        input.walletAddress,
+        {
+          challengeId: input.challengeId,
+          success: false,
+          failureReason: "Account is not active",
+          clientMetadata: input.clientMetadata,
+        },
+      );
+
+      throw new UnauthorizedException("Account is not active");
+    }
+
     const walletHash = `sha256:${sha256(input.walletAddress)}`;
     const user = await this.prisma.user.upsert({
       where: { walletAddress: input.walletAddress },
@@ -272,13 +299,16 @@ export class AuthService {
       },
     });
 
+    // The challenge was already atomically marked as consumed above, before
+    // signature verification — no further write is needed here.
+
     // Create a persisted, revocable session.  Only the hash is stored.
     const { token, sessionId, expiresAt } = await this.sessionService.create({
       id: user.id,
       walletAddress: user.walletAddress,
       walletHash: user.walletHash,
       role: user.role,
-    });
+    }, undefined, headers);
 
     // Record successful verification
     await this.auditService.recordEvent(
@@ -345,29 +375,11 @@ export class AuthService {
     message: string,
     signature: string,
   ) {
-    const signatureBuffer = this.decodeSignature(signature);
-    return Keypair.fromPublicKey(walletAddress).verify(
-      this.sep53MessageHash(message),
-      signatureBuffer,
-    );
-  }
-
-  private sep53MessageHash(message: string) {
-    return createHash("sha256")
-      .update("Stellar Signed Message:\n", "utf8")
-      .update(message, "utf8")
-      .digest();
-  }
-
-  private decodeSignature(signature: string) {
-    if (/^[a-f0-9]+$/i.test(signature) && signature.length % 2 === 0) {
-      return Buffer.from(signature, "hex");
-    }
-    return Buffer.from(signature, "base64");
+    return verifyWalletSignature(walletAddress, message, signature);
   }
 
   private assertValidPublicKey(walletAddress: string) {
-    if (!StrKey.isValidEd25519PublicKey(walletAddress)) {
+    if (!isValidWalletAddress(walletAddress)) {
       throw new BadRequestException("Invalid Stellar public key");
     }
   }

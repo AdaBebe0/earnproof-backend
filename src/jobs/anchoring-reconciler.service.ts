@@ -1,15 +1,22 @@
-import { Injectable } from "@nestjs/common";
+import { Injectable, Logger, Optional } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { Interval } from "@nestjs/schedule";
 import {
   AnchoringOperation,
   AnchoringStatus,
   ProofStatus,
+  QuarantineDecision,
+  QuarantineReasonCode,
 } from "@prisma/client";
 import { StructuredLogger } from "../common/logger";
 import { PrismaService } from "../database/prisma.service";
 import { ContractAnchoringService } from "../proofs/contract-anchoring.service";
-import { DistributedLeaseService } from "./distributed-lease.service";
+import { JobExecutionService } from "./execution/job-execution.service";
+import { workerIdentity } from "./execution/worker-identity";
+
+/** Job identity recorded in the execution history for this synchronization job. */
+const RECONCILER_JOB_NAME = "anchoring-reconciler";
+const RECONCILER_JOB_VERSION = "1";
 
 /**
  * Maximum number of proofs to reconcile per cycle to bound execution time.
@@ -34,18 +41,18 @@ const ANCHORING_RECONCILIATION_JOB_NAME = "anchoring_reconciliation";
  * Runs every 5 minutes. For proofs that have a confirmed on-chain transaction,
  * it calls getProofStatus and repairs disagreements according to this policy:
  *
- * | Local status | On-chain state              | Action                          |
- * |--------------|-----------------------------|---------------------------------|
- * | ACTIVE       | valid=true, revoked=false   | OK — no action                  |
- * | ACTIVE       | revoked=true                | Auto-repair: mark local REVOKED |
- * | ACTIVE       | valid=false, revoked=false  | Flag manual: create FAILED      |
- * |              |                             | AnchoringIntent for review      |
- * | REVOKED      | revoked=true                | OK — no action                  |
- * | REVOKED      | revoked=false               | Auto-repair: re-enqueue REVOKE  |
+ * | Local status | On-chain state              | Action                             |
+ * |--------------|-----------------------------|------------------------------------|
+ * | ACTIVE       | valid=true, revoked=false   | OK — no action                     |
+ * | ACTIVE       | revoked=true                | Auto-repair: mark local REVOKED    |
+ * | ACTIVE       | valid=false, revoked=false  | Flag manual: create QUARANTINED    |
+ * |              |                             | AnchoringIntent for review         |
+ * | REVOKED      | revoked=true                | OK — no action                     |
+ * | REVOKED      | revoked=false               | Auto-repair: re-enqueue REVOKE     |
  *
  * Auto-repair cases are handled silently and logged at WARN.
- * Manual-attention cases are logged at ERROR and create a FAILED intent with
- * permanentError=true so operators can find them.
+ * Manual-attention cases are logged at ERROR and create a QUARANTINED intent
+ * (reason MANUAL_REVIEW) so operators can find and redrive or abandon it.
  *
  * Secret safety: only proof IDs appear in structured logs; no signing key or
  * CLI credentials are ever logged or stored.
@@ -61,7 +68,12 @@ export class AnchoringReconcilerService {
     private readonly prisma: PrismaService,
     private readonly anchoring: ContractAnchoringService,
     private readonly config: ConfigService,
-    private readonly leaseService: DistributedLeaseService,
+    /**
+     * Optional so the existing unit tests that construct the reconciler with
+     * three arguments keep working. When present, each reconcile cycle is
+     * recorded in the durable execution history (issue #201).
+     */
+    @Optional() private readonly executions?: JobExecutionService,
   ) {}
 
   @Interval(5 * 60_000)
@@ -70,10 +82,38 @@ export class AnchoringReconcilerService {
       return;
     }
 
-    const leaseResult = await this.leaseService.acquireLease(
-      ANCHORING_RECONCILIATION_JOB_NAME,
-      ANCHORING_RECONCILIATION_LEASE_DURATION_MS,
-    );
+    // Record the run so a missed or overlapping synchronization cycle is
+    // diagnosable after the fact. The work is unchanged when no execution
+    // service is wired.
+    if (this.executions) {
+      await this.executions.track(
+        {
+          jobName: RECONCILER_JOB_NAME,
+          jobVersion: RECONCILER_JOB_VERSION,
+          leaseOwner: workerIdentity(),
+        },
+        () => this.runReconcile(),
+      );
+      return;
+    }
+
+    await this.runReconcile();
+  }
+
+  private async runReconcile(): Promise<void> {
+    const proofs = await this.prisma.proof.findMany({
+      where: {
+        contractTransactionHash: { not: null },
+        status: { in: [ProofStatus.ACTIVE, ProofStatus.REVOKED] },
+      },
+      select: {
+        id: true,
+        status: true,
+        contractTransactionHash: true,
+      },
+      take: RECONCILE_BATCH_SIZE,
+      orderBy: { updatedAt: "asc" },
+    });
 
     if (!leaseResult.acquired) {
       this.logger.debug(
@@ -174,12 +214,12 @@ export class AnchoringReconcilerService {
     proofId: string,
     reason: string,
   ): Promise<void> {
-    // Only create one FAILED manual-review intent per proof to avoid flooding.
+    // Only create one quarantined manual-review intent per proof to avoid flooding.
     const existing = await this.prisma.anchoringIntent.findFirst({
       where: {
         proofId,
         operation: AnchoringOperation.REGISTER,
-        status: AnchoringStatus.FAILED,
+        status: AnchoringStatus.QUARANTINED,
         permanentError: true,
         lastErrorSafe: reason,
       },
@@ -191,9 +231,12 @@ export class AnchoringReconcilerService {
       data: {
         proofId,
         operation: AnchoringOperation.REGISTER,
-        status: AnchoringStatus.FAILED,
+        status: AnchoringStatus.QUARANTINED,
         permanentError: true,
         lastErrorSafe: reason,
+        quarantinedAt: new Date(),
+        quarantineReasonCode: QuarantineReasonCode.MANUAL_REVIEW,
+        quarantineDecision: QuarantineDecision.PENDING,
       },
     });
   }

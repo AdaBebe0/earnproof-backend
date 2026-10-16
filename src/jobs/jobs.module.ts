@@ -1,37 +1,78 @@
 import { Module } from "@nestjs/common";
+import { ApiKeysModule } from "../api-keys/api-keys.module";
+import { ApprovalsModule } from "../approvals/approvals.module";
+import { DisclosureModule } from "../common/disclosure/disclosure.module";
+import { IssuerReconciliationService } from "../issuers/issuer-reconciliation.service";
+import { IssuersModule } from "../issuers/issuers.module";
+import { PaymentsModule } from "../payments/payments.module";
 import { ContractAnchoringService } from "../proofs/contract-anchoring.service";
+import { ProofReconciliationService } from "../proofs/proof-reconciliation.service";
+import { ProofsModule } from "../proofs/proofs.module";
+import { WebhooksModule } from "../webhooks/webhooks.module";
 import { AnchoringReconcilerService } from "./anchoring-reconciler.service";
 import { AnchoringWorkerService } from "./anchoring-worker.service";
-import { DistributedLeaseService } from "./distributed-lease.service";
+import { ApprovalExpiryJob } from "./approval-expiry.job";
+import { AttestationReconcilerService } from "./attestation-reconciler.service";
+import { DisclosureCleanupJob } from "./disclosure-cleanup.job";
+import { JobExecutionMaintenanceJob } from "./execution/job-execution-maintenance.job";
+import { JobExecutionController } from "./execution/job-execution.controller";
+import { JobExecutionService } from "./execution/job-execution.service";
+import { IssuerAddressRotationJob } from "./issuer-address-rotation.job";
+import { PaymentBackfillWorkerService } from "./payment-backfill-worker.service";
+import { ProofExpirationReconcilerService } from "./proof-expiration-reconciler.service";
+import { ProofSharingCleanupJob } from "./proof-sharing-cleanup.job";
 import { RetentionCleanupService } from "./retention/retention-cleanup.service";
 import { RetentionJob } from "./retention/retention.job";
-import { PaymentEncryptionKeyringService } from "../common/crypto/payment-encryption-keyring.service";
-import { PaymentEncryptionRewrapService } from "./encryption/payment-encryption-rewrap.service";
-import { PaymentEncryptionRetirementService } from "./encryption/payment-encryption-retirement.service";
-import { EncryptionKeyRewrapWorkerService } from "./encryption/encryption-key-rewrap-worker.service";
-import { EncryptionKeyRetirementWorkerService } from "./encryption/encryption-key-retirement-worker.service";
+import { WebhookCertificateExpiryJob } from "./webhook-certificate-expiry.job";
+import { DomainEventOutboxWorkerService } from "./domain-event-outbox-worker.service";
+import { BulkAdminService } from "./bulk-admin/bulk-admin.service";
+import { BulkAdminController } from "./bulk-admin/bulk-admin.controller";
 
 @Module({
+  imports: [
+    ApprovalsModule,
+    IssuersModule,
+    PaymentsModule,
+    ProofsModule,
+    DisclosureModule,
+    WebhooksModule,
+    ApiKeysModule,
+  ],
+  controllers: [JobExecutionController, BulkAdminController],
   providers: [
     ContractAnchoringService,
     AnchoringWorkerService,
+    PaymentBackfillWorkerService,
+    DomainEventOutboxWorkerService,
     AnchoringReconcilerService,
-    DistributedLeaseService,
+    IssuerAddressRotationJob,
+    ProofExpirationReconcilerService,
+    ProofSharingCleanupJob,
+    DisclosureCleanupJob,
+    ProofReconciliationService,
+    IssuerReconciliationService,
     RetentionCleanupService,
     RetentionJob,
-    PaymentEncryptionKeyringService,
-    PaymentEncryptionRewrapService,
-    PaymentEncryptionRetirementService,
-    EncryptionKeyRewrapWorkerService,
-    EncryptionKeyRetirementWorkerService,
+    ApprovalExpiryJob,
+    WebhookCertificateExpiryJob,
+    JobExecutionService,
+    JobExecutionMaintenanceJob,
+    AttestationReconcilerService,
+    BulkAdminService,
   ],
   exports: [
     AnchoringWorkerService,
+    PaymentBackfillWorkerService,
+    DomainEventOutboxWorkerService,
     AnchoringReconcilerService,
-    DistributedLeaseService,
+    ProofExpirationReconcilerService,
+    ProofSharingCleanupJob,
+    DisclosureCleanupJob,
+    ProofReconciliationService,
+    IssuerReconciliationService,
     RetentionCleanupService,
-    PaymentEncryptionRewrapService,
-    PaymentEncryptionRetirementService,
+    JobExecutionService,
+    BulkAdminService,
   ],
 })
 export class JobsModule {}
