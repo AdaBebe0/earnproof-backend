@@ -454,6 +454,7 @@ model Organization {
   disclosureReceipts DisclosureReceipt[]
   membershipImports MembershipImportJob[]
   accessReviews AccessReviewCampaign[]
+  credentialVerificationKeyTrustPins CredentialVerificationKeyTrustPin[]
 
   @@index([status])
   @@index([archivedAt])
@@ -544,6 +545,7 @@ model Issuer {
   updatedAt               DateTime        @updatedAt
   trustedSources          TrustedSource[]
   attestations            Attestation[]
+  credentialVerificationKeyTrustPins CredentialVerificationKeyTrustPin[]
 
   @@index([organizationId])
   @@index([status])
@@ -838,6 +840,55 @@ model Attestation {
   // expiry cheaply, without scanning the whole table.
   @@index([issuerId, expiresAt])
   @@index([status, expiresAt])
+}
+
+/// Persistent trust pin for credential verification keys.
+/// Pins explicitly authorize which issuer verification keys are trusted within a network.
+/// - Private keys are never accepted; only public key material is pinned.
+/// - A pin is scoped to a single issuer and network; cannot cross issuers or networks.
+/// - Compromised pins fail closed: marked REVOKED immediately.
+/// - Trust decisions are immutable snapshots at pin time; live key state never mutates them.
+model CredentialVerificationKeyTrustPin {
+  id                         String          @id @default(cuid())
+  /// Organization that owns this trust decision (tenant boundary).
+  organizationId             String
+  organization               Organization    @relation(fields: [organizationId], references: [id])
+  /// Issuer this pin is scoped to (prevents cross-issuer pin misuse).
+  issuerId                   String
+  issuer                     Issuer          @relation(fields: [issuerId], references: [id])
+  /// Network the issuer operates on (Stellar network identifier).
+  network                    String
+  /// Key ID from the credential verification key being pinned.
+  keyId                      String
+  /// Immutable snapshot of trusted key material at pin time.
+  /// Includes: alg, crv, kid, kty, x (base64url public key), use, status.
+  /// Never mutated; survives even if live key state changes.
+  trustedKeySnapshot         Json
+  /// When this trust decision is effective (usually now, may be backdated).
+  effectiveAt                DateTime
+  /// When this trust decision expires. Null for perpetual pins.
+  expiresAt                  DateTime?
+  /// Current status of this pin: ACTIVE (trusted), RETIRED (superceded), REVOKED (compromised).
+  status                     CredentialVerificationKeyTrustPinStatus @default(ACTIVE)
+  /// Audit context: who made this decision and why.
+  decisionMetadata           Json?
+  /// Optimistic concurrency: incremented on every status change.
+  revision                   Int             @default(0)
+  /// When marked REVOKED due to compromise, immutable for forensics.
+  revokedAt                  DateTime?
+  revokedBy                  String?
+  revocationReason           String?
+  createdAt                  DateTime        @default(now())
+  updatedAt                  DateTime        @updatedAt
+
+  // Composite unique: (organizationId, issuerId, network, keyId, status=ACTIVE)
+  // Ensures only one ACTIVE pin per issuer/network/key combination within an org.
+  @@unique([organizationId, issuerId, network, keyId, status], name: "active_trust_pin_per_key")
+  @@index([organizationId, status])
+  @@index([issuerId, network, status])
+  @@index([expiresAt, status])
+  @@index([createdAt])
+  @@index([revokedAt, status])
 }
 
 model VerificationEvent {
@@ -1582,6 +1633,12 @@ enum DisputeCategory {
   TECHNICAL
   COMPLIANCE
   OTHER
+}
+
+enum CredentialVerificationKeyTrustPinStatus {
+  ACTIVE
+  RETIRED
+  REVOKED
 }
 
 /// Proof dispute workflow for business/audit review process.
