@@ -4,6 +4,7 @@ import { Module } from "@nestjs/common";
 import { AuditModule } from "../audit/audit.module";
 import { AuthModule } from "../auth/auth.module";
 import { AttestationsModule } from "../attestations/attestations.module";
+import { IssuersModule } from "../issuers/issuers.module";
 import { NotificationsModule } from "../notifications/notifications.module";
 import { WebhooksModule } from "../webhooks/webhooks.module";
 import { CredentialVerificationKeyService } from "../common/crypto/credential-verification-key.service";
@@ -23,6 +24,7 @@ import { BoundedRefreshService } from "./bounded-refresh.service";
     AuthModule,
     AuditModule,
     AttestationsModule,
+    IssuersModule,
     WebhooksModule,
     QuotasModule,
     HealthModule,
