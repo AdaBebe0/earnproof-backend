@@ -15,6 +15,7 @@ import { UpdateWebhookEventsDto } from "./dto/update-webhook-events.dto";
 import { OrganizationQuotaService } from "../quotas/organization-quota.service";
 import { WebhookDeliveryService } from "./webhook-delivery.service";
 import { WebhookCircuitBreakerService } from "./webhook-circuit-breaker.service";
+import { CURRENT_WEBHOOK_PAYLOAD_VERSION } from "./webhook-event.types";
 
 /** Signing secret length in bytes (produces a 64-char hex string). */
 const SECRET_BYTES = 32;
@@ -59,6 +60,7 @@ export class WebhooksService {
           events,
           payloadVersion: dto.payloadVersion ?? CURRENT_WEBHOOK_PAYLOAD_VERSION,
           status: ResourceStatus.ACTIVE,
+          revision: 0,
         },
         select: {
           id: true,
@@ -66,26 +68,10 @@ export class WebhooksService {
           events: true,
           payloadVersion: true,
           status: true,
+          revision: true,
           createdAt: true,
         },
       });
-    const webhook = await this.prisma.webhook.create({
-      data: {
-        organizationId,
-        url: dto.url,
-        secretEncrypted,
-        events,
-        status: ResourceStatus.ACTIVE,
-        revision: 0,
-      },
-      select: {
-        id: true,
-        url: true,
-        events: true,
-        status: true,
-        revision: true,
-        createdAt: true,
-      },
     });
 
     // Initialize circuit breaker for new webhook

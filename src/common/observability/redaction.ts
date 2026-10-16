@@ -199,6 +199,7 @@ export interface LogContext {
   durationMs?: number;
   /** Row or item count. A measurement, not an identifier. */
   count?: number;
+  [key: string]: unknown;
 }
 
 /** Keys that must never appear in a {@link LogContext}. */

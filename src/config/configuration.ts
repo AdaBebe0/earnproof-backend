@@ -76,6 +76,8 @@ export const configuration = () => ({
       // stays held and is resumed on the next sync rather than read unbounded.
       reconciliationMaxPages: Number(
         process.env.STELLAR_FINALITY_RECONCILIATION_MAX_PAGES ?? 10,
+      ),
+    },
     // Per-network circuit breaker around Horizon transport calls. Defaults are
     // conservative: five consecutive transient failures open the circuit for
     // 30s, then a single probe must succeed twice to close it.
@@ -274,17 +276,15 @@ export const configuration = () => ({
   verificationMetadataBudgetWindowMs: Number(
     process.env.VERIFICATION_METADATA_BUDGET_WINDOW_MS ?? 86400000,
   ),
+  apiDeprecation: {
+    allowedDocumentationOrigins: (
+      process.env.API_DEPRECATION_ALLOWED_DOCUMENTATION_ORIGINS ??
+      ""
+    )
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean),
+
+    routes: [],
+  },
 });
-
-//Configuration addition
-apiDeprecation: {
-  allowedDocumentationOrigins: (
-    process.env.API_DEPRECATION_ALLOWED_DOCUMENTATION_ORIGINS ??
-    ""
-  )
-    .split(",")
-    .map((value) => value.trim())
-    .filter(Boolean),
-
-  routes: [],
-},

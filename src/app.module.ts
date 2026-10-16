@@ -32,6 +32,9 @@ import { TrustedSourcesModule } from "./trusted-sources/trusted-sources.module";
 import { UsersModule } from "./users/users.module";
 import { WebhooksModule } from "./webhooks/webhooks.module";
 import { SupportedAssetsModule } from "./supported-assets/supported-assets.module";
+import { SupportAccessModule } from "./support-access/support-access.module";
+import { ReconciliationModule } from "./reconciliation/reconciliation.module";
+import { DeploymentsModule } from "./deployments/deployments.module";
 
 @Module({
   imports: [
@@ -67,6 +70,9 @@ import { SupportedAssetsModule } from "./supported-assets/supported-assets.modul
     JobsModule,
     WebhooksModule,
     SupportedAssetsModule,
+    SupportAccessModule,
+    ReconciliationModule,
+    DeploymentsModule,
   ],
   providers: [
     {

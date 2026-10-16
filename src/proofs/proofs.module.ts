@@ -21,14 +21,13 @@ import { ProofVerificationAbuseService } from "../common/rate-limit/proof-verifi
     ProofsService,
     ProofSharingService,
     ProofVerificationAbuseService,
-  ],
-  exports: [
-    ContractAnchoringService, 
-    CredentialVerificationKeyService,
-    ProofSharingService,
-  ],
     ProofReconciliationService,
   ],
-  exports: [ContractAnchoringService, CredentialVerificationKeyService, ProofReconciliationService],
+  exports: [
+    ContractAnchoringService,
+    CredentialVerificationKeyService,
+    ProofSharingService,
+    ProofReconciliationService,
+  ],
 })
 export class ProofsModule {}

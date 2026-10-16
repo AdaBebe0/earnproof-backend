@@ -18,9 +18,9 @@ import {
   ApiBearerAuth,
   ApiQuery,
 } from "@nestjs/swagger";
-import { AuthGuard } from "@nestjs/passport";
+import { AuthGuard } from "../guards/auth.guard";
 import { ApiKeyGuard } from "../guards/api-key.guard";
-import { RequireApiKeyScopes } from "../decorators/require-api-key-scopes.decorator";
+import { RequireApiKeyScopes } from "../guards/api-key-quota.guard";
 import { ReceiptService } from "./receipt.service";
 import {
   GenerateDisclosureReceiptDto,

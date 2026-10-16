@@ -687,7 +687,6 @@ export const AUDIT_EVENTS: readonly AuditEventDefinition[] = [
   },
   {
     type: "operator.user_status_changed",
-    type: "operator.payment_backfill_requested",
     domain: "operator",
     store: "audit_log",
     match: {
@@ -705,6 +704,26 @@ export const AUDIT_EVENTS: readonly AuditEventDefinition[] = [
   },
   {
     type: "operator.user_role_changed",
+    domain: "operator",
+    store: "audit_log",
+    match: {
+      store: "audit_log",
+      action: "user.role_changed",
+      resourceType: "user",
+    },
+    actorTypes: ["user"],
+    outcomes: ["success"],
+    tenant: "resource_id",
+    writeFailure: "fail_closed",
+    requiredMetadata: ["previousRole", "newRole"],
+    description: "An administrator changed an account's global role.",
+  },
+  {
+    type: "operator.payment_backfill_requested",
+    domain: "operator",
+    store: "audit_log",
+    match: {
+      store: "audit_log",
       action: "payment_backfill.requested",
       resourceType: "payment_backfill",
     },
@@ -722,15 +741,6 @@ export const AUDIT_EVENTS: readonly AuditEventDefinition[] = [
     store: "audit_log",
     match: {
       store: "audit_log",
-      action: "user.role_changed",
-      resourceType: "user",
-    },
-    actorTypes: ["user"],
-    outcomes: ["success"],
-    tenant: "resource_id",
-    writeFailure: "fail_closed",
-    requiredMetadata: ["previousRole", "newRole"],
-    description: "An administrator changed an account's global role.",
       action: "payment_backfill.cancelled",
       resourceType: "payment_backfill",
     },
