@@ -24,6 +24,9 @@ import { ProofSharingCleanupJob } from "./proof-sharing-cleanup.job";
 import { RetentionCleanupService } from "./retention/retention-cleanup.service";
 import { RetentionJob } from "./retention/retention.job";
 import { WebhookCertificateExpiryJob } from "./webhook-certificate-expiry.job";
+import { DomainEventOutboxWorkerService } from "./domain-event-outbox-worker.service";
+import { BulkAdminService } from "./bulk-admin/bulk-admin.service";
+import { BulkAdminController } from "./bulk-admin/bulk-admin.controller";
 
 @Module({
   imports: [
@@ -35,11 +38,12 @@ import { WebhookCertificateExpiryJob } from "./webhook-certificate-expiry.job";
     WebhooksModule,
     ApiKeysModule,
   ],
-  controllers: [JobExecutionController],
+  controllers: [JobExecutionController, BulkAdminController],
   providers: [
     ContractAnchoringService,
     AnchoringWorkerService,
     PaymentBackfillWorkerService,
+    DomainEventOutboxWorkerService,
     AnchoringReconcilerService,
     IssuerAddressRotationJob,
     ProofExpirationReconcilerService,
@@ -54,9 +58,12 @@ import { WebhookCertificateExpiryJob } from "./webhook-certificate-expiry.job";
     JobExecutionService,
     JobExecutionMaintenanceJob,
     AttestationReconcilerService,
+    BulkAdminService,
   ],
   exports: [
     AnchoringWorkerService,
+    PaymentBackfillWorkerService,
+    DomainEventOutboxWorkerService,
     AnchoringReconcilerService,
     ProofExpirationReconcilerService,
     ProofSharingCleanupJob,
@@ -65,6 +72,7 @@ import { WebhookCertificateExpiryJob } from "./webhook-certificate-expiry.job";
     IssuerReconciliationService,
     RetentionCleanupService,
     JobExecutionService,
+    BulkAdminService,
   ],
 })
 export class JobsModule {}

@@ -1,3 +1,5 @@
+import { QuotasModule } from "../quotas/quotas.module";
+import { HealthModule } from "../health/health.module";
 import { Module } from "@nestjs/common";
 import { AuditModule } from "../audit/audit.module";
 import { AuthModule } from "../auth/auth.module";
@@ -17,6 +19,18 @@ import { ProofExpirationReminderController } from "./proof-expiration-reminder.c
 @Module({
   imports: [AuthModule, AuditModule, AttestationsModule, WebhooksModule, NotificationsModule],
   controllers: [ProofsController, ProofExpirationReminderController],
+import { ProofCapacityPreflightService } from "./proof-capacity-preflight.service";
+
+@Module({
+  imports: [
+    AuthModule,
+    AuditModule,
+    AttestationsModule,
+    WebhooksModule,
+    QuotasModule,
+    HealthModule,
+  ],
+  controllers: [ProofsController],
   providers: [
     ContractAnchoringService,
     CredentialVerificationKeyService,
@@ -25,6 +39,7 @@ import { ProofExpirationReminderController } from "./proof-expiration-reminder.c
     ProofVerificationAbuseService,
     ProofReconciliationService,
     ProofExpirationReminderService,
+    ProofCapacityPreflightService,
   ],
   exports: [
     ContractAnchoringService,
@@ -32,6 +47,7 @@ import { ProofExpirationReminderController } from "./proof-expiration-reminder.c
     ProofSharingService,
     ProofReconciliationService,
     ProofExpirationReminderService,
+    ProofCapacityPreflightService,
   ],
 })
 export class ProofsModule {}

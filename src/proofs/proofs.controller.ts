@@ -75,6 +75,8 @@ import { VerificationStatsDto } from "./dto/verification-stats.dto";
 import { ProofsService } from "./proofs.service";
 import { ProofSharingService } from "./proof-sharing.service";
 import { PrismaService } from "../database/prisma.service";
+import { ProofCapacityPreflightService } from "./proof-capacity-preflight.service";
+import { ProofCapacityPreflightDto } from "./dto/capacity-preflight.dto";
 
 @ApiTags("proofs")
 @Controller("proofs")
@@ -83,6 +85,7 @@ export class ProofsController {
     private readonly proofsService: ProofsService,
     private readonly proofSharingService: ProofSharingService,
     private readonly prisma: PrismaService,
+    private readonly preflightService?: ProofCapacityPreflightService,
   ) {}
 
   @ApiBearerAuth()
@@ -114,6 +117,29 @@ export class ProofsController {
     @Query() query: ListProofsDto,
   ) {
     return this.proofsService.listProofs(user.id, query);
+  }
+
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: "Preflight check proof issuance capacity and quotas",
+    description:
+      "Returns advisory capacity evaluation combining organization quota and live contract status. Does not grant authorization.",
+  })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: "Proof capacity preflight response.",
+  })
+  @UseGuards(AuthGuard)
+  @Get("preflight")
+  @AuthenticatedRoute({ ownership: "user" })
+  async getCapacityPreflight(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query() query: ProofCapacityPreflightDto,
+  ) {
+    if (!this.preflightService) {
+      throw new BadRequestException("Preflight service not available");
+    }
+    return this.preflightService.evaluatePreflight(user.id, query);
   }
 
   @ApiBearerAuth()
