@@ -416,7 +416,10 @@ model WebhookDelivery {
   attempt        Int                   @default(1)
   status         WebhookDeliveryStatus @default(PENDING)
   statusCode     Int?
-  responseBody   String?
+  /// Safe webhook response with truncation flag, content hash, and redaction.
+  /// Structure: { truncatedBody: string, contentHash: string, wasTruncated: boolean, hadEncodingIssue: boolean }
+  /// null when delivery has not yet been attempted or when status is PENDING.
+  responseBody   Json?
   durationMs     Int?
   failureReason  String?
   replayOf       String?

@@ -635,6 +635,358 @@ describe("WebhookDeliveryService", () => {
       );
     });
   });
+
+  // -------------------------------------------------------------------------
+  // Integration tests: SafeWebhookResponse handling
+  // -------------------------------------------------------------------------
+  describe("SafeWebhookResponse handling", () => {
+    it("stores response body as SafeWebhookResponse JSON structure on success", async () => {
+      const secretEncrypted = makeEncryptedSecret();
+      const deliveries = new Map<string, Record<string, unknown>>();
+      const deliveryId = "delivery_safe_response";
+
+      const prisma = buildPrisma(deliveries, [
+        { id: "webhook_1", url: "https://example.com/hook", secretEncrypted, status: "ACTIVE" },
+      ]);
+
+      deliveries.set(deliveryId, {
+        id: deliveryId,
+        webhookId: "webhook_1",
+        eventType: "proof.created",
+        eventId: "event_safe",
+        attempt: 1,
+        status: WebhookDeliveryStatus.PENDING,
+        replayOf: null,
+        createdAt: new Date(),
+        webhook: {
+          id: "webhook_1",
+          url: "https://example.com/hook",
+          secretEncrypted,
+          status: "ACTIVE",
+        },
+      });
+
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        text: async () => "Success response",
+      }) as unknown as typeof fetch;
+
+      const service = new WebhookDeliveryService(
+        prisma as never,
+        new WebhookSigningService(),
+        makeConfig() as never,
+      );
+
+      await (service as unknown as { runDelivery: Function }).runDelivery(
+        deliveryId,
+        makeEnvelope(),
+        "https://example.com/hook",
+        secretEncrypted,
+      );
+
+      const storedRow = deliveries.get(deliveryId) as Record<string, unknown>;
+      expect(storedRow.status).toBe(WebhookDeliveryStatus.SUCCESS);
+
+      // responseBody should be a SafeWebhookResponse object (stored as JSON)
+      expect(typeof storedRow.responseBody).toBe("object");
+      const responseBody = storedRow.responseBody as Record<string, unknown>;
+      expect(responseBody).toHaveProperty("truncatedBody");
+      expect(responseBody).toHaveProperty("contentHash");
+      expect(responseBody).toHaveProperty("wasTruncated");
+      expect(responseBody).toHaveProperty("hadEncodingIssue");
+
+      expect(responseBody.truncatedBody).toBe("Success response");
+      expect(responseBody.wasTruncated).toBe(false);
+      expect(responseBody.hadEncodingIssue).toBe(false);
+      expect(typeof responseBody.contentHash).toBe("string");
+      expect((responseBody.contentHash as string).length).toBe(64); // SHA-256 hex
+    });
+
+    it("stores response body on failed delivery with SafeWebhookResponse structure", async () => {
+      const secretEncrypted = makeEncryptedSecret();
+      const deliveries = new Map<string, Record<string, unknown>>();
+      const deliveryId = "delivery_fail_safe";
+
+      const prisma = buildPrisma(deliveries, [
+        { id: "webhook_1", url: "https://example.com/hook", secretEncrypted, status: "ACTIVE" },
+      ]);
+
+      deliveries.set(deliveryId, {
+        id: deliveryId,
+        webhookId: "webhook_1",
+        eventType: "proof.created",
+        eventId: "event_fail_safe",
+        attempt: 1,
+        status: WebhookDeliveryStatus.PENDING,
+        replayOf: null,
+        createdAt: new Date(),
+        webhook: {
+          id: "webhook_1",
+          url: "https://example.com/hook",
+          secretEncrypted,
+          status: "ACTIVE",
+        },
+      });
+
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: false,
+        status: 400,
+        text: async () => "Bad Request",
+      }) as unknown as typeof fetch;
+
+      const service = new WebhookDeliveryService(
+        prisma as never,
+        new WebhookSigningService(),
+        makeConfig() as never,
+      );
+
+      await (service as unknown as { runDelivery: Function }).runDelivery(
+        deliveryId,
+        makeEnvelope(),
+        "https://example.com/hook",
+        secretEncrypted,
+      );
+
+      const storedRow = deliveries.get(deliveryId) as Record<string, unknown>;
+      expect(storedRow.status).toBe(WebhookDeliveryStatus.FAILED);
+      expect(storedRow.statusCode).toBe(400);
+
+      // responseBody should still be stored as SafeWebhookResponse
+      expect(typeof storedRow.responseBody).toBe("object");
+      const responseBody = storedRow.responseBody as Record<string, unknown>;
+      expect(responseBody.truncatedBody).toBe("Bad Request");
+    });
+
+    it("truncates large response bodies and sets wasTruncated flag", async () => {
+      const secretEncrypted = makeEncryptedSecret();
+      const deliveries = new Map<string, Record<string, unknown>>();
+      const deliveryId = "delivery_truncated_safe";
+
+      const prisma = buildPrisma(deliveries, [
+        { id: "webhook_1", url: "https://example.com/hook", secretEncrypted, status: "ACTIVE" },
+      ]);
+
+      deliveries.set(deliveryId, {
+        id: deliveryId,
+        webhookId: "webhook_1",
+        eventType: "proof.created",
+        eventId: "event_truncated",
+        attempt: 1,
+        status: WebhookDeliveryStatus.PENDING,
+        replayOf: null,
+        createdAt: new Date(),
+        webhook: {
+          id: "webhook_1",
+          url: "https://example.com/hook",
+          secretEncrypted,
+          status: "ACTIVE",
+        },
+      });
+
+      const largeBody = "x".repeat(2000);
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        text: async () => largeBody,
+      }) as unknown as typeof fetch;
+
+      const service = new WebhookDeliveryService(
+        prisma as never,
+        new WebhookSigningService(),
+        makeConfig() as never,
+      );
+
+      await (service as unknown as { runDelivery: Function }).runDelivery(
+        deliveryId,
+        makeEnvelope(),
+        "https://example.com/hook",
+        secretEncrypted,
+      );
+
+      const storedRow = deliveries.get(deliveryId) as Record<string, unknown>;
+      const responseBody = storedRow.responseBody as Record<string, unknown>;
+
+      expect(responseBody.wasTruncated).toBe(true);
+      expect((responseBody.truncatedBody as string).length).toBe(1024); // MAX_RESPONSE_BODY_BYTES
+      // Hash is computed on full content before truncation
+      expect(typeof responseBody.contentHash).toBe("string");
+      expect((responseBody.contentHash as string).length).toBe(64);
+    });
+
+    it("redacts sensitive patterns and stores redacted hash", async () => {
+      const secretEncrypted = makeEncryptedSecret();
+      const deliveries = new Map<string, Record<string, unknown>>();
+      const deliveryId = "delivery_redact_safe";
+
+      const prisma = buildPrisma(deliveries, [
+        { id: "webhook_1", url: "https://example.com/hook", secretEncrypted, status: "ACTIVE" },
+      ]);
+
+      deliveries.set(deliveryId, {
+        id: deliveryId,
+        webhookId: "webhook_1",
+        eventType: "proof.created",
+        eventId: "event_redact",
+        attempt: 1,
+        status: WebhookDeliveryStatus.PENDING,
+        replayOf: null,
+        createdAt: new Date(),
+        webhook: {
+          id: "webhook_1",
+          url: "https://example.com/hook",
+          secretEncrypted,
+          status: "ACTIVE",
+        },
+      });
+
+      const responseWithSecret = 'api_key="secret123456789" status: ok';
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        text: async () => responseWithSecret,
+      }) as unknown as typeof fetch;
+
+      const service = new WebhookDeliveryService(
+        prisma as never,
+        new WebhookSigningService(),
+        makeConfig() as never,
+      );
+
+      await (service as unknown as { runDelivery: Function }).runDelivery(
+        deliveryId,
+        makeEnvelope(),
+        "https://example.com/hook",
+        secretEncrypted,
+      );
+
+      const storedRow = deliveries.get(deliveryId) as Record<string, unknown>;
+      const responseBody = storedRow.responseBody as Record<string, unknown>;
+
+      // Secret should be redacted
+      expect(responseBody.truncatedBody as string).not.toContain("secret123456789");
+      expect(responseBody.truncatedBody as string).toContain("[REDACTED]");
+      expect(responseBody.truncatedBody as string).toContain("status: ok");
+    });
+
+    it("detects and flags encoding issues in binary responses", async () => {
+      const secretEncrypted = makeEncryptedSecret();
+      const deliveries = new Map<string, Record<string, unknown>>();
+      const deliveryId = "delivery_binary_safe";
+
+      const prisma = buildPrisma(deliveries, [
+        { id: "webhook_1", url: "https://example.com/hook", secretEncrypted, status: "ACTIVE" },
+      ]);
+
+      deliveries.set(deliveryId, {
+        id: deliveryId,
+        webhookId: "webhook_1",
+        eventType: "proof.created",
+        eventId: "event_binary",
+        attempt: 1,
+        status: WebhookDeliveryStatus.PENDING,
+        replayOf: null,
+        createdAt: new Date(),
+        webhook: {
+          id: "webhook_1",
+          url: "https://example.com/hook",
+          secretEncrypted,
+          status: "ACTIVE",
+        },
+      });
+
+      // Mock fetch to return invalid UTF-8
+      const invalidBuffer = Buffer.from([0xFF, 0xFE, 0x48, 0x65, 0x6C, 0x6C, 0x6F]);
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        text: async () => invalidBuffer.toString("utf8"),
+      }) as unknown as typeof fetch;
+
+      const service = new WebhookDeliveryService(
+        prisma as never,
+        new WebhookSigningService(),
+        makeConfig() as never,
+      );
+
+      await (service as unknown as { runDelivery: Function }).runDelivery(
+        deliveryId,
+        makeEnvelope(),
+        "https://example.com/hook",
+        secretEncrypted,
+      );
+
+      const storedRow = deliveries.get(deliveryId) as Record<string, unknown>;
+      const responseBody = storedRow.responseBody as Record<string, unknown>;
+
+      // Should still succeed with hadEncodingIssue flag set
+      expect(storedRow.status).toBe(WebhookDeliveryStatus.SUCCESS);
+      expect(responseBody.hadEncodingIssue).toBe(true);
+      expect(typeof responseBody.truncatedBody).toBe("string");
+    });
+
+    it("handles multiple retries with consistent SafeWebhookResponse structure", async () => {
+      const secretEncrypted = makeEncryptedSecret();
+      const deliveries = new Map<string, Record<string, unknown>>();
+      const deliveryId1 = "delivery_retry_safe_1";
+
+      const prisma = buildPrisma(deliveries, [
+        { id: "webhook_1", url: "https://example.com/hook", secretEncrypted, status: "ACTIVE" },
+      ]);
+
+      deliveries.set(deliveryId1, {
+        id: deliveryId1,
+        webhookId: "webhook_1",
+        eventType: "proof.created",
+        eventId: "event_consistent",
+        attempt: 1,
+        status: WebhookDeliveryStatus.PENDING,
+        replayOf: null,
+        createdAt: new Date(),
+        webhook: {
+          id: "webhook_1",
+          url: "https://example.com/hook",
+          secretEncrypted,
+          status: "ACTIVE",
+        },
+      });
+
+      // First attempt returns 500
+      global.fetch = jest.fn().mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+        text: async () => "Internal Server Error",
+      }) as unknown as typeof fetch;
+
+      const service = new WebhookDeliveryService(
+        prisma as never,
+        new WebhookSigningService(),
+        makeConfig() as never,
+      );
+
+      await (service as unknown as { runDelivery: Function }).runDelivery(
+        deliveryId1,
+        makeEnvelope(),
+        "https://example.com/hook",
+        secretEncrypted,
+      );
+
+      // First attempt should have SafeWebhookResponse
+      const firstAttempt = deliveries.get(deliveryId1) as Record<string, unknown>;
+      expect(firstAttempt.status).toBe(WebhookDeliveryStatus.FAILED);
+      expect(typeof firstAttempt.responseBody).toBe("object");
+      const firstResponse = firstAttempt.responseBody as Record<string, unknown>;
+      expect(firstResponse.truncatedBody).toBe("Internal Server Error");
+
+      // Retry delivery should also have same structure
+      const retryDelivery = [...deliveries.values()].find(
+        (d) => (d as Record<string, unknown>).attempt === 2,
+      ) as Record<string, unknown> | undefined;
+      expect(retryDelivery).toBeDefined();
+      expect(retryDelivery?.status).toBe(WebhookDeliveryStatus.PENDING);
+      expect(retryDelivery?.eventId).toBe("event_consistent");
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
