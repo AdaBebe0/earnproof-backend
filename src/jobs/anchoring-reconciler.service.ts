@@ -9,11 +9,24 @@ import {
 import { StructuredLogger } from "../common/logger";
 import { PrismaService } from "../database/prisma.service";
 import { ContractAnchoringService } from "../proofs/contract-anchoring.service";
+import { DistributedLeaseService } from "./distributed-lease.service";
 
 /**
  * Maximum number of proofs to reconcile per cycle to bound execution time.
  */
 const RECONCILE_BATCH_SIZE = 20;
+
+/**
+ * Duration to hold the anchoring reconciliation lease (24 hours).
+ * Sufficient for 5-min interval reconciliation jobs; gives ample time.
+ */
+const ANCHORING_RECONCILIATION_LEASE_DURATION_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Unique identifier for the anchoring reconciliation job lease.
+ * Used across all instances to coordinate single execution.
+ */
+const ANCHORING_RECONCILIATION_JOB_NAME = "anchoring_reconciliation";
 
 /**
  * AnchoringReconcilerService
@@ -36,6 +49,9 @@ const RECONCILE_BATCH_SIZE = 20;
  *
  * Secret safety: only proof IDs appear in structured logs; no signing key or
  * CLI credentials are ever logged or stored.
+ *
+ * Distributed coordination: With multiple instances, only one executes
+ * reconciliation at a time via the distributed lease service.
  */
 @Injectable()
 export class AnchoringReconcilerService {
@@ -45,6 +61,7 @@ export class AnchoringReconcilerService {
     private readonly prisma: PrismaService,
     private readonly anchoring: ContractAnchoringService,
     private readonly config: ConfigService,
+    private readonly leaseService: DistributedLeaseService,
   ) {}
 
   @Interval(5 * 60_000)
@@ -53,22 +70,42 @@ export class AnchoringReconcilerService {
       return;
     }
 
-    const proofs = await this.prisma.proof.findMany({
-      where: {
-        contractTransactionHash: { not: null },
-        status: { in: [ProofStatus.ACTIVE, ProofStatus.REVOKED] },
-      },
-      select: {
-        id: true,
-        status: true,
-        contractTransactionHash: true,
-      },
-      take: RECONCILE_BATCH_SIZE,
-      orderBy: { updatedAt: "asc" },
-    });
+    const leaseResult = await this.leaseService.acquireLease(
+      ANCHORING_RECONCILIATION_JOB_NAME,
+      ANCHORING_RECONCILIATION_LEASE_DURATION_MS,
+    );
 
-    for (const proof of proofs) {
-      await this.reconcileProof(proof);
+    if (!leaseResult.acquired) {
+      this.logger.debug(
+        `Anchoring reconciliation lease held by another instance (${leaseResult.owner}); skipping reconciliation`,
+      );
+      return;
+    }
+
+    try {
+      const proofs = await this.prisma.proof.findMany({
+        where: {
+          contractTransactionHash: { not: null },
+          status: { in: [ProofStatus.ACTIVE, ProofStatus.REVOKED] },
+        },
+        select: {
+          id: true,
+          status: true,
+          contractTransactionHash: true,
+        },
+        take: RECONCILE_BATCH_SIZE,
+        orderBy: { updatedAt: "asc" },
+      });
+
+      for (const proof of proofs) {
+        await this.reconcileProof(proof);
+      }
+    } finally {
+      // Renewal: extend the lease before exiting
+      await this.leaseService.renewLease(
+        ANCHORING_RECONCILIATION_JOB_NAME,
+        ANCHORING_RECONCILIATION_LEASE_DURATION_MS,
+      );
     }
   }
 
