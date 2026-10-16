@@ -125,17 +125,9 @@ export class AuthService {
       input.clientMetadata,
     );
 
-    // Atomically mark the challenge as consumed only if it exists, is not
-    // used, and is not expired. This prevents TOCTOU race conditions where
-    // multiple concurrent requests could both pass an existence check before
-    // any of them are marked as used — only one caller can ever win this
-    // conditional update.
     // Atomically mark the challenge as consumed only if it exists, is not used,
     // and is not expired. This closes the TOCTOU window in which two concurrent
     // requests could both pass an existence check before either marked it used.
-    // Atomically mark challenge as consumed only if it exists, is not used, and is not expired.
-    // This prevents TOCTOU race conditions where multiple concurrent requests could both
-    // pass the existence check before any are marked as used.
     const consumedChallenge = await this.prisma.walletChallenge.updateMany({
       where: {
         id: input.challengeId,

@@ -1334,8 +1334,6 @@ describe("ProofsService", () => {
   });
 
   // ---------------------------------------------------------------------------
-  // createIncomeRangeProof
-  // ---------------------------------------------------------------------------
 
   describe("createIncomeRangeProof", () => {
     function makePayment(overrides: Record<string, unknown> = {}) {
@@ -1586,50 +1584,13 @@ describe("ProofsService", () => {
         config as never,
         mockVerificationEventService,
       );
+
       await expect(
         service.createIncomeRangeProof(user, {
           ...baseInput,
           selectedPaymentIds: ["payment_1", "payment_2"],
         }),
       ).rejects.toThrow("must use the requested asset");
-    });
-
-    it("rejects issuance and writes no proof when the asset is no longer active (negative)", async () => {
-      const proofCreate = jest.fn();
-      const prisma = {
-        payment: {
-          findMany: jest.fn().mockResolvedValue(singlePayment),
-        },
-        $transaction: jest
-          .fn()
-          .mockImplementation(async (fn: (tx: unknown) => unknown) => {
-            const tx = {
-              supportedAsset: {
-                // Asset was deactivated between sync and issuance.
-                findFirst: jest.fn().mockResolvedValue(null),
-              },
-              proof: { create: proofCreate },
-              anchoringIntent: { create: jest.fn() },
-            };
-            return fn(tx);
-          }),
-      };
-      const service = new ProofsService(
-        prisma as never,
-        config as never,
-        mockVerificationEventService,
-      );
-
-      await expect(
-        service.createIncomeRangeProof(user, {
-          ...baseInput,
-          lowerBound: "50",
-          upperBound: "150",
-        }),
-      ).rejects.toMatchObject({
-        response: expect.objectContaining({ code: "ASSET_NOT_SUPPORTED" }),
-      });
-      expect(proofCreate).not.toHaveBeenCalled();
     });
 
     it("rejects a payment belonging to another user (ownership check)", async () => {
@@ -1964,6 +1925,7 @@ describe("ProofsService", () => {
           .mockImplementation(async (fn: (tx: unknown) => unknown) => {
             const tx = {
               supportedAsset: {
+                // Asset was deactivated between sync and issuance.
                 findFirst: jest.fn().mockResolvedValue(null),
               },
               proof: { create: proofCreate },
@@ -2033,10 +1995,12 @@ describe("ProofsService", () => {
     });
 
     it("keeps stale Payment.isEligible from making a deactivated asset newly eligible for a proof (regression, TOCTOU)", async () => {
+      // Payment.isEligible is still true (sync has not rerun since deactivation),
+      // but the live registry check inside the transaction is authoritative.
       const proofCreate = jest.fn();
       const prisma = {
         payment: {
-          findMany: jest.fn().mockResolvedValue(singlePayment),
+          findMany: jest.fn().mockResolvedValue(singlePayment), // isEligible: true (stale)
         },
         $transaction: jest
           .fn()
@@ -2168,6 +2132,8 @@ describe("ProofsService", () => {
             network: "testnet",
             assetCode: "XLM",
             assetIssuer: null,
+            // The asset this proof was issued against has since been
+            // deactivated in SupportedAsset - but that must not matter here.
             assetPolicyId: "asset_1",
             assetPolicySnapshot: {
               supportedAssetId: "asset_1",

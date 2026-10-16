@@ -33,6 +33,9 @@ import { UsersModule } from "./users/users.module";
 import { WebhooksModule } from "./webhooks/webhooks.module";
 import { SupportedAssetsModule } from "./supported-assets/supported-assets.module";
 import { GovernanceModule } from "./governance/governance.module";
+import { SupportAccessModule } from "./support-access/support-access.module";
+import { ReconciliationModule } from "./reconciliation/reconciliation.module";
+import { DeploymentsModule } from "./deployments/deployments.module";
 
 @Module({
   imports: [
@@ -69,6 +72,9 @@ import { GovernanceModule } from "./governance/governance.module";
     WebhooksModule,
     SupportedAssetsModule,
     GovernanceModule,
+    SupportAccessModule,
+    ReconciliationModule,
+    DeploymentsModule,
   ],
   providers: [
     {

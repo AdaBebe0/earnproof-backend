@@ -273,12 +273,12 @@ export class ReceiptService {
     });
 
     return receipts.map((receipt) => {
-      const sigData = (receipt.signatureData as Record<string, unknown>) ?? {};
+      const sigData = (receipt.signatureData ?? {}) as Record<string, any>;
       return {
         id: receipt.id,
         proofId: receipt.proofId,
         receiptHash: receipt.receiptHash,
-        issuedAt: sigData.issuedAt ? new Date(sigData.issuedAt as string) : receipt.createdAt,
+        issuedAt: new Date((sigData.issuedAt as string) ?? receipt.createdAt),
         expiresAt: receipt.expiresAt,
         signatureKeyId: (sigData.keyId as string) ?? "",
       };

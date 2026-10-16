@@ -30,10 +30,23 @@ describe("ProofsService lifecycle", () => {
     const service = new ProofsService(
       store.prisma as never,
       {
-        getOrThrow: jest.fn((key: string) => configValues[key]),
-        get: jest.fn((key: string) => configValues[key]),
+        getOrThrow: jest.fn((key: string) => {
+          const values: Record<string, string> = {
+            credentialSigningSecret: "lifecycle-signing-secret",
+            paymentEncryptionKey: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
+            "stellar.network": "testnet",
+          };
+          return values[key];
+        }),
+        get: jest.fn((key: string) => {
+          const values: Record<string, boolean | undefined> = {
+            "contractAnchoring.enabled": false,
+            "contractAnchoring.required": false,
+          };
+          return values[key];
+        }),
       } as never,
-      mockVerificationEventService,
+      mockVerificationEventService as never,
       unlimitedQuotas() as never,
       mockAttestationsService,
     );
@@ -313,12 +326,17 @@ describe("ProofsService lifecycle – recurring-income", () => {
     const service = new ProofsService(
       store.prisma as never,
       {
-        getOrThrow: jest.fn((key: string) => riConfigValues[key]),
-        get: jest.fn((key: string) =>
-          key in riConfigValues ? riConfigValues[key] : false,
-        ),
+        getOrThrow: jest.fn((key: string) => {
+          const values: Record<string, string> = {
+            credentialSigningSecret: "lifecycle-signing-secret",
+            paymentEncryptionKey: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
+            "stellar.network": "testnet",
+          };
+          return values[key];
+        }),
+        get: jest.fn(() => false),
       } as never,
-      mockVerificationEventService,
+      mockVerificationEventService as never,
       unlimitedQuotas() as never,
       mockAttestationsService,
     );

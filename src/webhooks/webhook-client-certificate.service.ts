@@ -13,13 +13,13 @@ import { AddClientCertificateDto } from "./dto/add-client-certificate.dto";
 
 @Injectable()
 export class WebhookClientCertificateService {
-  private readonly keyring: PaymentEncryptionKeyringService;
+  private readonly paymentEncryptionKeyring: PaymentEncryptionKeyringService;
 
   constructor(
     private readonly prisma: PrismaService,
     configService: ConfigService,
   ) {
-    this.keyring = new PaymentEncryptionKeyringService(configService);
+    this.paymentEncryptionKeyring = new PaymentEncryptionKeyringService(configService);
   }
 
   /**
@@ -65,7 +65,7 @@ export class WebhookClientCertificateService {
       .update(cert.raw)
       .digest("hex");
 
-    const privateKeyEncrypted = this.keyring.encrypt(dto.privateKeyPem);
+    const privateKeyEncrypted = this.paymentEncryptionKeyring.encrypt(dto.privateKeyPem);
 
     const created = await this.prisma.webhookClientCertificate.create({
       data: {
@@ -154,7 +154,7 @@ export class WebhookClientCertificateService {
 
     return {
       certificatePem: active.certificatePem,
-      privateKeyPem: this.keyring.decrypt(active.privateKeyEncrypted),
+      privateKeyPem: this.paymentEncryptionKeyring.decrypt(active.privateKeyEncrypted),
     };
   }
 

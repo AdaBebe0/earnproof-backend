@@ -1,4 +1,18 @@
-import { Body, Controller, ForbiddenException, Get, Headers, HttpCode, HttpStatus, NotFoundException, Param, Patch, Post, Req, UseGuards } from "@nestjs/common";
+import {
+  Body,
+  Controller,
+  ForbiddenException,
+  Get,
+  Headers,
+  HttpCode,
+  HttpStatus,
+  NotFoundException,
+  Param,
+  Patch,
+  Post,
+  Req,
+  UseGuards,
+} from "@nestjs/common";
 import {
   ApiBearerAuth,
   ApiOperation,
@@ -24,10 +38,13 @@ import { SessionResponseDto } from "./dto/session-response.dto";
 import { VerifyChallengeDto } from "./dto/verify-challenge.dto";
 import { VerifyResponseDto } from "./dto/verify-response.dto";
 import { SessionService } from "./session.service";
-import { RenameSessionDto } from "./dto/rename-session.dto";
-import { SessionInventoryResponseDto, SessionInventoryItemDto } from "./dto/session-inventory.dto";
+import {
+  SessionInventoryItemDto,
+  SessionInventoryResponseDto,
+} from "./dto/session-inventory.dto";
 import { RevokeSingleSessionResponseDto, RevokeAllOtherSessionsResponseDto } from "./dto/revoke-session.dto";
 import { RecentAuthService } from "./recent-auth.service";
+import { RenameSessionDto } from "./dto/rename-session.dto";
 import { IssueAssertionDto } from "./dto/issue-assertion.dto";
 import { AssertionResponseDto } from "./dto/assertion-response.dto";
 

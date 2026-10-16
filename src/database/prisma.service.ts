@@ -31,8 +31,8 @@ export class PrismaService
     await this.$disconnect();
   }
 
-  get webhookCircuitState(): any {
-    return (this as any).webhookCircuitBreaker;
+  get webhookCircuitState() {
+    return (this as any).webhookCircuit;
   }
 
   /**

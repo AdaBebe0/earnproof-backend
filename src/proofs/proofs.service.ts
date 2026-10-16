@@ -246,11 +246,12 @@ type IncomeRangeCredential = {
 type AggregateEarningsCredential = {
   id: string;
   type: "EarnProofAggregateEarningsCredential";
-  schemaVersion: string;
+  schemaVersion: "earnproof.aggregate-earnings.v1";
   issuer: "earnproof-backend";
   subject: { walletHash: string };
   claim: {
     operator: "sum";
+    /** Floored to `rounding.increment`; never the exact total. */
     aggregateAmount: string;
     rounding: { mode: "floor"; increment: RoundingIncrement };
     assetCode: string;
@@ -435,13 +436,10 @@ export class ProofsService {
       configService.get<boolean>("contractAnchoring.enabled") ?? false;
     this.anchoringRequired =
       configService.get<boolean>("contractAnchoring.required") ?? false;
-    const digestSecret =
-      this.signingKeyring.secretFor(this.signingKeyring.activeWriteVersion) ??
-      "aggregate-digest-secret";
     this.aggregateEarnings = new AggregateEarningsCalculator(
       prisma,
       (amountEncrypted) => this.paymentEncryptionKeyring.decrypt(amountEncrypted),
-      digestSecret,
+      this.signingKeyring.activeSecret,
     );
   }
 
@@ -2705,7 +2703,7 @@ export class ProofsService {
         ? { anchored: false as const, reason: "pending" as const }
         : { anchored: false as const, reason: "disabled" as const };
 
-    this.emitWebhook(user.id, {
+    this.emitWebhook(proof.userId, {
       event: "proof.revoked",
       source: {
         proofId: updated.id,
@@ -2730,7 +2728,7 @@ export class ProofsService {
    */
   async verifyProof(
     proofId: string,
-    context: { shareTokenId?: string; ip?: string } = {},
+    context: VerificationClientContext & { shareTokenId?: string } = {},
   ) {
     this.verificationAbuseService?.checkClientCardinality(context, proofId);
     const proof = await this.prisma.proof.findUnique({
@@ -3341,8 +3339,12 @@ export class ProofsService {
   }): EarnProofCredential {
     const policy = this.jsonPolicy(proof.claim.disclosurePolicy);
     const cadence = this.revealCadence(proof.claim.frequency);
+
     if (proof.proofType === ProofType.AGGREGATE_EARNINGS) {
-      return this.rebuildAggregateEarningsCredential(proof);
+      return this.rebuildAggregateEarningsCredential({
+        ...proof,
+        claim: proof.claim,
+      });
     }
     if (proof.proofType === ProofType.RECURRING_INCOME) {
       return this.buildRecurringIncomeCredential({
@@ -3367,20 +3369,19 @@ export class ProofsService {
       return this.rebuildPaymentReceiptCredential(proof);
     }
     if (proof.proofType === ProofType.INVOICE_SETTLEMENT) {
-      return this.rebuildInvoiceSettlementCredential(proof);
+      return this.rebuildInvoiceSettlementCredential({
+        ...proof,
+        claim: proof.claim,
+      });
     }
     if (proof.proofType === ProofType.INCOME_RANGE) {
       return this.buildIncomeRangeCredential({
         id: proof.id,
         walletHash: proof.user.walletHash,
         lowerBound:
-          typeof policy["lowerBound"] === "string"
-            ? policy["lowerBound"]
-            : "0",
+          typeof policy["lowerBound"] === "string" ? policy["lowerBound"] : "0",
         upperBound:
-          typeof policy["upperBound"] === "string"
-            ? policy["upperBound"]
-            : "0",
+          typeof policy["upperBound"] === "string" ? policy["upperBound"] : "0",
         assetCode: proof.assetCode,
         assetIssuer: proof.assetIssuer,
         periodStart: proof.periodStart ?? proof.createdAt,

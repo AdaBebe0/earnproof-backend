@@ -24,6 +24,7 @@ import {
   ApiTags,
 } from "@nestjs/swagger";
 import { SkipThrottle, Throttle } from "@nestjs/throttler";
+import { ApiKeyScope, SharingOutcome } from "@prisma/client";
 import { Request } from "express";
 import { AuthenticatedUser } from "../auth/auth.types";
 import { CurrentUser } from "../common/decorators/current-user.decorator";
@@ -996,7 +997,7 @@ export class ProofsController {
     type: ApiErrorDto,
   })
   @UseGuards(AuthGuard)
-  @RequireApiKeyScopes(["PROOF_READ"]) // Example of API key quota enforcement
+  @RequireApiKeyScopes(ApiKeyScope.PROOF_READ) // Example of API key quota enforcement
   @RequireConsent("PRIVACY_POLICY") // Example of consent requirement
   @Get(":id/verification-stats")
   @AuthenticatedRoute({ ownership: "user" })
@@ -1061,12 +1062,12 @@ export class ProofsController {
       orgMember.organizationId,
       proofId,
       {
-        purpose: body.purpose || "Proof sharing",
+        purpose: "Proof sharing",
         requestedBy: user.id,
       },
       {
         ipAddress: request.ip || "0.0.0.0",
-        userAgent: request.headers["user-agent"] || "unknown",
+        userAgent: (request.headers["user-agent"] as string) || "unknown",
       },
     );
 
@@ -1121,7 +1122,7 @@ export class ProofsController {
       },
     );
 
-    const aggregateMap = new Map<string, { count: number; lastAccessedAt: Date | null }>();
+    const aggregateMap = new Map<SharingOutcome, { count: number; lastAccessedAt: Date | null }>();
     for (const event of events) {
       const existing = aggregateMap.get(event.outcome) ?? { count: 0, lastAccessedAt: null };
       existing.count += 1;
@@ -1130,17 +1131,15 @@ export class ProofsController {
       }
       aggregateMap.set(event.outcome, existing);
     }
-
     const aggregates = Array.from(aggregateMap.entries()).map(([outcome, data]) => ({
-      outcome: outcome as any,
+      outcome,
       count: data.count,
       lastAccessedAt: data.lastAccessedAt,
     }));
-
-    const recentEvents = events.slice(0, 50).map((event: any) => ({
-      proofId: event.proofId,
-      outcome: event.outcome,
-      accessedAt: event.createdAt,
+    const recentEvents = events.slice(0, 50).map((e: any) => ({
+      proofId: e.proofId,
+      outcome: e.outcome,
+      accessedAt: e.createdAt,
     }));
 
     return { aggregates, recentEvents };

@@ -137,7 +137,7 @@ export const WEBHOOK_PAYLOAD_REGISTRY: PayloadRegistry = {
         "expiresAt",
         "reconciledAt",
       ],
-      serialize: (s: any) => ({
+      serialize: (s) => ({
         attestationId: s.attestationId,
         issuerId: s.issuerId,
         subjectWalletHash: s.subjectWalletHash,

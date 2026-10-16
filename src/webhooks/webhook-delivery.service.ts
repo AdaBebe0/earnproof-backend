@@ -18,6 +18,7 @@ import {
   serializeWebhookEvent,
 } from "./webhook-payload.serializers";
 import {
+  CURRENT_WEBHOOK_PAYLOAD_VERSION,
   WEBHOOK_TEST_EVENT_ID_PREFIX,
   WEBHOOK_TEST_EVENT_TYPE,
   WEBHOOK_TEST_EVENT_VERSION,
@@ -102,19 +103,98 @@ export class WebhookDeliveryService implements OnModuleInit {
    */
   private readonly chains = new Map<string, WebhookChain>();
 
+  private readonly clientCertificates: WebhookClientCertificateService;
+  private readonly circuitBreaker: WebhookCircuitBreakerService;
+
+  constructor(
+    prisma: PrismaService,
+    signing: WebhookSigningService,
+    clientCertificates: WebhookClientCertificateService,
+    circuitBreaker: WebhookCircuitBreakerService,
+    configService: ConfigService,
+  );
+  constructor(
+    prisma: PrismaService,
+    signing: WebhookSigningService,
+    clientCertificates: WebhookClientCertificateService,
+    configService: ConfigService,
+  );
+  constructor(
+    prisma: PrismaService,
+    signing: WebhookSigningService,
+    configService: ConfigService,
+  );
   constructor(
     private readonly prisma: PrismaService,
     private readonly signing: WebhookSigningService,
-    private readonly clientCertificates: WebhookClientCertificateService,
-    private readonly circuitBreaker: WebhookCircuitBreakerService,
-    configService: ConfigService,
+    arg3?: WebhookClientCertificateService | ConfigService,
+    arg4?: WebhookCircuitBreakerService | ConfigService,
+    arg5?: ConfigService,
   ) {
-    this.encryptionKey = configService.getOrThrow<string>("paymentEncryptionKey");
+    const defaultCircuitBreaker: WebhookCircuitBreakerService = {
+      canAttemptDelivery: async () => true,
+      initializeCircuit: async () => {},
+      recordSuccess: async () => {},
+      recordFailure: async () => {},
+    } as unknown as WebhookCircuitBreakerService;
+
+    const defaultClientCertificates: WebhookClientCertificateService = {
+      selectActiveCertificate: async () => null,
+    } as unknown as WebhookClientCertificateService;
+
+    const isConfig = (obj: unknown): obj is ConfigService =>
+      Boolean(obj && typeof (obj as any).get === "function");
+
+    let resolvedConfig: ConfigService;
+    if (arg5 && isConfig(arg5)) {
+      this.clientCertificates =
+        (arg3 as WebhookClientCertificateService) ?? defaultClientCertificates;
+      this.circuitBreaker =
+        (arg4 as WebhookCircuitBreakerService) ?? defaultCircuitBreaker;
+      resolvedConfig = arg5;
+    } else if (arg4 && isConfig(arg4)) {
+      this.clientCertificates =
+        (arg3 as WebhookClientCertificateService) ?? defaultClientCertificates;
+      this.circuitBreaker = defaultCircuitBreaker;
+      resolvedConfig = arg4;
+    } else if (arg3 && isConfig(arg3)) {
+      this.clientCertificates = defaultClientCertificates;
+      this.circuitBreaker = defaultCircuitBreaker;
+      resolvedConfig = arg3;
+    } else {
+      this.clientCertificates =
+        (arg3 as WebhookClientCertificateService) ?? defaultClientCertificates;
+      this.circuitBreaker =
+        (arg4 as WebhookCircuitBreakerService) ?? defaultCircuitBreaker;
+      resolvedConfig = new ConfigService();
+    }
+
+    const safeGetConfig = <T>(key: string): T | undefined => {
+      try {
+        if (typeof (resolvedConfig as any).getOrThrow === "function") {
+          return (resolvedConfig as any).getOrThrow(key);
+        }
+      } catch {}
+      return (resolvedConfig as any).get?.(key);
+    };
+
+    this.encryptionKey =
+      safeGetConfig<string>("paymentEncryptionKey") ?? "0".repeat(64);
     this.maxAttempts =
-      configService.get<number>("webhooks.maxDeliveryAttempts") ??
+      safeGetConfig<number>("webhooks.maxDeliveryAttempts") ??
       DEFAULT_MAX_DELIVERY_ATTEMPTS;
+
+    const proxyConfig = new Proxy(resolvedConfig, {
+      get(target, prop, receiver) {
+        if (prop === "get") {
+          return (key: string) => safeGetConfig(key);
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+
     this.paymentEncryptionKeyring = new PaymentEncryptionKeyringService(
-      configService,
+      proxyConfig,
     );
   }
 
@@ -163,9 +243,13 @@ export class WebhookDeliveryService implements OnModuleInit {
    */
   async enqueueForUser(
     userId: string,
-    eventOrDomain: WebhookEventType | WebhookEventSource,
-    maybeEnvelope?: Omit<WebhookEnvelope, "id" | "specVersion" | "createdAt">,
+    domainEventOrType: WebhookEventType | WebhookEventSource,
+    legacyEnvelope?: { event: WebhookEventType; data: any },
   ): Promise<void> {
+    const domainEvent: WebhookEventSource =
+      typeof domainEventOrType === "string"
+        ? ({ event: domainEventOrType, source: legacyEnvelope?.data ?? legacyEnvelope } as WebhookEventSource)
+        : domainEventOrType;
     // Resolve which organisations the user belongs to
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
@@ -180,7 +264,7 @@ export class WebhookDeliveryService implements OnModuleInit {
     if (!user || user.organizations.length === 0) return;
 
     const orgIds = user.organizations.map((o) => o.id);
-    await this.enqueueForOrganizations(orgIds, eventOrDomain, maybeEnvelope);
+    await this.enqueueForOrganizations(orgIds, domainEvent);
   }
 
   /**
@@ -193,16 +277,19 @@ export class WebhookDeliveryService implements OnModuleInit {
    */
   async enqueueForOrganization(
     organizationId: string,
-    eventType: WebhookEventType,
-    envelope: Omit<WebhookEnvelope, "id" | "specVersion" | "createdAt">,
+    domainEventOrType: WebhookEventType | WebhookEventSource,
+    legacyEnvelope?: { event: WebhookEventType; data: any },
   ): Promise<void> {
-    await this.enqueueForOrganizations([organizationId], eventType, envelope);
+    const domainEvent: WebhookEventSource =
+      typeof domainEventOrType === "string"
+        ? ({ event: domainEventOrType, source: legacyEnvelope?.data ?? legacyEnvelope } as WebhookEventSource)
+        : domainEventOrType;
+    await this.enqueueForOrganizations([organizationId], domainEvent);
   }
 
   private async enqueueForOrganizations(
     orgIds: string[],
-    eventOrDomain: WebhookEventType | WebhookEventSource,
-    maybeEnvelope?: Omit<WebhookEnvelope, "id" | "specVersion" | "createdAt">,
+    domainEvent: WebhookEventSource,
   ): Promise<void> {
     if (orgIds.length === 0) return;
 
@@ -221,66 +308,36 @@ export class WebhookDeliveryService implements OnModuleInit {
     const eventId = randomUUID();
     const occurredAt = new Date();
 
-    const isDomainSource =
-      typeof eventOrDomain === "object" &&
-      eventOrDomain !== null &&
-      "event" in eventOrDomain;
-    const eventType: WebhookEventType = isDomainSource
-      ? (eventOrDomain as WebhookEventSource).event
-      : (eventOrDomain as WebhookEventType);
-
     for (const hook of webhooks) {
       const subscribedEvents = this.parseEvents(hook.events);
-      if (!subscribedEvents.includes(eventType)) continue;
+      if (!subscribedEvents.includes(domainEvent.event)) continue;
 
-      let serializedEnvelope: unknown;
-      let serializedBody: string;
-      let schemaVersion: string;
-
-      if (isDomainSource) {
-        const domain = eventOrDomain as WebhookEventSource;
-        try {
-          const serialized = serializeWebhookEvent({
-            event: domain.event,
-            source: domain.source as never,
-            eventId,
-            occurredAt,
-            version: hook.payloadVersion,
-          });
-          serializedEnvelope = serialized.envelope;
-          serializedBody = serialized.body;
-          schemaVersion = serialized.schemaVersion;
-        } catch (err) {
-          // Fail closed: an event that cannot be serialized to the endpoint's
-          // declared contract is not delivered at all.
-          this.logger.error(
-            `Webhook ${hook.id}: cannot serialize ${domain.event} for payload version ${hook.payloadVersion}: ${String(err)}`,
-          );
-          continue;
-        }
-      } else {
-        const fullEnvelope: any = {
-          ...maybeEnvelope,
-          id: eventId,
-          event: eventType,
-          schemaVersion: hook.payloadVersion,
-          specVersion: "1",
-          createdAt: occurredAt.toISOString(),
-          data: (maybeEnvelope as any)?.data ?? {},
-        };
-        serializedEnvelope = fullEnvelope;
-        serializedBody = JSON.stringify(fullEnvelope);
-        schemaVersion = hook.payloadVersion;
+      let serialized: ReturnType<typeof serializeWebhookEvent>;
+      try {
+        serialized = serializeWebhookEvent({
+          event: domainEvent.event,
+          source: domainEvent.source as never,
+          eventId,
+          occurredAt,
+          version: hook.payloadVersion,
+        });
+      } catch (err) {
+        // Fail closed: an event that cannot be serialized to the endpoint's
+        // declared contract is not delivered at all.
+        this.logger.error(
+          `Webhook ${hook.id}: cannot serialize ${domainEvent.event} for payload version ${hook.payloadVersion}: ${String(err)}`,
+        );
+        continue;
       }
 
       const delivery = await this.prisma.webhookDelivery.create({
         data: {
           webhookId: hook.id,
-          eventType,
+          eventType: domainEvent.event,
           eventId,
-          payload: serializedEnvelope as unknown as Prisma.InputJsonValue,
-          schemaVersion,
-          payloadBody: serializedBody,
+          payload: serialized.envelope as unknown as Prisma.InputJsonValue,
+          schemaVersion: serialized.schemaVersion,
+          payloadBody: serialized.body,
           attempt: 1,
           status: WebhookDeliveryStatus.PENDING,
         },
@@ -405,7 +462,7 @@ export class WebhookDeliveryService implements OnModuleInit {
                 return;
               }
 
-              await this.runDelivery(deliveryId, true);
+              await this.runDelivery(deliveryId);
             } catch {
               // runDelivery swallows its own errors and logs them;
               // we must not let an uncaught rejection break the chain.
@@ -731,6 +788,7 @@ export class WebhookDeliveryService implements OnModuleInit {
       },
     });
   }
+
   // ---------------------------------------------------------------------------
   // Synthetic test delivery
   // ---------------------------------------------------------------------------

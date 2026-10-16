@@ -15,7 +15,11 @@ import { ApiKeyQuotaService } from "../../api-keys/api-key-quota.service";
 
 export class TooManyRequestsException extends HttpException {
   constructor(message = "Too Many Requests", options?: any) {
-    super(message, HttpStatus.TOO_MANY_REQUESTS, options);
+    super(
+      HttpException.createBody(message, "Too Many Requests", HttpStatus.TOO_MANY_REQUESTS),
+      HttpStatus.TOO_MANY_REQUESTS,
+      options,
+    );
   }
 }
 
@@ -38,9 +42,9 @@ interface RedisMulti {
 
 /**
  * Metadata key for required API key scopes.
- * Set by @RequireApiKeyScope() decorator.
+ * Set by @RequireApiKeyScopes() decorator.
  */
-const REQUIRE_API_KEY_SCOPES = "requireApiKeyScopes";
+export const REQUIRE_API_KEY_SCOPES = "requireApiKeyScopes";
 
 /**
  * Decorator to specify required API key scopes for an endpoint.
@@ -48,8 +52,8 @@ const REQUIRE_API_KEY_SCOPES = "requireApiKeyScopes";
  * 
  * @param scopes Required scopes for the endpoint
  */
-export const RequireApiKeyScopes = (...scopes: (ApiKeyScope | string | (ApiKeyScope | string)[])[]) =>
-  SetMetadata(REQUIRE_API_KEY_SCOPES, scopes.flat());
+export const RequireApiKeyScopes = (...scopes: (ApiKeyScope | string)[]) =>
+  SetMetadata(REQUIRE_API_KEY_SCOPES, scopes);
 
 /**
  * API Key Quota Guard

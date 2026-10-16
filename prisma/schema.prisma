@@ -304,7 +304,7 @@ model WalletChallenge {
 }
 
 /// Persisted, revocable authentication session.
-/// Only a SHA-256 hash of the opaque bearer token is stored â€” the raw token is never
+/// Only a SHA-256 hash of the opaque bearer token is stored — the raw token is never
 /// written to the database or to any application log.
 model AuthSession {
   id                String       @id @default(cuid())
@@ -317,15 +317,12 @@ model AuthSession {
   /// issued before wallet rotation existed.
   walletHash        String?
   createdAt         DateTime     @default(now())
-  /// Coarse, escaped label derived from an allowlisted request-header subset.
-  /// Raw user-agent and network identifiers are never persisted.
-  deviceLabel       String?
-  firstSeenAt       DateTime     @default(now())
-  lastSeenAt        DateTime     @default(now())
   expiresAt         DateTime
   lastUsedAt        DateTime?
-  /// Set when the session is explicitly revoked (logout or rotation).
   revokedAt         DateTime?
+  deviceLabel       String?
+  firstSeenAt       DateTime  @default(now())
+  lastSeenAt        DateTime  @default(now())
   /// Optional device fingerprint for session inventory (e.g., user-agent hash, IP hash).
   deviceFingerprint String?
   /// Optional reason for revocation (e.g., "REMOTE_REVOCATION", "DEVICE_LOSS").
@@ -411,6 +408,7 @@ model Organization {
   residencyPolicies    DataResidencyPolicy[]
   residencyAssignments DataResidencyAssignment[]
   schemaImportJobs     SchemaImportJob[]
+  supportAccessGrants  SupportAccessGrant[]
 
   @@index([status])
   @@index([archivedAt])
@@ -581,31 +579,27 @@ model Payment {
   sourceAddressEncrypted      String?
   destinationAddressEncrypted String?
   /// hmac:v<N>:... keyed lookup token for equality queries on the sender.
-  sourceAddressLookup         String?
-  operationIndex              Int?
-  assetCode                   String
-  assetIssuer                 String?
-  amountEncrypted             String?
-  occurredAt                  DateTime
+  sourceAddressLookup    String?
+  operationIndex         Int?
+  pagingToken            String?
+  ledgerSequence         Int?
+  finalityHoldAt         DateTime?
+  finalityHoldReason     String?
+  assetCode              String
+  assetIssuer            String?
+  amountEncrypted        String?
+  occurredAt             DateTime
   /// Versioned memo (v2): {version, type, ciphertext} or {version, type: "none", omitted?}.
   /// Plaintext is never stored. See src/payments/payment-memo.ts and docs/payment-memos.md.
-  memo                        Json?
-  classification              PaymentClassification          @default(UNKNOWN)
-  classificationRevision      Int                            @default(1)
-  isEligible                  Boolean                        @default(false)
-  /// Horizon paging token (operation TOID). Null for rows synced before ledger finality tracking.
-  pagingToken                 String?
-  /// Ledger the operation closed in, derived from the paging token.
-  ledgerSequence              Int?
-  /// Set while the payment's ledger view is unreconciled. Proof issuance refuses held payments.
-  finalityHoldAt              DateTime?
-  /// Machine-readable divergence reason for the hold. Never contains payment data.
-  finalityHoldReason          String?
-  invoiceSettlement           ProofInvoiceSettlement?
-  createdAt                   DateTime                       @default(now())
-  updatedAt                   DateTime                       @updatedAt
-  classificationHistory       PaymentClassificationHistory[]
-  eligibilityDecisions        PaymentEligibilityDecision[]
+  memo                   Json?
+  classification         PaymentClassification @default(UNKNOWN)
+  classificationRevision Int                   @default(1)
+  isEligible             Boolean               @default(false)
+  createdAt              DateTime              @default(now())
+  updatedAt              DateTime              @updatedAt
+  invoiceSettlement      ProofInvoiceSettlement?
+  classificationHistory  PaymentClassificationHistory[]
+  eligibilityDecisions   PaymentEligibilityDecision[]
 
   // Canonical identity of an indexed payment. A transaction hash alone is not
   // enough — one transaction can hold several payment operations — so network,
@@ -622,46 +616,35 @@ model Payment {
   @@index([classification])
 }
 
-enum PaymentBackfillStatus {
-  PENDING
-  RUNNING
-  COMPLETED
-  CANCELLED
-  FAILED
-}
+/// One evaluation of a payment's eligibility under a versioned policy.
+/// Exactly one decision per payment is active; superseded decisions are kept
+/// for audit. Stores derived factors and reason codes only: never a memo,
+/// an amount, or a counterparty address.
+model PaymentEligibilityDecision {
+  id            String    @id @default(cuid())
+  paymentId     String
+  payment       Payment   @relation(fields: [paymentId], references: [id])
+  /// Denormalised owner, so owner-scoped reads never need a join.
+  userId        String
+  policyVersion String
+  eligible      Boolean
+  factors       Json
+  reasonCodes   String[]
+  /// sha256 of (policyVersion, factors). Equal hashes mean an identical decision.
+  inputsHash    String
+  trigger       String
+  evaluatedAt   DateTime
+  supersededAt  DateTime?
+  /// TRUE for the active decision, NULL once superseded. The unique index on
+  /// (paymentId, isActive) lets PostgreSQL itself refuse a second active
+  /// decision, because NULLs never collide.
+  isActive      Boolean?
+  createdAt     DateTime  @default(now())
 
-/// Operator-requested rescan of one user's incoming payments over a bounded,
-/// inclusive ledger range. Independent of normal synchronization: it keeps its
-/// own checkpoint and only ever inserts payments that do not exist yet.
-/// See src/payments/payment-backfill.service.ts and docs/payment-backfills.md.
-model PaymentBackfillJob {
-  id                String                @id @default(cuid())
-  userId            String
-  user              User                  @relation(fields: [userId], references: [id])
-  /// Operator who requested the job.
-  requestedById     String
-  startLedger       Int
-  endLedger         Int
-  status            PaymentBackfillStatus @default(PENDING)
-  /// Horizon paging token of the last record committed. Only moves forward.
-  checkpointCursor  String?
-  pagesProcessed    Int                   @default(0)
-  recordsSeen       Int                   @default(0)
-  paymentsCreated   Int                   @default(0)
-  duplicatesSkipped Int                   @default(0)
-  /// Consecutive claims without a committed page; reset on progress.
-  attempts          Int                   @default(0)
-  leaseOwner        String?
-  leaseExpiresAt    DateTime?
-  cancelRequestedAt DateTime?
-  /// Fault category only; never a raw upstream message.
-  lastErrorSafe     String?
-  completedAt       DateTime?
-  createdAt         DateTime              @default(now())
-  updatedAt         DateTime              @updatedAt
-
-  @@index([userId, status])
-  @@index([status, leaseExpiresAt])
+  @@unique([paymentId, isActive])
+  @@index([paymentId, evaluatedAt])
+  @@index([userId, isActive])
+  @@index([policyVersion, isActive])
 }
 
 /// Last verified position in a wallet's Horizon payments feed.
@@ -919,7 +902,7 @@ model Webhook {
   updatedAt          DateTime                   @updatedAt
   deliveries         WebhookDelivery[]
   clientCertificates WebhookClientCertificate[]
-  circuitBreaker     WebhookCircuitBreaker?
+  circuitBreaker     WebhookCircuit?
 
   @@index([organizationId, status])
 }
@@ -1494,20 +1477,20 @@ model AccessReviewEntry {
 
 /// Webhook circuit breaker state per endpoint.
 /// Tracks failure counts and recovery windows.
-model WebhookCircuitBreaker {
-  id               String              @id @default(cuid())
-  webhookId        String              @unique
-  webhook          Webhook             @relation(fields: [webhookId], references: [id], onDelete: Cascade)
-  state            WebhookCircuitState @default(CLOSED)
-  failureCount     Int                 @default(0)
-  failureThreshold Int                 @default(5)
-  lastFailureAt    DateTime?
-  openedAt         DateTime?
-  halfOpenAt       DateTime?
-  lastSuccessAt    DateTime?
-  recoveryWindowMs Int                 @default(300000)
-  createdAt        DateTime            @default(now())
-  updatedAt        DateTime            @updatedAt
+model WebhookCircuit {
+  id                    String              @id @default(cuid())
+  webhookId             String              @unique
+  webhook               Webhook             @relation(fields: [webhookId], references: [id], onDelete: Cascade)
+  state                 WebhookCircuitState @default(CLOSED)
+  failureCount          Int                 @default(0)
+  failureThreshold      Int                 @default(5)
+  lastFailureAt         DateTime?
+  openedAt              DateTime?
+  halfOpenAt            DateTime?
+  lastSuccessAt         DateTime?
+  recoveryWindowMs      Int                 @default(300000)
+  createdAt             DateTime            @default(now())
+  updatedAt             DateTime            @updatedAt
 
   @@index([state, openedAt])
   @@index([webhookId, state])
@@ -1844,41 +1827,6 @@ model ProofDispute {
 }
 
 // ---------------------------------------------------------------------------
-// Payment Eligibility Decisions (#174)
-// ---------------------------------------------------------------------------
-
-/// One evaluation of a payment's eligibility under a versioned policy.
-/// Exactly one decision per payment is active; superseded decisions are kept
-/// for audit. Stores derived factors and reason codes only: never a memo,
-/// an amount, or a counterparty address.
-model PaymentEligibilityDecision {
-  id            String    @id @default(cuid())
-  paymentId     String
-  payment       Payment   @relation(fields: [paymentId], references: [id])
-  /// Denormalised owner, so owner-scoped reads never need a join.
-  userId        String
-  policyVersion String
-  eligible      Boolean
-  factors       Json
-  reasonCodes   String[]
-  /// sha256 of (policyVersion, factors). Equal hashes mean an identical decision.
-  inputsHash    String
-  trigger       String
-  evaluatedAt   DateTime
-  supersededAt  DateTime?
-  /// TRUE for the active decision, NULL once superseded. The unique index on
-  /// (paymentId, isActive) lets PostgreSQL itself refuse a second active
-  /// decision, because NULLs never collide.
-  isActive      Boolean?
-  createdAt     DateTime  @default(now())
-
-  @@unique([paymentId, isActive])
-  @@index([paymentId, evaluatedAt])
-  @@index([userId, isActive])
-  @@index([policyVersion, isActive])
-}
-
-// ---------------------------------------------------------------------------
 // Organization Data Exports (#200)
 // ---------------------------------------------------------------------------
 
@@ -1922,6 +1870,74 @@ model OrganizationExportJob {
 
   @@index([organizationId, requestedAt])
   @@index([status, expiresAt])
+}
+
+enum PaymentBackfillStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  CANCELLED
+  FAILED
+}
+
+model PaymentBackfillJob {
+  id                String                @id @default(cuid())
+  userId            String
+  user              User                  @relation(fields: [userId], references: [id])
+  requestedById     String
+  startLedger       Int
+  endLedger         Int
+  status            PaymentBackfillStatus @default(PENDING)
+  checkpointCursor  String?
+  pagesProcessed    Int                   @default(0)
+  recordsSeen       Int                   @default(0)
+  paymentsCreated   Int                   @default(0)
+  duplicatesSkipped Int                   @default(0)
+  attempts          Int                   @default(0)
+  leaseOwner        String?
+  leaseExpiresAt    DateTime?
+  cancelRequestedAt DateTime?
+  lastErrorSafe     String?
+  completedAt       DateTime?
+  createdAt         DateTime              @default(now())
+  updatedAt         DateTime              @updatedAt
+
+  @@index([userId, status])
+  @@index([status, leaseExpiresAt])
+}
+
+// ---------------------------------------------------------------------------
+// Time-limited support access grants (#318)
+// ---------------------------------------------------------------------------
+
+enum SupportAccessStatus {
+  PENDING
+  APPROVED
+  ACTIVE
+  REVOKED
+  EXPIRED
+}
+
+model SupportAccessGrant {
+  id               String              @id @default(cuid())
+  organizationId   String
+  organization     Organization        @relation(fields: [organizationId], references: [id])
+  supportUserId    String
+  requestedById    String
+  approvedById     String?
+  reason           String
+  capabilities     Json
+  status           SupportAccessStatus @default(PENDING)
+  expiresAt        DateTime
+  activatedAt      DateTime?
+  revokedAt        DateTime?
+  revokedById      String?
+  revocationReason String?
+  createdAt        DateTime            @default(now())
+  updatedAt        DateTime            @updatedAt
+
+  @@index([organizationId, status])
+  @@index([supportUserId, status])
   @@index([expiresAt])
 }
 
