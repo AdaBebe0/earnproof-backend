@@ -185,6 +185,7 @@ enum IdempotencyStatus {
   PENDING
   COMPLETED
   FAILED
+  CANCELLED
 }
 
 enum WalletRotationStatus {
@@ -410,6 +411,8 @@ model Organization {
   residencyAssignments DataResidencyAssignment[]
   schemaImportJobs     SchemaImportJob[]
   supportAccessGrants  SupportAccessGrant[]
+  transactionConfirmations TransactionConfirmation[]
+  domainEventsOutbox       DomainEventOutbox[]
   bulkAdminJobs        BulkAdminJob[]
   securityNotifications SecurityNotification[]
 
@@ -456,6 +459,20 @@ model IdempotencyRecord {
   responseStatusCode Int?
   /// Timestamp when this record should be considered expired (for cleanup).
   expiresAt          DateTime
+  /// Typed operation name (e.g. PROOF_CREATE, PAYMENT_SYNC).
+  operationType      String?           @db.VarChar(64)
+  /// Target resource type associated with this operation.
+  resourceType       String?           @db.VarChar(64)
+  /// Target resource identifier.
+  resourceId         String?           @db.VarChar(128)
+  /// Read-after-write consistency token issued on completion.
+  consistencyToken   String?
+  /// Number of invocation attempts under this key.
+  attemptCount       Int               @default(1)
+  /// Reason when cancelled.
+  cancellationReason String?
+  /// Additional operation metadata.
+  metadata           Json?
   createdAt          DateTime          @default(now())
   updatedAt          DateTime          @updatedAt
 
@@ -463,6 +480,7 @@ model IdempotencyRecord {
   /// Also serves as the compound index for fast lookups.
   @@unique([organizationId, idempotencyKey])
   @@index([organizationId, expiresAt])
+  @@index([organizationId, resourceType, resourceId])
 }
 
 model Issuer {
@@ -2103,6 +2121,90 @@ model ProtocolSchema {
 
   @@index([proofType, status])
   @@index([network, status])
+}
+
+enum TransactionConfirmationStatus {
+  SUBMITTED
+  PENDING
+  CONFIRMED
+  FAILED
+  REPLACED
+  TIMEOUT
+}
+
+/// Durable tracking for Stellar and Soroban transactions from submission through finality.
+model TransactionConfirmation {
+  id              String                        @id @default(cuid())
+  organizationId  String
+  organization    Organization                  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  network         String                        @db.VarChar(32)
+  transactionHash String                        @db.VarChar(128)
+  operationType   String                        @db.VarChar(64)
+  operationRef    String?                       @db.VarChar(128)
+  status          TransactionConfirmationStatus @default(SUBMITTED)
+  submittedAt     DateTime                      @default(now())
+  ledgerSequence  Int?
+  ledgerHash      String?                       @db.VarChar(128)
+  confirmedAt     DateTime?
+  replacedByHash  String?                       @db.VarChar(128)
+  failureReason   String?
+  errorCode       String?                       @db.VarChar(64)
+  retryCount      Int                           @default(0)
+  nextPollAt      DateTime?
+  metadata        Json?
+  createdAt       DateTime                      @default(now())
+  updatedAt       DateTime                      @updatedAt
+
+  @@unique([network, transactionHash])
+  @@index([organizationId, status])
+  @@index([organizationId, operationRef])
+  @@index([status, nextPollAt])
+}
+
+enum DomainEventStatus {
+  PENDING
+  LEASED
+  PROCESSED
+  FAILED
+  QUARANTINED
+}
+
+/// Transactional internal domain event outbox for reliable asynchronous messaging.
+model DomainEventOutbox {
+  id             String            @id @default(cuid())
+  organizationId String
+  organization   Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  eventType      String            @db.VarChar(128)
+  eventVersion   Int               @default(1)
+  aggregateType  String            @db.VarChar(64)
+  aggregateId    String            @db.VarChar(128)
+  correlationId  String?           @db.VarChar(128)
+  causationId    String?           @db.VarChar(128)
+  payload        Json
+  status         DomainEventStatus @default(PENDING)
+  leaseOwner     String?           @db.VarChar(128)
+  leaseExpiresAt DateTime?
+  attempts       Int               @default(0)
+  maxAttempts    Int               @default(5)
+  lastError      String?
+  processedAt    DateTime?
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+
+  @@index([status, leaseExpiresAt])
+  @@index([organizationId, aggregateType, aggregateId])
+  @@index([correlationId])
+}
+
+/// Idempotent consumer tracking for domain outbox events to prevent duplicate side effects.
+model DomainEventConsumerRecord {
+  id           String   @id @default(cuid())
+  eventId      String   @db.VarChar(128)
+  consumerName String   @db.VarChar(128)
+  processedAt  DateTime @default(now())
+
+  @@unique([eventId, consumerName])
+  @@index([consumerName, processedAt])
 }
 
 // ---------------------------------------------------------------------------
