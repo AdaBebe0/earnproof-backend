@@ -37,6 +37,7 @@ import { SupportAccessModule } from "./support-access/support-access.module";
 import { ReconciliationModule } from "./reconciliation/reconciliation.module";
 import { DeploymentsModule } from "./deployments/deployments.module";
 import { NotificationsModule } from "./notifications/notifications.module";
+import { SecurityModule } from "./security/security.module";
 
 @Module({
   imports: [
@@ -77,6 +78,7 @@ import { NotificationsModule } from "./notifications/notifications.module";
     ReconciliationModule,
     DeploymentsModule,
     NotificationsModule,
+    SecurityModule,
   ],
   providers: [
     {

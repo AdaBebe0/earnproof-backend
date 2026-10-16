@@ -1364,6 +1364,66 @@ model ApiKeyUsageSummary {
   @@index([lastUsedAt])
 }
 
+enum CspDirective {
+  DEFAULT_SRC
+  SCRIPT_SRC
+  STYLE_SRC
+  IMG_SRC
+  CONNECT_SRC
+  FONT_SRC
+  FRAME_SRC
+  OBJECT_SRC
+  MEDIA_SRC
+  WORKER_SRC
+  MANIFEST_SRC
+  BASE_URI
+  FORM_ACTION
+  FRAME_ANCESTORS
+  UPGRADE_INSECURE_REQUESTS
+  OTHER
+}
+
+/// Coarse frontend page category. Never a path or query string.
+enum CspRouteCategory {
+  AUTH
+  DASHBOARD
+  PROOFS
+  PAYMENTS
+  SETTINGS
+  PUBLIC
+  OTHER
+}
+
+enum CspDisposition {
+  ENFORCE
+  REPORT
+}
+
+/// Privacy-safe, aggregated CSP violation reporting (#336).
+/// One row per (directive, routeCategory, release, disposition) combination;
+/// a report increments its bucket's count rather than being stored as its
+/// own row. Never stores a raw document/blocked URI, DOM data, or user input
+/// — the ingestion DTO does not even accept those fields.
+model CspViolationSummary {
+  id            String           @id @default(cuid())
+  directive     CspDirective
+  routeCategory CspRouteCategory
+  /// Frontend-reported app release/version string. Bounded format, not a
+  /// closed enum — see FIELD_LIMITS.cspRelease and the DTO's validator.
+  release       String
+  disposition   CspDisposition
+  count         BigInt           @default(0)
+  firstSeenAt   DateTime         @default(now())
+  /// Rounded down to the nearest minute, like ApiKeyUsageSummary.lastUsedAt,
+  /// so individual report timing cannot be reconstructed from storage.
+  lastSeenAt    DateTime         @default(now())
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+
+  @@unique([directive, routeCategory, release, disposition])
+  @@index([lastSeenAt])
+}
+
 /// Replay-protection nonce store for signed API requests.
 /// Each row represents a nonce that has been consumed within the active clock window.
 /// Rows are valid only until expiresAt; a background job (or query-time filter) purges expired rows.
