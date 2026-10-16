@@ -738,6 +738,13 @@ model Proof {
   // Hash of the renewal request that produced this successor, so a retried
   // identical request returns the same successor instead of a conflict.
   renewalRequestHash      String?
+  /// Set once a revoked proof's anchoring-intent and webhook-delivery channels
+  /// have both been observed confirmed (or not applicable) by the revocation
+  /// propagation reconciler. Null while revoked and still propagating, and
+  /// always null for a non-revoked proof. Bounds the reconciler's work to
+  /// proofs that still need it instead of rescanning every revoked proof
+  /// forever.
+  revocationPropagationConfirmedAt DateTime?
   createdAt               DateTime                @default(now())
   updatedAt               DateTime                @updatedAt
   claim                   ProofClaim?
@@ -754,6 +761,7 @@ model Proof {
   @@index([proofType])
   @@index([expiresAt])
   @@index([status, expiresAt])
+  @@index([status, revocationPropagationConfirmedAt])
 }
 
 model ProofClaim {

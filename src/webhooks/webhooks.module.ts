@@ -25,6 +25,7 @@ import { WebhooksService } from "./webhooks.service";
     WebhookDeliveryService,
     WebhookClientCertificateService,
     WebhookCircuitBreakerService,
+    WebhookDeadLetterService,
     WebhooksService,
   ],
 })

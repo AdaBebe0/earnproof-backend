@@ -23,6 +23,8 @@ import { ProofExpirationReconcilerService } from "./proof-expiration-reconciler.
 import { ProofSharingCleanupJob } from "./proof-sharing-cleanup.job";
 import { RetentionCleanupService } from "./retention/retention-cleanup.service";
 import { RetentionJob } from "./retention/retention.job";
+import { RevocationPropagationController } from "./revocation-propagation.controller";
+import { RevocationPropagationReconcilerService } from "./revocation-propagation-reconciler.service";
 import { WebhookCertificateExpiryJob } from "./webhook-certificate-expiry.job";
 
 @Module({
@@ -35,7 +37,7 @@ import { WebhookCertificateExpiryJob } from "./webhook-certificate-expiry.job";
     WebhooksModule,
     ApiKeysModule,
   ],
-  controllers: [JobExecutionController],
+  controllers: [JobExecutionController, RevocationPropagationController],
   providers: [
     ContractAnchoringService,
     AnchoringWorkerService,
@@ -54,6 +56,7 @@ import { WebhookCertificateExpiryJob } from "./webhook-certificate-expiry.job";
     JobExecutionService,
     JobExecutionMaintenanceJob,
     AttestationReconcilerService,
+    RevocationPropagationReconcilerService,
   ],
   exports: [
     AnchoringWorkerService,
@@ -65,6 +68,7 @@ import { WebhookCertificateExpiryJob } from "./webhook-certificate-expiry.job";
     IssuerReconciliationService,
     RetentionCleanupService,
     JobExecutionService,
+    RevocationPropagationReconcilerService,
   ],
 })
 export class JobsModule {}
