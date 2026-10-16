@@ -13,6 +13,8 @@ import { ProofsController } from "./proofs.controller";
 import { ProofsService } from "./proofs.service";
 import { ProofSharingService } from "./proof-sharing.service";
 import { ProofReconciliationService } from "./proof-reconciliation.service";
+import { RevocationCheckpointService } from "./revocation-checkpoint.service";
+import { RevocationCheckpointController } from "./revocation-checkpoint.controller";
 import { ProofVerificationAbuseService } from "../common/rate-limit/proof-verification-abuse.service";
 import { ProofExpirationReminderService } from "./proof-expiration-reminder.service";
 import { ProofExpirationReminderController } from "./proof-expiration-reminder.controller";
@@ -35,6 +37,8 @@ import { BoundedRefreshService } from "./bounded-refresh.service";
     CredentialVerificationKeyService,
     ProofsService,
     ProofSharingService,
+    ProofReconciliationService,
+    RevocationCheckpointService,
     ProofVerificationAbuseService,
     ProofReconciliationService,
     ProofExpirationReminderService,

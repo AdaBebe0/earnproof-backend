@@ -1,5 +1,6 @@
 import { Module } from "@nestjs/common";
 import { AuthModule } from "../auth/auth.module";
+import { AuditModule } from "../audit/audit.module";
 import { Clock, SystemClock } from "../common/time/clock";
 import { DatabaseModule } from "../database/database.module";
 import { JobsModule } from "../jobs/jobs.module";

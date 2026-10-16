@@ -165,6 +165,9 @@ enum ApiKeyScope {
   PROOF_READ
   PROOF_VERIFY
 
+  // Offline bundles (bounded offline verification)
+  BUNDLES_CREATE
+
   // Payment management and reading
   PAYMENT_READ
   PAYMENT_WRITE

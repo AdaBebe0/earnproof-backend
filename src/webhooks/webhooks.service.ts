@@ -30,6 +30,7 @@ export class WebhooksService {
     private readonly circuitBreaker: WebhookCircuitBreakerService,
     configService: ConfigService,
     private readonly quotas: OrganizationQuotaService,
+    private readonly secretRetrievalReceiptService: SecretRetrievalReceiptService,
   ) {
     this.paymentEncryptionKeyring = new PaymentEncryptionKeyringService(
       configService,
@@ -49,16 +50,16 @@ export class WebhooksService {
     // De-duplicate events list
     const events = [...new Set(dto.events)];
 
-    // Quota check and creation commit together; see OrganizationQuotaService.
+    // Quota check, creation, receipt, and circuit breaker initialization together
     const webhook = await this.prisma.$transaction(async (tx) => {
       await this.quotas.assertCapacity(tx, organizationId, "webhooks");
-      return tx.webhook.create({
+
+      const created = await tx.webhook.create({
         data: {
           organizationId,
           url: dto.url,
           secretEncrypted,
           events,
-          payloadVersion: dto.payloadVersion ?? CURRENT_WEBHOOK_PAYLOAD_VERSION,
           status: ResourceStatus.ACTIVE,
           revision: 0,
         },
@@ -66,7 +67,6 @@ export class WebhooksService {
           id: true,
           url: true,
           events: true,
-          payloadVersion: true,
           status: true,
           revision: true,
           createdAt: true,
@@ -74,7 +74,7 @@ export class WebhooksService {
       });
     });
 
-    // Initialize circuit breaker for new webhook
+    // Initialize circuit breaker for new webhook (outside transaction for idempotency)
     await this.circuitBreaker.initializeCircuit(webhook.id);
 
     return {
@@ -136,12 +136,44 @@ export class WebhooksService {
     const newRawSecret = randomBytes(SECRET_BYTES).toString("hex");
     const newSecretEncrypted = this.paymentEncryptionKeyring.encrypt(newRawSecret);
 
-    await this.prisma.webhook.update({
-      where: { id: webhookId },
-      data: {
-        secretEncrypted: newSecretEncrypted,
-        revision: webhook.revision + 1,
-      },
+    // Update webhook and create receipt atomically
+    await this.prisma.$transaction(async (tx) => {
+      await tx.webhook.update({
+        where: { id: webhookId },
+        data: {
+          secretEncrypted: newSecretEncrypted,
+          revision: webhook.revision + 1,
+        },
+      });
+
+      // Create receipt: immutable evidence that new signing secret was revealed
+      const receipt = await this.secretRetrievalReceiptService.create(
+        {
+          organizationId,
+          secretType: SecretType.WEBHOOK,
+          resourceId: webhookId,
+          resourceReference: webhook.url,
+          recipientId: undefined,
+          deliveryChannel: DeliveryChannel.HTTP_RESPONSE,
+          revealedAt: new Date(),
+        },
+        tx,
+      );
+
+      // Audit log: webhook secret rotated
+      await tx.auditLog.create({
+        data: {
+          actorType: "user",
+          action: "webhook.rotated",
+          resourceType: "webhook",
+          resourceId: webhookId,
+          organizationId,
+          metadata: {
+            url: webhook.url,
+            receiptId: receipt.id,
+          },
+        },
+      });
     });
 
     return {
