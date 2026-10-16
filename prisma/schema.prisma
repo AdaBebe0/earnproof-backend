@@ -213,6 +213,18 @@ enum SharingOutcome {
   ERROR
 }
 
+/// Versioned source types that contributed to a verification decision
+enum VerificationProvenanceSourceType {
+  /// Credential: payment, attestation, trusted source, or proof claim
+  CREDENTIAL_SOURCE
+  /// Backend observation: payment sync checkpoint, classification, policy
+  BACKEND_OBSERVATION
+  /// Contract observation: on-chain proof status (revoked, valid)
+  CONTRACT_OBSERVATION
+  /// Stellar observation: Horizon operation, ledger finality, fee
+  STELLAR_OBSERVATION
+}
+
 enum PolicyType {
   PRIVACY_POLICY
   TERMS_OF_SERVICE
@@ -920,6 +932,55 @@ model Attestation {
   @@index([status, expiresAt])
 }
 
+/// Persistent trust pin for credential verification keys.
+/// Pins explicitly authorize which issuer verification keys are trusted within a network.
+/// - Private keys are never accepted; only public key material is pinned.
+/// - A pin is scoped to a single issuer and network; cannot cross issuers or networks.
+/// - Compromised pins fail closed: marked REVOKED immediately.
+/// - Trust decisions are immutable snapshots at pin time; live key state never mutates them.
+model CredentialVerificationKeyTrustPin {
+  id                         String          @id @default(cuid())
+  /// Organization that owns this trust decision (tenant boundary).
+  organizationId             String
+  organization               Organization    @relation(fields: [organizationId], references: [id])
+  /// Issuer this pin is scoped to (prevents cross-issuer pin misuse).
+  issuerId                   String
+  issuer                     Issuer          @relation(fields: [issuerId], references: [id])
+  /// Network the issuer operates on (Stellar network identifier).
+  network                    String
+  /// Key ID from the credential verification key being pinned.
+  keyId                      String
+  /// Immutable snapshot of trusted key material at pin time.
+  /// Includes: alg, crv, kid, kty, x (base64url public key), use, status.
+  /// Never mutated; survives even if live key state changes.
+  trustedKeySnapshot         Json
+  /// When this trust decision is effective (usually now, may be backdated).
+  effectiveAt                DateTime
+  /// When this trust decision expires. Null for perpetual pins.
+  expiresAt                  DateTime?
+  /// Current status of this pin: ACTIVE (trusted), RETIRED (superceded), REVOKED (compromised).
+  status                     CredentialVerificationKeyTrustPinStatus @default(ACTIVE)
+  /// Audit context: who made this decision and why.
+  decisionMetadata           Json?
+  /// Optimistic concurrency: incremented on every status change.
+  revision                   Int             @default(0)
+  /// When marked REVOKED due to compromise, immutable for forensics.
+  revokedAt                  DateTime?
+  revokedBy                  String?
+  revocationReason           String?
+  createdAt                  DateTime        @default(now())
+  updatedAt                  DateTime        @updatedAt
+
+  // Composite unique: (organizationId, issuerId, network, keyId, status=ACTIVE)
+  // Ensures only one ACTIVE pin per issuer/network/key combination within an org.
+  @@unique([organizationId, issuerId, network, keyId, status], name: "active_trust_pin_per_key")
+  @@index([organizationId, status])
+  @@index([issuerId, network, status])
+  @@index([expiresAt, status])
+  @@index([createdAt])
+  @@index([revokedAt, status])
+}
+
 model VerificationEvent {
   id                  String             @id @default(cuid())
   proofId             String
@@ -952,6 +1013,90 @@ model VerificationEventLog {
   @@index([outcome])
   @@index([retainUntil])
   @@index([shareTokenId])
+}
+
+/// Persisted versioned provenance graph for verification decisions.
+/// Captures complete lineage of sources (credential, backend, contract, Stellar)
+/// that contributed to verification outcome. Immutable after creation.
+/// 
+/// Tenant-isolated via proofId foreign key (which constrains to userId).
+/// Privacy-safe: contains no source payloads, only identity and hashes.
+/// Never changes verification cryptographic outcome.
+model VerificationProvenance {
+  id          String                          @id @default(cuid())
+  proofId     String
+  proof       Proof                           @relation(fields: [proofId], references: [id], onDelete: Cascade)
+  /// Versioned decision schema (e.g., "earnproof.verification.provenance.v1")
+  /// Allows evolution of decision structure over time.
+  schemaVersion String
+  /// Complete hash of all decision inputs (credential, policy, proof state)
+  /// Enables audit/dispute by recomputing with historical data.
+  decisionInputHash String
+  /// Hashed snapshot of reconstructed credential at verification time.
+  /// Enables reproducibility without storing plaintext.
+  credentialHash String
+  /// Policy version applied to this decision (e.g., "earnproof.minimum-income.policy.v1")
+  policyVersion String
+  /// Proof status at verification time (ACTIVE, EXPIRED, REVOKED, INVALID)
+  proofStatus   String
+  /// Final verification result (VALID, EXPIRED, REVOKED, INVALID_SIGNATURE, etc)
+  verificationResult String
+  /// High-level reason if verification failed or stalled
+  /// e.g., "CREDENTIAL_MISMATCH", "MISSING_STELLAR_OBSERVATION", "CONTRACT_REJECTED"
+  failureReason String?
+  /// Optional: free-form context about missing links or boundary conditions
+  /// e.g., "Stellar Horizon unavailable; stale checkpoint acceptable per policy"
+  boundaryContext String?
+  /// Array of source identities and observation metadata (JSON)
+  /// Each source entry contains: {sourceType, sourceId, observedAt, hash, orderIndex}
+  sources       Json // Array<{ sourceType: VerificationProvenanceSourceType, sourceId: string, observedAt: DateTime, hash: string, orderIndex: int, missingLinkReason?: string }>
+  /// Total count of sources contributing to decision (for quick aggregation)
+  sourceCount   Int
+  /// Timestamp when decision was made
+  decidedAt     DateTime  @default(now())
+  createdAt     DateTime  @default(now())
+
+  @@unique([proofId, decidedAt])
+  @@index([proofId, createdAt])
+  @@index([verificationResult])
+  @@index([createdAt])
+}
+
+/// Individual provenance source record with full lineage metadata.
+/// Enables querying "which attestation/payment/contract contributed to proof X?"
+/// 
+/// Tenant-isolated via proofId foreign key.
+/// Privacy-safe: identity only, never payloads.
+model VerificationProvenanceSource {
+  id             String                          @id @default(cuid())
+  provenanceId   String
+  provenance     VerificationProvenance          @relation(fields: [provenanceId], references: [id], onDelete: Cascade)
+  proofId        String  // Denormalized for queries; foreign key to Proof via provenance
+  /// Type of source (CREDENTIAL_SOURCE, BACKEND_OBSERVATION, CONTRACT_OBSERVATION, STELLAR_OBSERVATION)
+  sourceType     VerificationProvenanceSourceType
+  /// Specific source identity (e.g., paymentId, attestationId, operationId, contractTxHash)
+  sourceId       String
+  /// Optional human-readable source label (e.g., "PAYMENT_RECEIVED", "CONTRACT_REGISTERED")
+  sourceLabel    String?
+  /// When this source was observed/queried
+  observedAt     DateTime
+  /// SHA-256 hash of source metadata (prevents replay/tampering)
+  /// Never the raw source payload, always hashed
+  sourceHash     String
+  /// Sequential position in decision lineage (0-indexed)
+  observationOrder Int
+  /// Reason if source was unavailable or excluded
+  /// e.g., "STALE_CHECKPOINT", "NETWORK_TIMEOUT", "ATTESTATION_EXPIRED", "AUTHORIZATION_DENIED"
+  missingLinkReason String?
+  /// Reference to originating decision (for audit trail)
+  decidedAt      DateTime
+  createdAt      DateTime @default(now())
+
+  @@unique([provenanceId, observationOrder])
+  @@index([provenanceId, createdAt])
+  @@index([proofId, sourceType])
+  @@index([sourceId])
+  @@index([missingLinkReason])
 }
 
 model ApiKey {
@@ -1885,6 +2030,12 @@ enum DisputeCategory {
   TECHNICAL
   COMPLIANCE
   OTHER
+}
+
+enum CredentialVerificationKeyTrustPinStatus {
+  ACTIVE
+  RETIRED
+  REVOKED
 }
 
 /// Proof dispute workflow for business/audit review process.

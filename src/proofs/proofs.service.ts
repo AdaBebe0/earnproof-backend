@@ -4,6 +4,7 @@ import {
   ForbiddenException,
   Inject,
   Injectable,
+  Logger,
   NotFoundException,
   Optional,
   UnprocessableEntityException,
@@ -29,6 +30,9 @@ import {
 import { createHmac, randomUUID } from "crypto";
 import { VerificationEventService } from "../audit/verification-event.service";
 import { AuthenticatedUser } from "../auth/auth.types";
+import { VerificationProvenanceService } from "./verification-provenance.service";
+import { ProvenanceDecisionBuilder } from "./provenance-decision-builder";
+import { VERIFICATION_PROVENANCE_SCHEMA_VERSION } from "./provenance.types";
 import { canonicalAssetId } from "../common/assets/asset-identifier";
 import { canonicalize } from "../common/crypto/canonicalize";
 import { CredentialSigningKeyringService } from "../common/crypto/credential-signing-keyring.service";
@@ -369,6 +373,7 @@ function isUniqueViolation(error: unknown): boolean {
 
 @Injectable()
 export class ProofsService {
+  private readonly logger = new Logger(ProofsService.name);
   private readonly signingKeyring: CredentialSigningKeyringService;
   private readonly paymentEncryptionKeyring: PaymentEncryptionKeyringService;
   private readonly stellarNetwork: string;
@@ -2840,6 +2845,22 @@ export class ProofsService {
         },
       });
     }
+
+    // Record verification provenance asynchronously (fail-open).
+    // Captures complete lineage of credential, backend, contract, and Stellar
+    // observations that contributed to this decision. Never blocks verification.
+    this.recordVerificationProvenance(
+      proof.id,
+      proof.status,
+      result,
+      signedCredential,
+      contractStatus,
+    ).catch((error) => {
+      // Provenance recording is advisory; verification continues unblocked
+      this.logger.debug(
+        `Failed to record provenance for proof ${proof.id}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    });
 
     this.emitWebhook(proof.userId, {
       event: "proof.verified",
