@@ -41,6 +41,7 @@ import { OrganizationQuotaService } from "../quotas/organization-quota.service";
 import { WebhookDeliveryService } from "../webhooks/webhook-delivery.service";
 import { WebhookEventSource } from "../webhooks/webhook-event.types";
 import { AttestationsService } from "../attestations/attestations.service";
+import { IssuerPolicyCommitmentsService } from "../issuers/issuer-policy-commitments.service";
 import {
   AggregateEarningsCalculator,
 } from "./aggregate-earnings.calculator";
@@ -378,6 +379,7 @@ export class ProofsService {
   private readonly verificationEventService: VerificationEventService;
   private readonly quotas: OrganizationQuotaService;
   private readonly attestationsService: AttestationsService;
+  private readonly issuerPolicyCommitmentsService: IssuerPolicyCommitmentsService;
   private readonly contractAnchoringService?: ContractAnchoringService;
   private readonly webhookDeliveryService?: WebhookDeliveryService;
   private readonly credentialVerificationKeyService?: CredentialVerificationKeyService;
@@ -393,13 +395,15 @@ export class ProofsService {
     @Optional() @Inject(WebhookDeliveryService) p7?: any,
     @Optional() @Inject(CredentialVerificationKeyService) p8?: any,
     @Optional() @Inject(ProofVerificationAbuseService) p9?: any,
+    @Optional() @Inject(IssuerPolicyCommitmentsService) p10?: any,
   ) {
     this.prisma = prisma;
-    const rest: any[] = [p3, p4, p5, p6, p7, p8, p9].filter((x) => x !== undefined && x !== null);
+    const rest: any[] = [p3, p4, p5, p6, p7, p8, p9, p10].filter((x) => x !== undefined && x !== null);
     
     let eventService = { recordEvent: async () => {} } as any;
     let quotaService = { consumeForUser: async () => {}, checkQuota: async () => true } as any;
     let attestationService = { getValidAttestationsForSubject: async () => [], isAttestationValid: async () => true } as any;
+    let issuerPolicyCommitmentsService = { captureOrReuse: async () => ({}) } as any;
 
     for (const item of rest) {
       const candidate = item as any;
@@ -409,6 +413,8 @@ export class ProofsService {
         quotaService = candidate;
       } else if (typeof candidate.getValidAttestationsForSubject === "function" || typeof candidate.isAttestationValid === "function") {
         attestationService = candidate;
+      } else if (typeof candidate.captureOrReuse === "function" || typeof candidate.getCurrentCommitment === "function") {
+        issuerPolicyCommitmentsService = candidate;
       } else if (
         typeof candidate.anchor === "function" ||
         typeof candidate.enqueueIntent === "function" ||
@@ -426,6 +432,7 @@ export class ProofsService {
     this.verificationEventService = eventService;
     this.quotas = quotaService;
     this.attestationsService = attestationService;
+    this.issuerPolicyCommitmentsService = issuerPolicyCommitmentsService;
 
     this.signingKeyring = new CredentialSigningKeyringService(configService);
     this.paymentEncryptionKeyring = new PaymentEncryptionKeyringService(

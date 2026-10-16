@@ -513,6 +513,7 @@ model Issuer {
   attestations            Attestation[]
   addressRotations        IssuerAddressRotation[]
   addressHistory          IssuerAddressHistory[]
+  policyCommitments       IssuerPolicyCommitment[]
   invoiceSettlements      ProofInvoiceSettlement[]
   signingKeys             IssuerSigningKey[]
 
@@ -567,6 +568,62 @@ model IssuerAddressHistory {
 
   @@index([issuerId, retiredAt])
   @@index([stellarAddress])
+}
+
+/// Immutable audit trail of issuer policy versions with deterministic commit hashes.
+/// Tracks exact issuer policy commitment version effective at proof issuance (#307).
+/// Captures issuer state (signing key, metadata, address) at each policy change.
+///
+/// Pattern: Similar to SupportedAsset → assetPolicySnapshot. Each issuer change
+/// creates a new commitment row; proofs reference the commitment by ID, enabling
+/// proof verification even after the issuer policy changes.
+model IssuerPolicyCommitment {
+  id                String   @id @default(cuid())
+  issuerId          String
+  issuer            Issuer   @relation(fields: [issuerId], references: [id])
+  
+  /// Version tracking: incremental per issuer. Monotonically increasing.
+  /// Combined with issuerId, enforces: reordered events cannot regress versions.
+  version           Int
+  
+  /// Commitment identification
+  /// SHA-256 hash of canonicalized policy inputs: "sha256:<hex>"
+  /// Deterministic: identical policy → identical hash → prevents duplicate rows.
+  commitment        String
+  /// SHA-256 hash of the canonical policy JSON snapshot for deduplication.
+  policyInputsHash  String
+  
+  /// Policy snapshot (immutable after creation)
+  /// Complete issuer state at this version: {signingKeyVersionId, address, metadata, ...}
+  /// Frozen at issuance time; proofs reference this snapshot, enabling verification
+  /// even if the live Issuer row later changes/deletes.
+  policySnapshot    Json
+  
+  /// Lifecycle markers
+  effectiveAt       DateTime
+  supersededAt      DateTime?  // NULL = current active commitment
+  
+  /// Audit & correlation
+  /// Links to domain event or audit log entry for full change history
+  correlationId     String?
+  createdAt         DateTime   @default(now())
+  
+  // Proofs that reference this commitment
+  proofs            Proof[]    @relation("ProofIssuerPolicyCommitment")
+
+  /// Unique constraints
+  /// Prevents version gaps and regressions: (issuerId, version) must be unique
+  @@unique([issuerId, version])
+  /// Prevents duplicate commits: commitment hash is globally unique
+  @@unique([commitment])
+  
+  /// Indexes for common queries
+  /// Current commitment: WHERE issuerId = ? AND supersededAt IS NULL
+  @@index([issuerId, effectiveAt])
+  /// Historical queries: WHERE issuerId = ? AND supersededAt IS NOT NULL
+  @@index([issuerId, supersededAt])
+  /// Lookups by commitment: WHERE commitment = ?
+  @@index([commitment])
 }
 
 model SupportedAsset {
@@ -739,6 +796,14 @@ model Proof {
   // (possibly since-changed) live SupportedAsset row.
   assetPolicyId           String?
   assetPolicySnapshot     Json?
+  // Snapshot of the issuer policy commitment that was active at proof issuance.
+  // Similar to assetPolicySnapshot: enables offline verification even if the
+  // issuer policy later changes. Null for proofs issued before this feature.
+  issuerPolicyCommitmentId String?
+  issuerPolicyCommitment  IssuerPolicyCommitment? @relation("ProofIssuerPolicyCommitment", fields: [issuerPolicyCommitmentId], references: [id])
+  // Complete issuer policy snapshot at issuance: {signingKeyVersionId, address, metadata, ...}
+  // Immutable after creation; used for offline verification and audit.
+  issuerPolicySnapshot    Json?
   revokedAt               DateTime?
   /// Class of principal that revoked this proof. Null until revoked.
   revokedByType           RevocationActorType?
@@ -780,6 +845,7 @@ model Proof {
   @@index([proofType])
   @@index([expiresAt])
   @@index([status, expiresAt])
+  @@index([issuerPolicyCommitmentId])
 }
 
 model ProofClaim {
@@ -826,6 +892,10 @@ model Attestation {
   type                 AttestationType
   schemaVersion        String          @default("1.0")
   signingKeyVersionId  String          @default("1")
+  /// Policy version captured at attestation issuance time, for versioned proofs.
+  /// Enables proofs to reference the exact attestation policy state when issued.
+  /// Null for attestations issued before this feature.
+  policyVersion        String?
   status               ResourceStatus  @default(ACTIVE)
   signedPayload        Json
   expiresAt            DateTime?
