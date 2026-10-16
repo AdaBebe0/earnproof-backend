@@ -2,6 +2,7 @@ import { Module } from "@nestjs/common";
 import { ContractAnchoringService } from "../proofs/contract-anchoring.service";
 import { AnchoringReconcilerService } from "./anchoring-reconciler.service";
 import { AnchoringWorkerService } from "./anchoring-worker.service";
+import { DistributedLeaseService } from "./distributed-lease.service";
 import { RetentionCleanupService } from "./retention/retention-cleanup.service";
 import { RetentionJob } from "./retention/retention.job";
 import { PaymentEncryptionKeyringService } from "../common/crypto/payment-encryption-keyring.service";
@@ -15,6 +16,7 @@ import { EncryptionKeyRetirementWorkerService } from "./encryption/encryption-ke
     ContractAnchoringService,
     AnchoringWorkerService,
     AnchoringReconcilerService,
+    DistributedLeaseService,
     RetentionCleanupService,
     RetentionJob,
     PaymentEncryptionKeyringService,
@@ -26,6 +28,7 @@ import { EncryptionKeyRetirementWorkerService } from "./encryption/encryption-ke
   exports: [
     AnchoringWorkerService,
     AnchoringReconcilerService,
+    DistributedLeaseService,
     RetentionCleanupService,
     PaymentEncryptionRewrapService,
     PaymentEncryptionRetirementService,

@@ -111,46 +111,46 @@ enum ApiKeyScope {
   // Proof verification and reading
   PROOF_READ
   PROOF_VERIFY
-  
+
   // Payment management and reading
   PAYMENT_READ
   PAYMENT_WRITE
-  
+
   // Organization management
   ORG_READ
   ORG_ADMIN
 }
 
 model User {
-  id                 String          @id @default(cuid())
-  walletAddress      String          @unique
-  walletHash         String          @unique
-  role               UserRole        @default(WORKER)
-  status             ResourceStatus  @default(ACTIVE)
-  createdAt          DateTime        @default(now())
-  updatedAt          DateTime        @updatedAt
-  lastLoginAt        DateTime?
-  organizations      Organization[]
-  payments           Payment[]
-  trustedSources     TrustedSource[]
-  proofs             Proof[]
-  createdApiKeys     ApiKey[]
-  sessions           AuthSession[]
+  id             String          @id @default(cuid())
+  walletAddress  String          @unique
+  walletHash     String          @unique
+  role           UserRole        @default(WORKER)
+  status         ResourceStatus  @default(ACTIVE)
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+  lastLoginAt    DateTime?
+  organizations  Organization[]
+  payments       Payment[]
+  trustedSources TrustedSource[]
+  proofs         Proof[]
+  createdApiKeys ApiKey[]
+  sessions       AuthSession[]
 
   @@index([walletHash])
   @@index([status])
 }
 
 model WalletChallenge {
-  id                 String    @id @default(cuid())
-  walletAddress      String
-  nonceHash          String    @unique
-  message            String
-  expiresAt          DateTime
-  usedAt             DateTime?
-  networkPassphrase  String?   /// Stellar network passphrase committed at challenge creation. Null for legacy challenges.
-  origin             String?   /// Normalized application origin committed at challenge creation. Null for legacy challenges.
-  createdAt          DateTime  @default(now())
+  id                String    @id @default(cuid())
+  walletAddress     String
+  nonceHash         String    @unique
+  message           String
+  expiresAt         DateTime
+  usedAt            DateTime?
+  networkPassphrase String? /// Stellar network passphrase committed at challenge creation. Null for legacy challenges.
+  origin            String? /// Normalized application origin committed at challenge creation. Null for legacy challenges.
+  createdAt         DateTime  @default(now())
 
   @@index([walletAddress])
   @@index([expiresAt])
@@ -160,18 +160,18 @@ model WalletChallenge {
 /// Only a SHA-256 hash of the opaque bearer token is stored — the raw token is never
 /// written to the database or to any application log.
 model AuthSession {
-  id          String    @id @default(cuid())
+  id          String       @id @default(cuid())
   /// SHA-256 hex digest of the raw opaque session token.
-  tokenHash   String    @unique
+  tokenHash   String       @unique
   userId      String
-  user        User      @relation(fields: [userId], references: [id])
-  createdAt   DateTime  @default(now())
+  user        User         @relation(fields: [userId], references: [id])
+  createdAt   DateTime     @default(now())
   expiresAt   DateTime
   lastUsedAt  DateTime?
   /// Set when the session is explicitly revoked (logout or rotation).
   revokedAt   DateTime?
   /// Links to the replacement session produced during rotation.
-  rotatedToId String?   @unique
+  rotatedToId String?      @unique
   rotatedTo   AuthSession? @relation("SessionRotation", fields: [rotatedToId], references: [id])
   rotatedFrom AuthSession? @relation("SessionRotation")
 
@@ -181,15 +181,15 @@ model AuthSession {
 }
 
 model Organization {
-  id          String          @id @default(cuid())
+  id          String         @id @default(cuid())
   name        String
-  slug        String          @unique
+  slug        String         @unique
   website     String?
-  status      ResourceStatus  @default(PENDING)
+  status      ResourceStatus @default(PENDING)
   createdById String
-  createdBy   User            @relation(fields: [createdById], references: [id])
-  createdAt   DateTime        @default(now())
-  updatedAt   DateTime        @updatedAt
+  createdBy   User           @relation(fields: [createdById], references: [id])
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
   issuers     Issuer[]
   apiKeys     ApiKey[]
   webhooks    Webhook[]
@@ -198,49 +198,49 @@ model Organization {
 }
 
 model Issuer {
-  id              String          @id @default(cuid())
-  organizationId  String
-  organization    Organization    @relation(fields: [organizationId], references: [id])
-  stellarAddress  String          @unique
-  status          ResourceStatus  @default(PENDING)
-  metadataHash    String?
-  publicMetadata  Json?
+  id                      String          @id @default(cuid())
+  organizationId          String
+  organization            Organization    @relation(fields: [organizationId], references: [id])
+  stellarAddress          String          @unique
+  status                  ResourceStatus  @default(PENDING)
+  metadataHash            String?
+  publicMetadata          Json?
   contractSyncState       String          @default("PENDING")
   contractSyncedStatus    ResourceStatus?
   contractTransactionHash String?
-  contractSyncedAt         DateTime?
-  contractSyncError        String?
-  verifiedAt      DateTime?
-  suspendedAt     DateTime?
-  revokedAt       DateTime?
-  createdAt       DateTime        @default(now())
-  updatedAt       DateTime        @updatedAt
-  trustedSources  TrustedSource[]
-  attestations    Attestation[]
+  contractSyncedAt        DateTime?
+  contractSyncError       String?
+  verifiedAt              DateTime?
+  suspendedAt             DateTime?
+  revokedAt               DateTime?
+  createdAt               DateTime        @default(now())
+  updatedAt               DateTime        @updatedAt
+  trustedSources          TrustedSource[]
+  attestations            Attestation[]
 
   @@index([organizationId])
   @@index([status])
 }
 
 model SupportedAsset {
-  id          String          @id @default(cuid())
-  assetKey    String          @unique
-  code        String
-  issuer      String?
-  network     String
-  status      ResourceStatus  @default(ACTIVE)
-  createdAt   DateTime        @default(now())
-  updatedAt   DateTime        @updatedAt
+  id        String         @id @default(cuid())
+  assetKey  String         @unique
+  code      String
+  issuer    String?
+  network   String
+  status    ResourceStatus @default(ACTIVE)
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
 
   @@index([network, status])
 }
 
 model Payment {
-  id                     String                 @id @default(cuid())
+  id                     String                @id @default(cuid())
   userId                 String
-  user                   User                   @relation(fields: [userId], references: [id])
+  user                   User                  @relation(fields: [userId], references: [id])
   stellarTransactionHash String
-  operationId            String                 @unique
+  operationId            String                @unique
   sourceAddress          String
   destinationAddress     String
   assetCode              String
@@ -248,10 +248,10 @@ model Payment {
   amountEncrypted        String?
   occurredAt             DateTime
   memo                   Json?
-  classification         PaymentClassification  @default(UNKNOWN)
-  isEligible             Boolean                @default(false)
-  createdAt              DateTime               @default(now())
-  updatedAt              DateTime               @updatedAt
+  classification         PaymentClassification @default(UNKNOWN)
+  isEligible             Boolean               @default(false)
+  createdAt              DateTime              @default(now())
+  updatedAt              DateTime              @updatedAt
 
   @@index([userId, occurredAt])
   @@index([sourceAddress])
@@ -260,17 +260,17 @@ model Payment {
 }
 
 model TrustedSource {
-  id            String          @id @default(cuid())
+  id            String         @id @default(cuid())
   userId        String
-  user          User            @relation(fields: [userId], references: [id])
+  user          User           @relation(fields: [userId], references: [id])
   sourceAddress String
   displayName   String?
   sourceType    String
   issuerId      String?
-  issuer        Issuer?         @relation(fields: [issuerId], references: [id])
-  status        ResourceStatus  @default(ACTIVE)
-  createdAt     DateTime        @default(now())
-  updatedAt     DateTime        @updatedAt
+  issuer        Issuer?        @relation(fields: [issuerId], references: [id])
+  status        ResourceStatus @default(ACTIVE)
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
 
   @@unique([userId, sourceAddress])
   @@index([issuerId])
@@ -306,15 +306,15 @@ model Proof {
 }
 
 model ProofClaim {
-  id                String   @id @default(cuid())
-  proofId           String   @unique
-  proof             Proof    @relation(fields: [proofId], references: [id])
-  operator          String
+  id                 String   @id @default(cuid())
+  proofId            String   @unique
+  proof              Proof    @relation(fields: [proofId], references: [id])
+  operator           String
   thresholdEncrypted String?
-  frequency         String?
-  result            Boolean
-  disclosurePolicy  Json
-  createdAt         DateTime @default(now())
+  frequency          String?
+  result             Boolean
+  disclosurePolicy   Json
+  createdAt          DateTime @default(now())
 }
 
 model Attestation {
@@ -370,21 +370,21 @@ model VerificationEventLog {
 }
 
 model ApiKey {
-  id             String          @id @default(cuid())
-  organizationId String
-  organization   Organization    @relation(fields: [organizationId], references: [id])
-  createdById    String
-  createdBy      User            @relation(fields: [createdById], references: [id])
-  name           String
-  prefix         String          @db.VarChar(8)
-  keyHash        String          @unique
+  id               String                  @id @default(cuid())
+  organizationId   String
+  organization     Organization            @relation(fields: [organizationId], references: [id])
+  createdById      String
+  createdBy        User                    @relation(fields: [createdById], references: [id])
+  name             String
+  prefix           String                  @db.VarChar(8)
+  keyHash          String                  @unique
   scopeAssignments ApiKeyScopeAssignment[] @relation("apiKeyScopeAssignments")
-  status         ResourceStatus  @default(ACTIVE)
-  lastUsedAt     DateTime?
-  rotatedAt      DateTime?
-  revokedAt      DateTime?
-  expiresAt      DateTime?
-  createdAt      DateTime        @default(now())
+  status           ResourceStatus          @default(ACTIVE)
+  lastUsedAt       DateTime?
+  rotatedAt        DateTime?
+  revokedAt        DateTime?
+  expiresAt        DateTime?
+  createdAt        DateTime                @default(now())
 
   @@index([organizationId, status])
   @@index([prefix])
@@ -400,16 +400,16 @@ model ApiKeyScopeAssignment {
 }
 
 model Webhook {
-  id               String            @id @default(cuid())
-  organizationId   String
-  organization     Organization      @relation(fields: [organizationId], references: [id])
-  url              String
-  secretEncrypted  String
-  events           Json
-  status           ResourceStatus    @default(ACTIVE)
-  createdAt        DateTime          @default(now())
-  updatedAt        DateTime          @updatedAt
-  deliveries       WebhookDelivery[]
+  id              String            @id @default(cuid())
+  organizationId  String
+  organization    Organization      @relation(fields: [organizationId], references: [id])
+  url             String
+  secretEncrypted String
+  events          Json
+  status          ResourceStatus    @default(ACTIVE)
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+  deliveries      WebhookDelivery[]
 
   @@index([organizationId, status])
 }
@@ -421,24 +421,24 @@ enum WebhookDeliveryStatus {
 }
 
 model WebhookDelivery {
-  id             String                @id @default(cuid())
-  webhookId      String
-  webhook        Webhook               @relation(fields: [webhookId], references: [id])
-  eventType      String
-  eventId        String
-  payload        Json
-  attempt        Int                   @default(1)
-  status         WebhookDeliveryStatus @default(PENDING)
-  statusCode     Int?
-  responseBody   String?
-  durationMs     Int?
-  failureReason  String?
-  replayOf       String?
-  replayedBy     String?
-  replayKey      String?               @unique
-  deliveredAt    DateTime?
-  nextRetryAt    DateTime?
-  createdAt      DateTime              @default(now())
+  id            String                @id @default(cuid())
+  webhookId     String
+  webhook       Webhook               @relation(fields: [webhookId], references: [id])
+  eventType     String
+  eventId       String
+  payload       Json
+  attempt       Int                   @default(1)
+  status        WebhookDeliveryStatus @default(PENDING)
+  statusCode    Int?
+  responseBody  String?
+  durationMs    Int?
+  failureReason String?
+  replayOf      String?
+  replayedBy    String?
+  replayKey     String?               @unique
+  deliveredAt   DateTime?
+  nextRetryAt   DateTime?
+  createdAt     DateTime              @default(now())
 
   @@index([webhookId, createdAt])
   @@index([eventId])
@@ -536,4 +536,31 @@ model EncryptionKeyRetirementIntent {
 
   @@index([nextRetryAt])
   @@index([status])
+}
+
+/// Database-backed distributed lease for scheduled job coordination.
+/// Enables exactly-once execution across multiple instances.
+///
+/// Lease lifecycle:
+/// 1. Acquisition: Process attempts to insert a new lease or acquire an expired lease atomically
+/// 2. Renewal: Owner heartbeats by updating expiresAt to extend the lease
+/// 3. Loss: Owner's heartbeat stops or lease expires
+/// 4. Takeover: Another process acquires an expired lease
+///
+/// Clock skew tolerance: Explicit comparison against DATABASE_TIME, not client time.
+/// Uses Postgres current_timestamp (database-side time) to handle multi-instance clock skew.
+model JobLease {
+  id              String   @id @default(cuid())
+  /// Unique identifier for the job being leased (e.g., "auth_cleanup", "retention_cleanup", "anchoring_reconciliation")
+  jobName         String   @unique
+  /// Identifier of the process/instance that owns this lease
+  owner           String
+  /// Absolute timestamp when this lease expires (database time semantics)
+  expiresAt       DateTime
+  /// Last heartbeat timestamp from the owner
+  lastHeartbeatAt DateTime
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([jobName, expiresAt])
 }
