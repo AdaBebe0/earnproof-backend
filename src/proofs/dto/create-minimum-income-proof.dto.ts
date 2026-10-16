@@ -1,5 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
 import {
+  ArrayMaxSize,
   ArrayMinSize,
   IsArray,
   IsDateString,
@@ -8,8 +9,10 @@ import {
   IsString,
   Matches,
   Max,
+  MaxLength,
   Min,
 } from "class-validator";
+import { FIELD_LIMITS } from "../../common/limits/request-limits";
 
 export class CreateMinimumIncomeProofDto {
   @ApiProperty({
@@ -22,7 +25,11 @@ export class CreateMinimumIncomeProofDto {
   })
   @IsArray()
   @ArrayMinSize(1)
+  // Without a cap, one request can ask the database to load an unbounded number
+  // of payments and decrypt every amount. A year of daily payments is 365.
+  @ArrayMaxSize(FIELD_LIMITS.paymentIdsPerProof)
   @IsString({ each: true })
+  @MaxLength(FIELD_LIMITS.id, { each: true })
   selectedPaymentIds!: string[];
 
   @ApiProperty({
@@ -33,6 +40,7 @@ export class CreateMinimumIncomeProofDto {
     example: "500.0000000",
   })
   @IsString()
+  @MaxLength(FIELD_LIMITS.decimalAmount)
   @Matches(/^\d+(\.\d{1,7})?$/)
   thresholdAmount!: string;
 
@@ -41,6 +49,7 @@ export class CreateMinimumIncomeProofDto {
     example: "USDC",
   })
   @IsString()
+  @MaxLength(FIELD_LIMITS.assetCode)
   assetCode!: string;
 
   @ApiPropertyOptional({
@@ -51,6 +60,7 @@ export class CreateMinimumIncomeProofDto {
   })
   @IsOptional()
   @IsString()
+  @MaxLength(FIELD_LIMITS.stellarAddress)
   assetIssuer?: string;
 
   @ApiProperty({

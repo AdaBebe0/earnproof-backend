@@ -1,0 +1,28 @@
+#!/bin/sh
+set -eu
+
+message_file="$1"
+subject="$(sed -n '1p' "$message_file" | tr -d '\r')"
+
+case "$subject" in
+  Merge\ *|Revert\ \"*|fixup!\ *|squash!\ *)
+    exit 0
+    ;;
+esac
+
+pattern='^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([[:alnum:]./_-]+\))?!?: .+'
+
+if printf '%s\n' "$subject" | grep -Eq "$pattern"; then
+  exit 0
+fi
+
+cat <<'EOF'
+Commit message must use a conventional subject, for example:
+  feat: add proof search
+  fix(wallet): handle rejected signatures
+  chore!: update supported Node version
+
+Allowed types: feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert.
+Scopes, breaking-change markers, issue IDs, and subject punctuation are optional.
+EOF
+exit 1

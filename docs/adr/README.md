@@ -62,6 +62,7 @@ decision that turned out wrong is more valuable than its absence.
 | [0004](0004-public-unauthenticated-verification.md) | Public unauthenticated verification | accepted | Security |
 | [0005](0005-deterministic-credential-canonicalization.md) | Deterministic credential canonicalization | accepted | Domain |
 | [0006](0006-outbox-anchoring.md) | Outbox pattern for contract anchoring | accepted | Integration |
+| [0007](0007-keep-the-credentials-module.md) | Credentials module kept as a verification-only boundary | accepted | Architecture |
 
 ## Related
 

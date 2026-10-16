@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ForbiddenException,
   Injectable,
   NotFoundException,
@@ -6,28 +7,32 @@ import {
 import { ConfigService } from "@nestjs/config";
 import { ResourceStatus } from "@prisma/client";
 import { randomBytes } from "crypto";
-import {
-  decryptProtectedAmount,
-  encryptProtectedAmount,
-} from "../common/crypto/protected-amount";
+import { PaymentEncryptionKeyringService } from "../common/crypto/payment-encryption-keyring.service";
 import { PrismaService } from "../database/prisma.service";
+import { ConflictException } from "../common/exceptions/domain.exceptions";
 import { CreateWebhookDto } from "./dto/create-webhook.dto";
 import { UpdateWebhookEventsDto } from "./dto/update-webhook-events.dto";
+import { OrganizationQuotaService } from "../quotas/organization-quota.service";
 import { WebhookDeliveryService } from "./webhook-delivery.service";
+import { WebhookCircuitBreakerService } from "./webhook-circuit-breaker.service";
 
 /** Signing secret length in bytes (produces a 64-char hex string). */
 const SECRET_BYTES = 32;
 
 @Injectable()
 export class WebhooksService {
-  private readonly encryptionKey: string;
+  private readonly paymentEncryptionKeyring: PaymentEncryptionKeyringService;
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly deliveryService: WebhookDeliveryService,
+    private readonly circuitBreaker: WebhookCircuitBreakerService,
     configService: ConfigService,
+    private readonly quotas: OrganizationQuotaService,
   ) {
-    this.encryptionKey = configService.getOrThrow<string>("paymentEncryptionKey");
+    this.paymentEncryptionKeyring = new PaymentEncryptionKeyringService(
+      configService,
+    );
   }
 
   /**
@@ -38,11 +43,32 @@ export class WebhooksService {
    */
   async create(organizationId: string, dto: CreateWebhookDto) {
     const rawSecret = randomBytes(SECRET_BYTES).toString("hex");
-    const secretEncrypted = encryptProtectedAmount(rawSecret, this.encryptionKey);
+    const secretEncrypted = this.paymentEncryptionKeyring.encrypt(rawSecret);
 
     // De-duplicate events list
     const events = [...new Set(dto.events)];
 
+    // Quota check and creation commit together; see OrganizationQuotaService.
+    const webhook = await this.prisma.$transaction(async (tx) => {
+      await this.quotas.assertCapacity(tx, organizationId, "webhooks");
+      return tx.webhook.create({
+        data: {
+          organizationId,
+          url: dto.url,
+          secretEncrypted,
+          events,
+          payloadVersion: dto.payloadVersion ?? CURRENT_WEBHOOK_PAYLOAD_VERSION,
+          status: ResourceStatus.ACTIVE,
+        },
+        select: {
+          id: true,
+          url: true,
+          events: true,
+          payloadVersion: true,
+          status: true,
+          createdAt: true,
+        },
+      });
     const webhook = await this.prisma.webhook.create({
       data: {
         organizationId,
@@ -50,15 +76,20 @@ export class WebhooksService {
         secretEncrypted,
         events,
         status: ResourceStatus.ACTIVE,
+        revision: 0,
       },
       select: {
         id: true,
         url: true,
         events: true,
         status: true,
+        revision: true,
         createdAt: true,
       },
     });
+
+    // Initialize circuit breaker for new webhook
+    await this.circuitBreaker.initializeCircuit(webhook.id);
 
     return {
       ...webhook,
@@ -76,7 +107,9 @@ export class WebhooksService {
         id: true,
         url: true,
         events: true,
+        payloadVersion: true,
         status: true,
+        revision: true,
         createdAt: true,
         updatedAt: true,
       },
@@ -92,7 +125,9 @@ export class WebhooksService {
         organizationId: true,
         url: true,
         events: true,
+        payloadVersion: true,
         status: true,
+        revision: true,
         createdAt: true,
         updatedAt: true,
       },
@@ -110,14 +145,17 @@ export class WebhooksService {
    * attempt, since they re-decrypt at execution time).
    */
   async rotateSecret(organizationId: string, webhookId: string) {
-    await this.assertOwnedWebhook(organizationId, webhookId);
+    const webhook = await this.assertOwnedWebhook(organizationId, webhookId);
 
     const newRawSecret = randomBytes(SECRET_BYTES).toString("hex");
-    const newSecretEncrypted = encryptProtectedAmount(newRawSecret, this.encryptionKey);
+    const newSecretEncrypted = this.paymentEncryptionKeyring.encrypt(newRawSecret);
 
     await this.prisma.webhook.update({
       where: { id: webhookId },
-      data: { secretEncrypted: newSecretEncrypted },
+      data: {
+        secretEncrypted: newSecretEncrypted,
+        revision: webhook.revision + 1,
+      },
     });
 
     return {
@@ -134,46 +172,77 @@ export class WebhooksService {
     webhookId: string,
     dto: UpdateWebhookEventsDto,
   ) {
-    await this.assertOwnedWebhook(organizationId, webhookId);
+    const webhook = await this.assertOwnedWebhook(organizationId, webhookId);
     const events = [...new Set(dto.events)];
 
-    return this.prisma.webhook.update({
+    // Attempt optimistic update with revision check
+    const updated = await this.prisma.webhook.updateMany({
+      where: {
+        id: webhookId,
+        revision: dto.expectedRevision,
+      },
+      data: {
+        events,
+        revision: dto.expectedRevision + 1,
+      },
+    });
+
+    // If no records were updated, the revision didn't match
+    if (updated.count === 0) {
+      throw new ConflictException(
+        "Webhook has been modified by another request. Please refresh and retry.",
+        webhook.revision,
+      );
+    }
+
+    return this.prisma.webhook.findUnique({
       where: { id: webhookId },
-      data: { events },
-      select: { id: true, url: true, events: true, status: true, updatedAt: true },
+      select: { id: true, url: true, events: true, status: true, revision: true, updatedAt: true },
     });
   }
 
   /** Disable (suspend) a webhook endpoint without deleting it. */
   async disable(organizationId: string, webhookId: string) {
-    await this.assertOwnedWebhook(organizationId, webhookId);
+    const webhook = await this.assertOwnedWebhook(organizationId, webhookId);
 
     return this.prisma.webhook.update({
       where: { id: webhookId },
-      data: { status: ResourceStatus.SUSPENDED },
-      select: { id: true, status: true, updatedAt: true },
+      data: {
+        status: ResourceStatus.SUSPENDED,
+        revision: webhook.revision + 1,
+      },
+      select: { id: true, status: true, revision: true, updatedAt: true },
     });
   }
 
   /** Re-enable a previously disabled webhook endpoint. */
   async enable(organizationId: string, webhookId: string) {
-    await this.assertOwnedWebhook(organizationId, webhookId);
+    const webhook = await this.assertOwnedWebhook(organizationId, webhookId);
 
     return this.prisma.webhook.update({
       where: { id: webhookId },
-      data: { status: ResourceStatus.ACTIVE },
-      select: { id: true, status: true, updatedAt: true },
+      data: {
+        status: ResourceStatus.ACTIVE,
+        revision: webhook.revision + 1,
+      },
+      select: { id: true, status: true, revision: true, updatedAt: true },
     });
   }
 
   /** Soft-delete (mark DELETED) a webhook endpoint. */
   async delete(organizationId: string, webhookId: string) {
-    await this.assertOwnedWebhook(organizationId, webhookId);
+    const webhook = await this.assertOwnedWebhook(organizationId, webhookId);
 
     await this.prisma.webhook.update({
       where: { id: webhookId },
-      data: { status: ResourceStatus.DELETED },
+      data: {
+        status: ResourceStatus.DELETED,
+        revision: webhook.revision + 1,
+      },
     });
+
+    // Clean up circuit breaker state
+    await this.circuitBreaker.deleteCircuitState(webhookId);
 
     return { deleted: true, webhookId };
   }
@@ -235,6 +304,38 @@ export class WebhooksService {
   }
 
   /**
+   * Send a synthetic, signed `webhook.test` event to an endpoint and return
+   * redacted delivery diagnostics.
+   *
+   * Role authorization (DEVELOPER or ADMIN) is enforced in the controller; this
+   * asserts the endpoint belongs to the caller's organisation and is active,
+   * the same preconditions a replay has. Nothing is persisted: see
+   * `WebhookDeliveryService.sendTestDelivery`.
+   */
+  async sendTestDelivery(organizationId: string, webhookId: string) {
+    const webhook = await this.prisma.webhook.findUnique({
+      where: { id: webhookId },
+      select: {
+        id: true,
+        organizationId: true,
+        url: true,
+        secretEncrypted: true,
+        status: true,
+      },
+    });
+
+    this.assertOwnership(webhook, organizationId, webhookId);
+
+    if (webhook!.status !== ResourceStatus.ACTIVE) {
+      throw new BadRequestException(
+        "Cannot send a test delivery to a disabled webhook endpoint",
+      );
+    }
+
+    return this.deliveryService.sendTestDelivery(webhook!);
+  }
+
+  /**
    * List delivery records for a webhook endpoint.
    * Response body and sensitive headers are never stored in delivery rows,
    * so this is safe to return directly.
@@ -250,6 +351,7 @@ export class WebhooksService {
         id: true,
         eventType: true,
         eventId: true,
+        schemaVersion: true,
         attempt: true,
         status: true,
         statusCode: true,
@@ -261,6 +363,9 @@ export class WebhooksService {
         replayedBy: true,
         deliveredAt: true,
         nextRetryAt: true,
+        deadLetteredAt: true,
+        deadLetterReason: true,
+        redrivenAt: true,
         createdAt: true,
       },
     });
@@ -273,7 +378,7 @@ export class WebhooksService {
   private async assertOwnedWebhook(organizationId: string, webhookId: string) {
     const webhook = await this.prisma.webhook.findUnique({
       where: { id: webhookId },
-      select: { id: true, organizationId: true, status: true },
+      select: { id: true, organizationId: true, status: true, revision: true },
     });
     this.assertOwnership(webhook, organizationId, webhookId);
     return webhook!;
@@ -294,6 +399,6 @@ export class WebhooksService {
 
   /** Expose decrypt for testing secret rotation. */
   revealSecret(secretEncrypted: string): string {
-    return decryptProtectedAmount(secretEncrypted, this.encryptionKey);
+    return this.paymentEncryptionKeyring.decrypt(secretEncrypted);
   }
 }

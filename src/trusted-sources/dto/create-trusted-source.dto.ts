@@ -6,6 +6,7 @@ import {
   IsString,
   MaxLength,
 } from "class-validator";
+import { FIELD_LIMITS } from "../../common/limits/request-limits";
 
 export class CreateTrustedSourceDto {
   @ApiProperty({
@@ -14,6 +15,7 @@ export class CreateTrustedSourceDto {
   })
   @IsString()
   @IsNotEmpty()
+  @MaxLength(FIELD_LIMITS.stellarAddress)
   sourceAddress: string;
 
   @ApiPropertyOptional({
@@ -40,5 +42,6 @@ export class CreateTrustedSourceDto {
   @IsOptional()
   @IsString()
   @IsNotEmpty()
+  @MaxLength(FIELD_LIMITS.id)
   issuerId?: string;
 }

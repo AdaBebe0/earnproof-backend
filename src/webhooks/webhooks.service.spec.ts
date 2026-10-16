@@ -3,12 +3,14 @@ import { ResourceStatus } from "@prisma/client";
 import { encryptProtectedAmount } from "../common/crypto/protected-amount";
 import { WebhookDeliveryService } from "./webhook-delivery.service";
 import { WebhooksService } from "./webhooks.service";
+import { unlimitedQuotas } from "../testing/quotas";
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
 const ENCRYPTION_KEY = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=";
+const ENCRYPTION_KEYRING = new Map([[0, ENCRYPTION_KEY]]);
 
 function makeConfig() {
   return {
@@ -50,11 +52,15 @@ describe("WebhooksService", () => {
           }),
         },
       };
+      Object.assign(prisma, {
+        $transaction: jest.fn(async (fn: (tx: unknown) => unknown) => fn(prisma)),
+      });
 
       const service = new WebhooksService(
         prisma as never,
         makeDeliveryService(),
         makeConfig() as never,
+        unlimitedQuotas() as never,
       );
 
       const result = await service.create("org_1", {
@@ -88,11 +94,15 @@ describe("WebhooksService", () => {
           }),
         },
       };
+      Object.assign(prisma, {
+        $transaction: jest.fn(async (fn: (tx: unknown) => unknown) => fn(prisma)),
+      });
 
       const service = new WebhooksService(
         prisma as never,
         makeDeliveryService(),
         makeConfig() as never,
+        unlimitedQuotas() as never,
       );
 
       await service.create("org_1", {
@@ -106,7 +116,11 @@ describe("WebhooksService", () => {
 
   describe("rotateSecret", () => {
     it("stores a new encrypted secret and returns the raw value once", async () => {
-      let latestEncrypted = encryptProtectedAmount("original-secret", ENCRYPTION_KEY);
+      let latestEncrypted = encryptProtectedAmount(
+        "original-secret",
+        ENCRYPTION_KEYRING,
+        0,
+      );
 
       const prisma = {
         webhook: {
@@ -126,6 +140,7 @@ describe("WebhooksService", () => {
         prisma as never,
         makeDeliveryService(),
         makeConfig() as never,
+        unlimitedQuotas() as never,
       );
 
       const result = await service.rotateSecret("org_1", "webhook_1");
@@ -153,6 +168,7 @@ describe("WebhooksService", () => {
         prisma as never,
         makeDeliveryService(),
         makeConfig() as never,
+        unlimitedQuotas() as never,
       );
 
       await expect(service.rotateSecret("org_mine", "webhook_1")).rejects.toThrow(
@@ -182,6 +198,7 @@ describe("WebhooksService", () => {
         prisma as never,
         makeDeliveryService(),
         makeConfig() as never,
+        unlimitedQuotas() as never,
       );
 
       await service.disable("org_1", "webhook_1");
@@ -208,6 +225,7 @@ describe("WebhooksService", () => {
         prisma as never,
         makeDeliveryService(),
         makeConfig() as never,
+        unlimitedQuotas() as never,
       );
 
       await service.enable("org_1", "webhook_1");
@@ -243,6 +261,7 @@ describe("WebhooksService", () => {
         prisma as never,
         deliveryService,
         makeConfig() as never,
+        unlimitedQuotas() as never,
       );
 
       const result = await service.replayDelivery("org_1", "delivery_1", "user_admin");
@@ -269,6 +288,7 @@ describe("WebhooksService", () => {
         prisma as never,
         makeDeliveryService(),
         makeConfig() as never,
+        unlimitedQuotas() as never,
       );
 
       await expect(
@@ -294,6 +314,7 @@ describe("WebhooksService", () => {
         prisma as never,
         makeDeliveryService(),
         makeConfig() as never,
+        unlimitedQuotas() as never,
       );
 
       await expect(
@@ -328,6 +349,7 @@ describe("WebhooksService", () => {
         prisma as never,
         deliveryService,
         makeConfig() as never,
+        unlimitedQuotas() as never,
       );
 
       await service.replayDelivery("org_1", "delivery_audit", "user_developer");
@@ -361,6 +383,7 @@ describe("WebhooksService", () => {
         prisma as never,
         makeDeliveryService(),
         makeConfig() as never,
+        unlimitedQuotas() as never,
       );
 
       const result = await service.listDeliveries("org_1", "webhook_1");

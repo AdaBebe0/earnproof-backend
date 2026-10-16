@@ -10,6 +10,7 @@ import {
   MaxLength,
   MinLength,
 } from "class-validator";
+import { FIELD_LIMITS } from "../../common/limits/request-limits";
 
 export class OrganizationApiKeysQueryDto {
   @ApiPropertyOptional({
@@ -18,6 +19,7 @@ export class OrganizationApiKeysQueryDto {
   })
   @IsOptional()
   @IsString()
+  @MaxLength(FIELD_LIMITS.id)
   organizationId?: string;
 }
 

@@ -6,13 +6,16 @@ import {
   IsOptional,
   IsString,
   Max,
+  MaxLength,
   Min,
 } from "class-validator";
+import { FIELD_LIMITS } from "../../common/limits/request-limits";
 
 export class CreatePaymentReceiptProofDto {
   @ApiProperty({ description: "ID of one indexed payment owned by the user." })
   @IsString()
   @IsNotEmpty()
+  @MaxLength(FIELD_LIMITS.id)
   paymentId!: string;
 
   @ApiPropertyOptional({

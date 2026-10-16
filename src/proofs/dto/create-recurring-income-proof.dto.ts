@@ -1,4 +1,5 @@
 import {
+  ArrayMaxSize,
   ArrayMinSize,
   ArrayUnique,
   IsArray,
@@ -8,8 +9,10 @@ import {
   IsOptional,
   IsString,
   Max,
+  MaxLength,
   Min,
 } from "class-validator";
+import { FIELD_LIMITS } from "../../common/limits/request-limits";
 
 export const INTERVAL_UNITS = ["day", "week", "month"] as const;
 export type IntervalUnit = (typeof INTERVAL_UNITS)[number];
@@ -17,8 +20,10 @@ export type IntervalUnit = (typeof INTERVAL_UNITS)[number];
 export class CreateRecurringIncomeProofDto {
   @IsArray()
   @ArrayMinSize(1)
+  @ArrayMaxSize(FIELD_LIMITS.paymentIdsPerProof)
   @ArrayUnique()
   @IsString({ each: true })
+  @MaxLength(FIELD_LIMITS.id, { each: true })
   selectedPaymentIds!: string[];
 
   /**
@@ -38,10 +43,12 @@ export class CreateRecurringIncomeProofDto {
   intervalCount!: number;
 
   @IsString()
+  @MaxLength(FIELD_LIMITS.assetCode)
   assetCode!: string;
 
   @IsOptional()
   @IsString()
+  @MaxLength(FIELD_LIMITS.stellarAddress)
   assetIssuer?: string;
 
   @IsDateString()

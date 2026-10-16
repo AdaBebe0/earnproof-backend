@@ -191,6 +191,105 @@ If your processing is already idempotent by the event's own identifiers, a
 dedup store is still worth having — it turns "harmless duplicate work" into "no
 work".
 
+## Outbound destination validation (SSRF protection)
+
+Every webhook URL is, by definition, attacker-influenced: an organisation
+member configures it, and EarnProof's backend then makes an outbound HTTP
+request to it. Without validation, that is a network pivot — a malicious or
+compromised configurer could point a webhook at internal infrastructure and
+use EarnProof's server as a proxy to reach it. The checks below are enforced
+centrally, in [`src/common/http/destination-guard.ts`](../src/common/http/destination-guard.ts),
+and every outbound client that dispatches to a caller-influenced destination
+(webhooks today) runs its target through this module before connecting. The
+webhook-facing entry point is
+[`src/webhooks/webhook-ssrf-guard.ts`](../src/webhooks/webhook-ssrf-guard.ts), a
+thin wrapper that delegates to it.
+
+### Allowed schemes and ports
+
+- **Scheme:** `https:` only. `http:`, `ftp:`, `file:`, `data:`, `ws:`, and
+  everything else are rejected.
+- **Port:** the default HTTPS port (443) only. Any explicit port —
+  including `:443` written out, and especially an unusual port like `:8080`
+  or `:6379` — is rejected. A caller-controlled port is itself a common way
+  to reach an internal service that happens to sit behind a public hostname.
+- **Credentials:** `https://user:pass@host/...` is rejected outright. URL
+  credentials can be used to smuggle secrets to a third party and have no
+  legitimate use in a webhook URL.
+
+### Blocked address ranges
+
+Both IPv4 and IPv6 literals are checked, and a hostname is checked again
+after DNS resolution (see below). Blocked ranges:
+
+- Loopback (`127.0.0.0/8`, `::1`)
+- Unspecified (`0.0.0.0/8`, `::`)
+- RFC 1918 private space (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`)
+- Link-local (`169.254.0.0/16`, `fe80::/10`)
+- Cloud metadata endpoints (`169.254.169.254` — AWS/GCP/Azure;
+  `100.100.100.200` — Alibaba Cloud)
+- Carrier-grade NAT / shared address space (`100.64.0.0/10`)
+- Benchmark and documentation ranges (`198.18.0.0/15`, `198.51.100.0/24`
+  TEST-NET-2, `203.0.113.0/24` TEST-NET-3)
+- Reserved and broadcast (`240.0.0.0/4`, `255.255.255.255`)
+- Unique-local IPv6 (`fc00::/7`)
+- `localhost`, and any hostname ending in `.localhost`, `.local`, or
+  `.internal`, regardless of what it would resolve to.
+
+### Ambiguous IP representations
+
+An address can be spelled in more than one way, and a naive check that only
+recognises the canonical dotted-decimal or colon-hex form can be bypassed by
+an equivalent-but-different-looking one. This module rejects the ambiguous
+forms rather than trusting the platform to have normalised them first:
+
+- **Octal-looking octets** (`017.0.0.1`) and **hex octets** (`0x7f.0.0.1`)
+  are refused by the IPv4 parser — it accepts only one-to-three-digit
+  strict decimal, with no leading zero.
+- **Single-integer or short forms** (`2130706433`, `127.1`) are not treated
+  as four-octet IPv4 and so never bypass the range checks by looking like a
+  hostname instead of the loopback address they represent.
+- **IPv4-mapped IPv6** (`::ffff:127.0.0.1` and its compressed hex form
+  `::ffff:a9fe:a9fe`) is decoded back to its IPv4 payload and re-checked
+  under the same IPv4 rules — the IPv6 wrapper is not itself a bypass.
+- **NAT64-embedded IPv4** (`64:ff9b::/96`) is decoded the same way.
+
+### DNS revalidation at connection time
+
+A hostname's resolved address is only trusted for the instant it was
+checked. `assertSafeWebhookDestination` re-resolves DNS and re-validates
+every returned address **immediately before every delivery attempt and
+retry** — not once at the time the webhook was configured, and not once at
+enqueue time. This is what defeats DNS rebinding: an attacker who gets a
+hostname approved while it resolves to a public address, then repoints DNS
+at an internal address before (or between) delivery attempts, is still
+caught, because each attempt re-resolves and re-checks independently.
+
+### Redirects and credential forwarding
+
+Deliveries are made with `redirect: "error"` — a 3xx response is treated as
+a delivery failure, never followed. This is deliberate: a redirect is a
+fresh, unvalidated destination, and following it would mean re-sending the
+signed payload (and, if the receiving code ever added redirect-following, any
+`Authorization` header) to whatever URL an attacker's endpoint chooses to
+respond with — including an internal address the outbound destination
+guard would otherwise have blocked. If redirect-following is ever
+introduced for a legitimate reason, the redirect target must be re-run
+through `assertSafeDestination` exactly like any first-hop destination
+before it is followed, and no credential or signature computed for the
+original request may be attached to the redirected one.
+
+### Stellar Horizon is out of scope for this guard
+
+`src/stellar/horizon-transport.ts` also makes outbound HTTP requests, but its
+target is `STELLAR_HORIZON_URL`, an operator-configured environment variable
+— not a value any webhook customer, API caller, or other end user can
+influence. It is deliberately not routed through the destination guard: doing
+so would add DNS-resolution and range-checking overhead to every Horizon call
+for a URL that is not attacker-controlled, and an operator who points it at
+an internal address is doing so intentionally (e.g. a self-hosted Horizon
+instance).
+
 ## Retries
 
 A delivery that does not receive a 2xx is retried up to **5 times total**, with

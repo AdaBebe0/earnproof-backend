@@ -14,6 +14,14 @@ Email the maintainers at `security@veridatum.dev` with:
 
 Do not include private keys, seed phrases, real salary data, or private payment records in reports.
 
+## Responding to an Incident
+
+Reporting a vulnerability is the path above. Responding to one — a compromised
+credential, an abusive client, a data exposure, an anchoring failure, or a
+dependency outage — is documented in
+[docs/incidents/README.md](docs/incidents/README.md), which defines severity,
+roles, evidence handling, and safe escalation.
+
 ## Supported Scope
 
 The current project targets Stellar testnet only. Mainnet deployments, production financial decisions, and regulated identity verification are out of scope until explicitly documented.

@@ -1,19 +1,26 @@
 import { Module } from "@nestjs/common";
 import { ConfigModule } from "@nestjs/config";
-import { APP_GUARD, APP_INTERCEPTOR } from "@nestjs/core";
-import { ThrottlerGuard, ThrottlerModule } from "@nestjs/throttler";
+import { APP_INTERCEPTOR, DiscoveryModule } from "@nestjs/core";
 import { ScheduleModule } from "@nestjs/schedule";
 import { AuditModule } from "./audit/audit.module";
 import { ApiKeysModule } from "./api-keys/api-keys.module";
 import { ApprovalsModule } from "./approvals/approvals.module";
 import { AuthModule } from "./auth/auth.module";
+import { RateLimitModule } from "./common/rate-limit/rate-limit.module";
+import { ConsentModule } from "./common/consent/consent.module";
+import { DisclosureModule } from "./common/disclosure/disclosure.module";
+import { AuthorizationPolicyRegistry } from "./common/guards/authorization-policy.registry";
+import { CommonModule } from "./common/common.module";
 import { configuration } from "./config/configuration";
 import { validateEnv } from "./config/env.validation";
 import { CredentialsModule } from "./credentials/credentials.module";
 import { DatabaseModule } from "./database/database.module";
+import { DisputesModule } from "./disputes/disputes.module";
 import { HealthModule } from "./health/health.module";
 import { HttpMetricsInterceptor } from "./common/interceptors/http-metrics.interceptor";
+import { IdempotentInterceptor } from "./common/interceptors/idempotent.interceptor";
 import { ObservabilityModule } from "./common/observability/observability.module";
+import { ResilienceModule } from "./common/resilience/resilience.module";
 import { JobsModule } from "./jobs/jobs.module";
 import { IssuersModule } from "./issuers/issuers.module";
 import { OrganizationsModule } from "./organizations/organizations.module";
@@ -22,7 +29,9 @@ import { PaymentsModule } from "./payments/payments.module";
 import { ProofsModule } from "./proofs/proofs.module";
 import { SchemaImportsModule } from "./schemas/schema-imports.module";
 import { TrustedSourcesModule } from "./trusted-sources/trusted-sources.module";
+import { UsersModule } from "./users/users.module";
 import { WebhooksModule } from "./webhooks/webhooks.module";
+import { SupportedAssetsModule } from "./supported-assets/supported-assets.module";
 
 @Module({
   imports: [
@@ -31,20 +40,20 @@ import { WebhooksModule } from "./webhooks/webhooks.module";
       load: [configuration],
       validate: validateEnv,
     }),
-    ThrottlerModule.forRoot([
-      {
-        name: "default",
-        ttl: 60_000, // 1 minute in milliseconds
-        limit: 1000, // generous default; per-route overrides tighten this
-      },
-    ]),
     ScheduleModule.forRoot(),
+    DiscoveryModule,
     ObservabilityModule,
+    ResilienceModule,
     DatabaseModule,
+    CommonModule,
+    ConsentModule,
+    DisclosureModule,
     AuditModule,
     ApiKeysModule,
     ApprovalsModule,
     AuthModule,
+    RateLimitModule,
+    DisputesModule,
     HealthModule,
     OrganizationsModule,
     DataResidencyModule,
@@ -54,17 +63,20 @@ import { WebhooksModule } from "./webhooks/webhooks.module";
     CredentialsModule,
     SchemaImportsModule,
     TrustedSourcesModule,
+    UsersModule,
     JobsModule,
     WebhooksModule,
+    SupportedAssetsModule,
   ],
   providers: [
     {
-      provide: APP_GUARD,
-      useClass: ThrottlerGuard,
-    },
-    {
       provide: APP_INTERCEPTOR,
       useClass: HttpMetricsInterceptor,
+    },
+    AuthorizationPolicyRegistry,
+    {
+      provide: APP_INTERCEPTOR,
+      useClass: IdempotentInterceptor,
     },
   ],
 })

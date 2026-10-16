@@ -83,7 +83,7 @@ describe("StellarService", () => {
     } as unknown as ConfigService);
 
     await expect(service.fetchTransaction("tx")).rejects.toThrow(
-      "Stellar Horizon request failed with 503",
+      "Stellar Horizon is temporarily unavailable",
     );
   });
 

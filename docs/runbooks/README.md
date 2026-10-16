@@ -12,6 +12,12 @@ learn a new document structure first:
 5. **Verify** — how to know it is actually fixed.
 6. **Escalate** — when to stop and hand off.
 
+For an incident rather than an alert — a compromised credential, an abusive
+client, a data exposure, an anchoring failure, or a dependency outage — see the
+[incident runbooks](../incidents/README.md). They cover severity, roles,
+evidence preservation, and recovery; the documents here cover a single firing
+alert.
+
 ## Privacy while responding
 
 The rules that govern metrics govern incident response too.

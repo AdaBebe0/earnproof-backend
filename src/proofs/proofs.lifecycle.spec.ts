@@ -6,6 +6,8 @@ import {
 } from "@prisma/client";
 import { ProofsService } from "./proofs.service";
 import { VerificationEventService } from "../audit/verification-event.service";
+import { unlimitedQuotas } from "../testing/quotas";
+import { AttestationsService } from "../attestations/attestations.service";
 
 describe("ProofsService lifecycle", () => {
   it("creates, verifies, revokes, and re-verifies a minimum income proof", async () => {
@@ -15,6 +17,20 @@ describe("ProofsService lifecycle", () => {
       getAggregateStats: jest.fn().mockResolvedValue({}),
       cleanupExpiredEvents: jest.fn().mockResolvedValue(0),
     } as unknown as VerificationEventService;
+    const configValues: Record<string, unknown> = {
+      credentialSigningSecret: "lifecycle-signing-secret",
+      paymentEncryptionKey: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
+      "stellar.network": "testnet",
+      "contractAnchoring.enabled": false,
+      "contractAnchoring.required": false,
+    };
+    const service = new ProofsService(store.prisma as never, {
+      getOrThrow: jest.fn((key: string) => configValues[key]),
+      get: jest.fn((key: string) => configValues[key]),
+    } as never, mockVerificationEventService);
+    const mockAttestationsService = {
+      getValidAttestationsForSubject: jest.fn().mockResolvedValue([]),
+    } as unknown as AttestationsService;
     const service = new ProofsService(store.prisma as never, {
       getOrThrow: jest.fn((key: string) => {
         const values: Record<string, string> = {
@@ -31,7 +47,8 @@ describe("ProofsService lifecycle", () => {
         };
         return values[key];
       }),
-    } as never, mockVerificationEventService);
+    } as never, mockVerificationEventService, unlimitedQuotas() as never);
+    } as never, mockVerificationEventService, mockAttestationsService);
     const user = {
       id: "user_lifecycle",
       walletAddress: "GB_TEST",
@@ -58,7 +75,7 @@ describe("ProofsService lifecycle", () => {
     expect(firstVerification.status).toBe("valid");
     expect(store.verificationEvents).toHaveLength(1);
 
-    await service.revokeProof(user.id, created.proofId);
+    await service.revokeProof(user, created.proofId);
 
     const secondVerification = await service.verifyProof(created.proofId);
     expect(secondVerification.result).toBe(VerificationResult.REVOKED);
@@ -71,6 +88,7 @@ describe("ProofsService lifecycle", () => {
     ["ineligible", { isEligible: false }, "eligible income"],
     ["mixed asset", { assetCode: "USDC" }, "requested asset"],
     ["non-owned", { userId: "another_user" }, "invalid"],
+    ["ledger-held", { finalityHoldAt: new Date("2026-07-01T00:00:00.000Z") }, "pending ledger reconciliation"],
   ])("rejects a %s selected payment", async (_case, change, message) => {
     const store = createRecurringProofStore();
     Object.assign(store.payments[1], change);
@@ -129,21 +147,23 @@ const recurringRequest = {
 };
 
 function createRecurringService(store: ReturnType<typeof createRecurringProofStore>) {
+  const configValues: Record<string, unknown> = {
+    credentialSigningSecret: "lifecycle-signing-secret",
+    paymentEncryptionKey: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
+    "stellar.network": "testnet",
+  };
+  const mockAttestationsService = {
+    getValidAttestationsForSubject: jest.fn().mockResolvedValue([]),
+  } as unknown as AttestationsService;
   return new ProofsService(
     store.prisma as never,
     {
-      getOrThrow: jest.fn((key: string) => {
-        const values: Record<string, string> = {
-          credentialSigningSecret: "lifecycle-signing-secret",
-          paymentEncryptionKey:
-            "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
-          "stellar.network": "testnet",
-        };
-        return values[key];
-      }),
-      get: jest.fn(() => false),
+      getOrThrow: jest.fn((key: string) => configValues[key]),
+      get: jest.fn((key: string) => (key in configValues ? configValues[key] : false)),
     } as never,
     { recordEvent: jest.fn().mockResolvedValue(undefined) } as never,
+    unlimitedQuotas() as never,
+    mockAttestationsService,
   );
 }
 
@@ -224,6 +244,18 @@ function createProofStore() {
     // $transaction is used by createMinimumIncomeProof and revokeProof.
     $transaction: jest.fn().mockImplementation(async (fn: (tx: unknown) => unknown) => {
       const tx = {
+        supportedAsset: {
+          findFirst: jest.fn().mockResolvedValue({
+            id: "asset_lifecycle",
+            assetKey: "testnet:native:XLM",
+            code: "XLM",
+            issuer: null,
+            network: "testnet",
+            status: "ACTIVE",
+            createdAt: new Date("2026-01-01T00:00:00.000Z"),
+            updatedAt: new Date("2026-01-01T00:00:00.000Z"),
+          }),
+        },
         proof: {
           create: jest.fn(({ data }) => {
             const proof = {
@@ -256,6 +288,9 @@ function createProofStore() {
         anchoringIntent: {
           create: jest.fn().mockResolvedValue({ id: "intent_1" }),
         },
+        auditLog: {
+          create: jest.fn().mockResolvedValue({ id: "audit_1" }),
+        },
       };
       return fn(tx);
     }),
@@ -279,6 +314,18 @@ describe("ProofsService lifecycle – recurring-income", () => {
       getAggregateStats: jest.fn().mockResolvedValue({}),
       cleanupExpiredEvents: jest.fn().mockResolvedValue(0),
     } as unknown as VerificationEventService;
+    const riConfigValues: Record<string, unknown> = {
+      credentialSigningSecret: "lifecycle-signing-secret",
+      paymentEncryptionKey: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
+      "stellar.network": "testnet",
+    };
+    const service = new ProofsService(store.prisma as never, {
+      getOrThrow: jest.fn((key: string) => riConfigValues[key]),
+      get: jest.fn((key: string) => (key in riConfigValues ? riConfigValues[key] : false)),
+    } as never, mockVerificationEventService);
+    const mockAttestationsService = {
+      getValidAttestationsForSubject: jest.fn().mockResolvedValue([]),
+    } as unknown as AttestationsService;
     const service = new ProofsService(store.prisma as never, {
       getOrThrow: jest.fn((key: string) => {
         const values: Record<string, string> = {
@@ -289,7 +336,8 @@ describe("ProofsService lifecycle – recurring-income", () => {
         return values[key];
       }),
       get: jest.fn(() => false),
-    } as never, mockVerificationEventService);
+    } as never, mockVerificationEventService, unlimitedQuotas() as never);
+    } as never, mockVerificationEventService, mockAttestationsService);
     const user = {
       id: "user_ri_lifecycle",
       walletAddress: "GB_TEST",
@@ -329,7 +377,7 @@ describe("ProofsService lifecycle – recurring-income", () => {
     expect(store.verificationEvents).toHaveLength(1);
 
     // ── 3. Revoke ────────────────────────────────────────────────────────────
-    const revoked = await service.revokeProof(user.id, created.proofId);
+    const revoked = await service.revokeProof(user, created.proofId);
     expect(revoked.status).toBe(ProofStatus.REVOKED);
 
     // ── 4. Re-verify (revoked) ───────────────────────────────────────────────
@@ -388,6 +436,18 @@ function createRecurringProofStore() {
     prisma: {
       $transaction: jest.fn(async (callback) =>
         callback({
+          supportedAsset: {
+            findFirst: jest.fn().mockResolvedValue({
+              id: "asset_ri_lifecycle",
+              assetKey: "testnet:native:XLM",
+              code: "XLM",
+              issuer: null,
+              network: "testnet",
+              status: "ACTIVE",
+              createdAt: new Date("2026-01-01T00:00:00.000Z"),
+              updatedAt: new Date("2026-01-01T00:00:00.000Z"),
+            }),
+          },
           proof: {
             create: jest.fn(({ data }) => {
               const proof = {
@@ -419,6 +479,7 @@ function createRecurringProofStore() {
             }),
           },
           anchoringIntent: { create: jest.fn() },
+          auditLog: { create: jest.fn().mockResolvedValue({ id: "audit_1" }) },
         }),
       ),
       payment: {
