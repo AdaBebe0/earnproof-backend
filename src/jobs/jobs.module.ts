@@ -1,4 +1,11 @@
 import { Module } from "@nestjs/common";
+import { ApprovalsModule } from "../approvals/approvals.module";
+import { ContractAnchoringService } from "../proofs/contract-anchoring.service";
+import { WebhooksModule } from "../webhooks/webhooks.module";
+import { AnchoringReconcilerService } from "./anchoring-reconciler.service";
+import { AnchoringWorkerService } from "./anchoring-worker.service";
+import { ApprovalExpiryJob } from "./approval-expiry.job";
+import { WebhookCertificateExpiryJob } from "./webhook-certificate-expiry.job";
 import { IssuersModule } from "../issuers/issuers.module";
 import { PaymentsModule } from "../payments/payments.module";
 import { ApiKeysModule } from "../api-keys/api-keys.module";
@@ -29,6 +36,7 @@ import { RetentionJob } from "./retention/retention.job";
  * rather than inventing a second one — the same choice HealthModule makes.
  */
 @Module({
+  imports: [ApprovalsModule, WebhooksModule],
   imports: [IssuersModule],
   imports: [PaymentsModule],
   imports: [
@@ -51,6 +59,8 @@ import { RetentionJob } from "./retention/retention.job";
     IssuerReconciliationService,
     RetentionCleanupService,
     RetentionJob,
+    ApprovalExpiryJob,
+    WebhookCertificateExpiryJob,
     JobExecutionService,
     JobExecutionMaintenanceJob,
   ],

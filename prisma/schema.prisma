@@ -418,6 +418,21 @@ model WalletRotation {
 }
 
 model Organization {
+  id                   String                     @id @default(cuid())
+  name                 String
+  slug                 String                     @unique
+  website              String?
+  status               ResourceStatus             @default(PENDING)
+  createdById          String
+  createdBy            User                       @relation(fields: [createdById], references: [id])
+  createdAt            DateTime                   @default(now())
+  updatedAt            DateTime                   @updatedAt
+  issuers              Issuer[]
+  apiKeys              ApiKey[]
+  webhooks             Webhook[]
+  residencyPolicies    DataResidencyPolicy[]
+  residencyAssignments DataResidencyAssignment[]
+  schemaImportJobs     SchemaImportJob[]
   id          String         @id @default(cuid())
   name        String
   slug        String         @unique
@@ -907,12 +922,18 @@ model ApiKeyScopeAssignment {
 }
 
 model Webhook {
-  id               String            @id @default(cuid())
+  id               String                     @id @default(cuid())
   organizationId   String
-  organization     Organization      @relation(fields: [organizationId], references: [id])
+  organization     Organization               @relation(fields: [organizationId], references: [id])
   url              String
   secretEncrypted  String
   events           Json
+  status           ResourceStatus             @default(ACTIVE)
+  mtlsRequired     Boolean                    @default(false)
+  createdAt        DateTime                   @default(now())
+  updatedAt        DateTime                   @updatedAt
+  deliveries       WebhookDelivery[]
+  clientCertificates WebhookClientCertificate[]
   /// Webhook payload schema version this endpoint is pinned to. Existing
   /// endpoints keep receiving the version they subscribed with until they opt
   /// in to a newer one; see docs/webhook-payloads.md.
@@ -1101,6 +1122,208 @@ model AuthAuditEvent {
   @@index([createdAt])
 }
 
+// ---------------------------------------------------------------------------
+// Privileged operation approval queue (#313)
+// ---------------------------------------------------------------------------
+
+enum ApprovalRequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  CANCELLED
+  EXPIRED
+  EXECUTED
+}
+
+/// A request to perform a privileged, side-effecting operation. Requires an
+/// explicit approval decision from someone other than the requester before
+/// the operation may be executed, and every decision is terminal.
+model ApprovalRequest {
+  id                  String                @id @default(cuid())
+  operationType       String
+  /// Canonical hash of `payload`, used so callers can detect a changed
+  /// request before approving it.
+  payloadHash         String
+  payload             Json
+  requestedById       String
+  status              ApprovalRequestStatus @default(PENDING)
+  decidedById         String?
+  decidedAt           DateTime?
+  decisionReason      String?
+  /// Set the moment execution claims this request, atomically, so a
+  /// concurrently-triggered execution cannot run the operation twice.
+  executionLeaseToken String?               @unique
+  executionLeasedAt   DateTime?
+  executedAt          DateTime?
+  expiresAt           DateTime
+  createdAt           DateTime              @default(now())
+  updatedAt           DateTime              @updatedAt
+
+  @@index([status, expiresAt])
+  @@index([requestedById])
+  @@index([operationType, status])
+}
+
+// ---------------------------------------------------------------------------
+// Organization data residency policies (#317)
+// ---------------------------------------------------------------------------
+
+enum DataResidencyClass {
+  PAYMENT_DATA
+  PROOF_DATA
+  AUDIT_DATA
+  BACKUP_DATA
+  QUEUE_DATA
+}
+
+enum DataResidencyPolicyStatus {
+  ACTIVE
+  SUPERSEDED
+}
+
+/// A versioned, explicit allow-list of regions an organization permits for a
+/// given class of regulated data. Policies are never mutated in place —
+/// changing the allow-list creates a new version and supersedes the old one.
+model DataResidencyPolicy {
+  id             String                     @id @default(cuid())
+  organizationId String
+  organization   Organization               @relation(fields: [organizationId], references: [id])
+  dataClass      DataResidencyClass
+  /// JSON string array of allowed region codes. Explicit allow-list — there
+  /// is no implicit default region, so an unmapped data class is denied.
+  allowedRegions Json
+  version        Int
+  status         DataResidencyPolicyStatus  @default(ACTIVE)
+  supersedesId   String?                    @unique
+  createdById    String
+  createdAt      DateTime                   @default(now())
+
+  @@unique([organizationId, dataClass, version])
+  @@index([organizationId, dataClass, status])
+}
+
+/// Tracks which region a concrete piece of org-scoped data (a write, export,
+/// backup, queued job, or deployment target) currently lives in, so policy
+/// changes can be checked against reality before they take effect.
+model DataResidencyAssignment {
+  id             String              @id @default(cuid())
+  organizationId String
+  organization   Organization        @relation(fields: [organizationId], references: [id])
+  dataClass      DataResidencyClass
+  resourceType   String
+  resourceId     String
+  region         String
+  createdAt      DateTime            @default(now())
+  updatedAt      DateTime            @updatedAt
+
+  @@unique([organizationId, dataClass, resourceType, resourceId])
+  @@index([organizationId, dataClass, region])
+}
+
+// ---------------------------------------------------------------------------
+// Schema import validation with dry-run jobs (#320)
+// ---------------------------------------------------------------------------
+
+enum SchemaImportStatus {
+  UPLOADED
+  DRY_RUN_RUNNING
+  DRY_RUN_COMPLETE
+  APPROVED
+  APPLYING
+  APPLIED
+  REJECTED
+  FAILED
+}
+
+/// A bulk schema-metadata import. Upload and dry-run never mutate
+/// `SchemaDefinition`; only `apply`, gated on the exact reviewed hash, does.
+model SchemaImportJob {
+  id             String              @id @default(cuid())
+  organizationId String
+  organization   Organization        @relation(fields: [organizationId], references: [id])
+  status         SchemaImportStatus  @default(UPLOADED)
+  rowCount       Int
+  uploadedById   String
+  /// Canonical hash of the normalized dry-run result. `apply` must be given
+  /// this exact value — it is the "reviewed hash" the caller approved.
+  canonicalHash  String?
+  conflictCount  Int                 @default(0)
+  errorCount     Int                 @default(0)
+  approvedById   String?
+  approvedAt     DateTime?
+  appliedAt      DateTime?
+  failureReason  String?
+  createdAt      DateTime            @default(now())
+  updatedAt      DateTime            @updatedAt
+  rows           SchemaImportRow[]
+
+  @@index([organizationId, status])
+}
+
+/// One row of a schema import, with its normalization result from the
+/// dry-run phase. Rows are written during dry-run but never applied to
+/// `SchemaDefinition` until the job is approved and applied.
+model SchemaImportRow {
+  id             String          @id @default(cuid())
+  jobId          String
+  job            SchemaImportJob @relation(fields: [jobId], references: [id])
+  rowIndex       Int
+  schemaKey      String
+  version        String
+  definition     Json
+  normalizedHash String
+  conflict       Boolean         @default(false)
+  errors         Json?
+
+  @@unique([jobId, rowIndex])
+  @@index([jobId, conflict])
+}
+
+/// The applied, canonical schema metadata. Only written by
+/// `SchemaImportsService.apply`.
+model SchemaDefinition {
+  id          String   @id @default(cuid())
+  schemaKey   String
+  version     String
+  definition  Json
+  importJobId String?
+  createdAt   DateTime @default(now())
+
+  @@unique([schemaKey, version])
+  @@index([schemaKey])
+}
+
+// ---------------------------------------------------------------------------
+// Webhook mutual TLS authentication (#322)
+// ---------------------------------------------------------------------------
+
+enum WebhookCertificateStatus {
+  PENDING
+  ACTIVE
+  ROTATING
+  EXPIRED
+  REVOKED
+}
+
+/// A client certificate usable for mTLS webhook delivery. The private key is
+/// encrypted at rest with the same AEAD scheme used for webhook signing
+/// secrets and is never exposed through the API or logs.
+model WebhookClientCertificate {
+  id                  String                   @id @default(cuid())
+  webhookId           String
+  webhook             Webhook                  @relation(fields: [webhookId], references: [id])
+  certificatePem      String
+  privateKeyEncrypted String
+  fingerprintSha256   String                   @unique
+  status              WebhookCertificateStatus @default(PENDING)
+  notBefore           DateTime
+  notAfter            DateTime
+  activatedAt         DateTime?
+  retiredAt           DateTime?
+  createdAt           DateTime                 @default(now())
+
+  @@index([webhookId, status])
+  @@index([notAfter])
 enum ApiKeyEndpointCategory {
   PROOF
   PAYMENT

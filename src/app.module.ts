@@ -4,6 +4,7 @@ import { APP_INTERCEPTOR, DiscoveryModule } from "@nestjs/core";
 import { ScheduleModule } from "@nestjs/schedule";
 import { AuditModule } from "./audit/audit.module";
 import { ApiKeysModule } from "./api-keys/api-keys.module";
+import { ApprovalsModule } from "./approvals/approvals.module";
 import { AuthModule } from "./auth/auth.module";
 import { RateLimitModule } from "./common/rate-limit/rate-limit.module";
 import { ConsentModule } from "./common/consent/consent.module";
@@ -23,8 +24,10 @@ import { ResilienceModule } from "./common/resilience/resilience.module";
 import { JobsModule } from "./jobs/jobs.module";
 import { IssuersModule } from "./issuers/issuers.module";
 import { OrganizationsModule } from "./organizations/organizations.module";
+import { DataResidencyModule } from "./organizations/residency/data-residency.module";
 import { PaymentsModule } from "./payments/payments.module";
 import { ProofsModule } from "./proofs/proofs.module";
+import { SchemaImportsModule } from "./schemas/schema-imports.module";
 import { TrustedSourcesModule } from "./trusted-sources/trusted-sources.module";
 import { UsersModule } from "./users/users.module";
 import { WebhooksModule } from "./webhooks/webhooks.module";
@@ -47,15 +50,18 @@ import { SupportedAssetsModule } from "./supported-assets/supported-assets.modul
     DisclosureModule,
     AuditModule,
     ApiKeysModule,
+    ApprovalsModule,
     AuthModule,
     RateLimitModule,
     DisputesModule,
     HealthModule,
     OrganizationsModule,
+    DataResidencyModule,
     IssuersModule,
     PaymentsModule,
     ProofsModule,
     CredentialsModule,
+    SchemaImportsModule,
     TrustedSourcesModule,
     UsersModule,
     JobsModule,
