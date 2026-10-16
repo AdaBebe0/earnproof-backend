@@ -11,24 +11,27 @@ import { ProofsService } from "./proofs.service";
 import { ProofSharingService } from "./proof-sharing.service";
 import { ProofReconciliationService } from "./proof-reconciliation.service";
 import { ProofVerificationAbuseService } from "../common/rate-limit/proof-verification-abuse.service";
+import { VerificationProvenanceService } from "./verification-provenance.service";
+import { ProvenanceDisclosureController } from "./provenance-disclosure.controller";
 
 @Module({
   imports: [AuthModule, AuditModule, AttestationsModule, WebhooksModule],
-  controllers: [ProofsController],
+  controllers: [ProofsController, ProvenanceDisclosureController],
   providers: [
     ContractAnchoringService,
     CredentialVerificationKeyService,
     ProofsService,
     ProofSharingService,
     ProofVerificationAbuseService,
+    ProofReconciliationService,
+    VerificationProvenanceService,
   ],
   exports: [
-    ContractAnchoringService, 
+    ContractAnchoringService,
     CredentialVerificationKeyService,
     ProofSharingService,
-  ],
     ProofReconciliationService,
+    VerificationProvenanceService,
   ],
-  exports: [ContractAnchoringService, CredentialVerificationKeyService, ProofReconciliationService],
 })
 export class ProofsModule {}

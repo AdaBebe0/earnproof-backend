@@ -3,6 +3,7 @@ import {
   ConflictException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
   Optional,
   UnprocessableEntityException,
@@ -28,6 +29,9 @@ import {
 import { createHmac, randomUUID } from "crypto";
 import { VerificationEventService } from "../audit/verification-event.service";
 import { AuthenticatedUser } from "../auth/auth.types";
+import { VerificationProvenanceService } from "./verification-provenance.service";
+import { ProvenanceDecisionBuilder } from "./provenance-decision-builder";
+import { VERIFICATION_PROVENANCE_SCHEMA_VERSION } from "./provenance.types";
 import { canonicalAssetId } from "../common/assets/asset-identifier";
 import { canonicalize } from "../common/crypto/canonicalize";
 import { CredentialSigningKeyringService } from "../common/crypto/credential-signing-keyring.service";
@@ -232,6 +236,7 @@ function isUniqueViolation(error: unknown): boolean {
 
 @Injectable()
 export class ProofsService {
+  private readonly logger = new Logger(ProofsService.name);
   private readonly signingKeyring: CredentialSigningKeyringService;
   private readonly paymentEncryptionKeyring: PaymentEncryptionKeyringService;
   private readonly stellarNetwork: string;
@@ -245,6 +250,7 @@ export class ProofsService {
     private readonly verificationEventService: VerificationEventService,
     private readonly quotas: OrganizationQuotaService,
     private readonly attestationsService: AttestationsService,
+    private readonly verificationProvenanceService: VerificationProvenanceService,
     @Optional()
     private readonly contractAnchoringService?: ContractAnchoringService,
     @Optional()
@@ -1852,6 +1858,22 @@ export class ProofsService {
       });
     }
 
+    // Record verification provenance asynchronously (fail-open).
+    // Captures complete lineage of credential, backend, contract, and Stellar
+    // observations that contributed to this decision. Never blocks verification.
+    this.recordVerificationProvenance(
+      proof.id,
+      proof.status,
+      result,
+      signedCredential,
+      contractStatus,
+    ).catch((error) => {
+      // Provenance recording is advisory; verification continues unblocked
+      this.logger.debug(
+        `Failed to record provenance for proof ${proof.id}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    });
+
     this.emitWebhook(proof.userId, {
       event: "proof.verified",
       source: { proofId: proof.id, result, verifiedAt: new Date() },
@@ -3034,5 +3056,78 @@ export class ProofsService {
       issuerId,
     );
     return attestations.length > 0;
+  }
+
+  /**
+   * Record verification provenance asynchronously (fail-open).
+   *
+   * Captures complete lineage of credential, backend, contract, and Stellar
+   * observations that contributed to the verification decision. Never blocks
+   * verification; errors are logged but do not propagate.
+   *
+   * @param proofId Proof being verified
+   * @param proofStatus Status at verification time
+   * @param verificationResult Final verification outcome
+   * @param credential Reconstructed credential
+   * @param contractStatus On-chain observation if available
+   */
+  private async recordVerificationProvenance(
+    proofId: string,
+    proofStatus: ProofStatus,
+    verificationResult: VerificationResult,
+    credential: any,
+    contractStatus?: any,
+  ): Promise<void> {
+    try {
+      // Build provenance with observed sources
+      const builder = new ProvenanceDecisionBuilder();
+
+      // Record credential source (proof claim itself)
+      builder
+        .recordCredentialSource(proofId, "PROOF_CLAIM")
+        .setPolicyVersion(VERIFICATION_PROVENANCE_SCHEMA_VERSION);
+
+      // Record contract observation if checked
+      if (contractStatus?.checked) {
+        builder.recordContractObservation(
+          contractStatus.transactionHash || "unknown",
+          contractStatus.valid ?? false,
+          contractStatus.revoked ?? false,
+        );
+      }
+
+      // Determine failure reason if verification failed
+      let failureReason: string | undefined;
+      if (verificationResult === VerificationResult.EXPIRED) {
+        failureReason = "PROOF_EXPIRATION_DETECTED";
+      } else if (verificationResult === VerificationResult.REVOKED) {
+        failureReason = "PROOF_REVOCATION_DETECTED";
+      } else if (verificationResult === VerificationResult.INVALID_SIGNATURE) {
+        failureReason = "CREDENTIAL_MISMATCH";
+      } else if (verificationResult === VerificationResult.UNVERIFIED_ISSUER) {
+        failureReason = "ANCHORING_INCOMPLETE";
+      } else if (verificationResult === VerificationResult.UNKNOWN_PROOF) {
+        failureReason = "PROOF_NOT_FOUND";
+      }
+
+      // Build complete provenance input
+      const provenanceInput = builder.build(
+        proofId,
+        proofStatus,
+        verificationResult,
+        credential,
+        contractStatus,
+        failureReason,
+        undefined, // No boundary context for basic verification
+      );
+
+      // Record provenance (fail-open: errors don't block verification)
+      await this.verificationProvenanceService.recordProvenance(provenanceInput);
+    } catch (error) {
+      // Log but don't throw; provenance recording is advisory
+      this.logger.debug(
+        `Failed to record verification provenance for proof ${proofId}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 }
