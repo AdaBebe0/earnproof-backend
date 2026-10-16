@@ -82,6 +82,8 @@ enum IssuerAddressRotationStatus {
   SUBMITTED
   CONFIRMED
   FAILED
+}
+
 enum PaymentSyncCheckpointStatus {
   VERIFIED
   DIVERGED
@@ -163,6 +165,9 @@ enum ApiKeyScope {
   PROOF_READ
   PROOF_VERIFY
 
+  // Offline bundles (bounded offline verification)
+  BUNDLES_CREATE
+
   // Payment management and reading
   PAYMENT_READ
   PAYMENT_WRITE
@@ -183,6 +188,7 @@ enum IdempotencyStatus {
   PENDING
   COMPLETED
   FAILED
+  CANCELLED
 }
 
 enum WalletRotationStatus {
@@ -235,64 +241,6 @@ enum ConsentAction {
   WITHDRAW
 }
 
-enum InvitationDeliveryOutcome {
-  SENT
-  BOUNCED
-  COMPLAINT
-  SUPPRESSED
-  RATE_LIMITED
-  FAILED
-}
-
-enum InvitationOverrideReason {
-  COMPLIANCE_REVIEW
-  CUSTOMER_REQUEST
-  FRAUD_INVESTIGATION
-  TECHNICAL_RECOVERY
-  POLICY_EXCEPTION
-model ApiKey {
-  id           String   @id @default(uuid())
-  key          String   @unique
-  name         String
-  organization String
-  allowlistCidrs String[] @default([])
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
-}
-
-model SecurityNotificationPreference {
-  id             String   @id @default(uuid())
-  userId         String?
-  organizationId String?
-  category       String
-  enabled        Boolean  @default(true)
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
-
-  @@unique([userId, organizationId, category])
-}
-
-model SecurityNotificationOutbox {
-  id             String   @id @default(uuid())
-  eventId        String
-  category       String
-  mandatory      Boolean  @default(false)
-  payload        Json
-  status         String   @default("PENDING") // PENDING, DELIVERED, FAILED
-  attempts       Int      @default(0)
-  nextAttemptAt  DateTime @default(now())
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
-}
-
-model WebhookEndpoint {
-  id                 String   @id @default(uuid())
-  url                String
-  secret             String
-  concurrencyLimit   Int      @default(5)
-  isPartitionOrdered Boolean  @default(true)
-  enabled            Boolean  @default(true)
-  createdAt          DateTime @default(now())
 enum MembershipImportStatus {
   PENDING
   PROCESSING
@@ -327,30 +275,34 @@ enum WebhookCircuitState {
 }
 
 model User {
-  id                 String          @id @default(cuid())
-  walletAddress      String          @unique
-  walletHash         String          @unique
-  role               UserRole        @default(WORKER)
-  status             ResourceStatus  @default(ACTIVE)
+  id                      String                 @id @default(cuid())
+  walletAddress           String                 @unique
+  walletHash              String                 @unique
+  role                    UserRole               @default(WORKER)
+  status                  ResourceStatus         @default(ACTIVE)
   /// Optional self-managed display label. The only profile field a user may edit.
-  displayName        String?         @db.VarChar(64)
-  createdAt          DateTime        @default(now())
-  updatedAt          DateTime        @updatedAt
-  lastLoginAt        DateTime?
-  organizations      Organization[]
-  payments           Payment[]
-  paymentSyncCheckpoint PaymentSyncCheckpoint?
-  trustedSources     TrustedSource[]
-  proofs             Proof[]
-  createdApiKeys     ApiKey[]
-  sessions           AuthSession[]
-  walletRotations    WalletRotation[]
-  organizationMemberships OrganizationMember[] @relation("organizationMemberships")
-  paymentBackfillJobs PaymentBackfillJob[]
-  organizationMemberships OrganizationMember[]
-  createdImportJobs  MembershipImportJob[] @relation("CreatedImportJobs")
-  createdAccessReviews AccessReviewCampaign[] @relation("CreatedAccessReviews")
-  reviewedAccessEntries AccessReviewEntry[] @relation("ReviewedAccessEntries")
+  displayName             String?                @db.VarChar(64)
+  createdAt               DateTime               @default(now())
+  updatedAt               DateTime               @updatedAt
+  lastLoginAt             DateTime?
+  organizations           Organization[]
+  payments                Payment[]
+  paymentSyncCheckpoint   PaymentSyncCheckpoint?
+  trustedSources          TrustedSource[]
+  proofs                  Proof[]
+  createdApiKeys          ApiKey[]
+  sessions                AuthSession[]
+  walletRotations         WalletRotation[]
+  organizationMemberships OrganizationMember[]   @relation("organizationMemberships")
+  paymentBackfillJobs     PaymentBackfillJob[]
+  createdImportJobs       MembershipImportJob[]  @relation("CreatedImportJobs")
+  createdAccessReviews    AccessReviewCampaign[] @relation("CreatedAccessReviews")
+  reviewedAccessEntries   AccessReviewEntry[]    @relation("ReviewedAccessEntries")
+  consentRecords          ConsentRecord[]
+  paymentCheckpointHealthSnapshots PaymentCheckpointHealthSnapshot[]
+  proofExpirationReminderPreference ProofExpirationReminderPreference?
+  proofExpirationReminderDeliveries ProofExpirationReminderDelivery[]
+  sessionRiskEvents       SessionRiskEvent[]
 
   @@index([walletHash])
   @@index([status])
@@ -372,35 +324,25 @@ model WalletChallenge {
 }
 
 /// Persisted, revocable authentication session.
-/// Only a SHA-256 hash of the opaque bearer token is stored â€” the raw token is never
+/// Only a SHA-256 hash of the opaque bearer token is stored — the raw token is never
 /// written to the database or to any application log.
 model AuthSession {
   id                String       @id @default(cuid())
   /// SHA-256 hex digest of the raw opaque session token.
-  tokenHash   String       @unique
-  userId      String
-  user        User      @relation(fields: [userId], references: [id])
-  /// Wallet identity (User.walletHash) the session was issued to. A session
-  /// whose wallet no longer matches the account is refused. Null for sessions
-  /// issued before wallet rotation existed.
-  walletHash  String?
-  createdAt   DateTime  @default(now())
-  expiresAt   DateTime
-  lastUsedAt  DateTime?
-  tokenHash          String    @unique
-  userId             String
-  user               User      @relation(fields: [userId], references: [id])
-  createdAt          DateTime  @default(now())
-  expiresAt          DateTime
-  lastUsedAt         DateTime?
   tokenHash         String       @unique
   userId            String
   user              User         @relation(fields: [userId], references: [id])
+  /// Wallet identity (User.walletHash) the session was issued to. A session
+  /// whose wallet no longer matches the account is refused. Null for sessions
+  /// issued before wallet rotation existed.
+  walletHash        String?
   createdAt         DateTime     @default(now())
   expiresAt         DateTime
   lastUsedAt        DateTime?
-  /// Set when the session is explicitly revoked (logout or rotation).
   revokedAt         DateTime?
+  deviceLabel       String?
+  firstSeenAt       DateTime  @default(now())
+  lastSeenAt        DateTime  @default(now())
   /// Optional device fingerprint for session inventory (e.g., user-agent hash, IP hash).
   deviceFingerprint String?
   /// Optional reason for revocation (e.g., "REMOTE_REVOCATION", "DEVICE_LOSS").
@@ -447,59 +389,67 @@ model WalletRotation {
 }
 
 model Organization {
-  id          String         @id @default(cuid())
-  name        String
-  slug        String         @unique
-  website     String?
-  status      ResourceStatus  @default(PENDING)
-  revision    Int             @default(0)
-  createdById String
-  createdBy   User            @relation(fields: [createdById], references: [id])
-  createdAt   DateTime        @default(now())
-  updatedAt   DateTime        @updatedAt
+  id                   String                    @id @default(cuid())
+  name                 String
+  slug                 String                    @unique
+  website              String?
+  status               ResourceStatus            @default(PENDING)
+  revision             Int                       @default(0)
+  createdById          String
+  createdBy            User                      @relation(fields: [createdById], references: [id])
+  createdAt            DateTime                  @default(now())
+  updatedAt            DateTime                  @updatedAt
   /// Set while the organization is archived. Every privileged operation on
   /// the organization and its keys, webhooks and issuers is refused while set.
   /// Cleared on restore; kept on deletion.
-  archivedAt  DateTime?
+  archivedAt           DateTime?
   /// Set while a legal hold forbids deletion. Released explicitly.
-  legalHoldAt DateTime?
+  legalHoldAt          DateTime?
   /// Bounded case or matter reference for the legal hold.
-  legalHoldReference String?  @db.VarChar(64)
+  legalHoldReference   String?                   @db.VarChar(64)
   /// Set when the organization is deleted. The row survives as a tombstone
   /// so issuers, attestations and audit records keep resolving.
-  deletedAt   DateTime?
-  createdBy   User           @relation(fields: [createdById], references: [id])
-  createdAt   DateTime       @default(now())
-  updatedAt   DateTime       @updatedAt
-  issuers     Issuer[]
-  apiKeys     ApiKey[]
-  webhooks    Webhook[]
-  quotaUsage  OrganizationQuotaUsage[]
-  auditLogs   AuditLog[]
-  members     OrganizationMember[]
-  idempotencyRecords IdempotencyRecord[]
-  proofSharingEvents ProofSharingEvent[]
-  consentRecords     ConsentRecord[]
-  disclosureReceipts DisclosureReceipt[]
-  membershipImports MembershipImportJob[]
-  accessReviews AccessReviewCampaign[]
-  credentialVerificationKeyTrustPins CredentialVerificationKeyTrustPin[]
+  deletedAt            DateTime?
+  issuers              Issuer[]
+  apiKeys              ApiKey[]
+  webhooks             Webhook[]
+  quotaUsage           OrganizationQuotaUsage[]
+  auditLogs            AuditLog[]
+  members              OrganizationMember[]
+  idempotencyRecords   IdempotencyRecord[]
+  proofSharingEvents   ProofSharingEvent[]
+  consentRecords       ConsentRecord[]
+  disclosureReceipts   DisclosureReceipt[]
+  membershipImports    MembershipImportJob[]
+  accessReviews        AccessReviewCampaign[]
+  supportedAssets      SupportedAsset[]
+  disputes             ProofDispute[]
+  exportJobs           OrganizationExportJob[]
+  residencyPolicies    DataResidencyPolicy[]
+  residencyAssignments DataResidencyAssignment[]
+  schemaImportJobs     SchemaImportJob[]
+  supportAccessGrants  SupportAccessGrant[]
+  paymentCheckpointHealthSnapshots PaymentCheckpointHealthSnapshot[]
+  transactionConfirmations TransactionConfirmation[]
+  domainEventsOutbox       DomainEventOutbox[]
+  bulkAdminJobs        BulkAdminJob[]
+  securityNotifications SecurityNotification[]
 
   @@index([status])
   @@index([archivedAt])
 }
 
 model OrganizationMember {
-  id             String                 @id @default(cuid())
-  organizationId String
-  organization   Organization           @relation(fields: [organizationId], references: [id], onDelete: Restrict)
-  userId         String
-  user           User                   @relation("organizationMemberships", fields: [userId], references: [id], onDelete: Restrict)
-  role           OrganizationMemberRole
-  status         ResourceStatus         @default(ACTIVE)
-  joinedAt       DateTime?
-  createdAt      DateTime                  @default(now())
-  updatedAt      DateTime                  @updatedAt
+  id                  String                 @id @default(cuid())
+  organizationId      String
+  organization        Organization           @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  userId              String
+  user                User                   @relation("organizationMemberships", fields: [userId], references: [id], onDelete: Restrict)
+  role                OrganizationMemberRole
+  status              ResourceStatus         @default(ACTIVE)
+  joinedAt            DateTime?
+  createdAt           DateTime               @default(now())
+  updatedAt           DateTime               @updatedAt
   accessReviewEntries AccessReviewEntry[]
 
   @@unique([organizationId, userId])
@@ -528,6 +478,20 @@ model IdempotencyRecord {
   responseStatusCode Int?
   /// Timestamp when this record should be considered expired (for cleanup).
   expiresAt          DateTime
+  /// Typed operation name (e.g. PROOF_CREATE, PAYMENT_SYNC).
+  operationType      String?           @db.VarChar(64)
+  /// Target resource type associated with this operation.
+  resourceType       String?           @db.VarChar(64)
+  /// Target resource identifier.
+  resourceId         String?           @db.VarChar(128)
+  /// Read-after-write consistency token issued on completion.
+  consistencyToken   String?
+  /// Number of invocation attempts under this key.
+  attemptCount       Int               @default(1)
+  /// Reason when cancelled.
+  cancellationReason String?
+  /// Additional operation metadata.
+  metadata           Json?
   createdAt          DateTime          @default(now())
   updatedAt          DateTime          @updatedAt
 
@@ -535,46 +499,38 @@ model IdempotencyRecord {
   /// Also serves as the compound index for fast lookups.
   @@unique([organizationId, idempotencyKey])
   @@index([organizationId, expiresAt])
+  @@index([organizationId, resourceType, resourceId])
 }
 
 model Issuer {
-  id                      String          @id @default(cuid())
+  id                      String                   @id @default(cuid())
   organizationId          String
-  organization            Organization    @relation(fields: [organizationId], references: [id])
-  stellarAddress          String          @unique
-  status                  ResourceStatus  @default(PENDING)
-  revision                Int             @default(0)
-  metadataHash            String?
-  publicMetadata          Json?
-  contractSyncState       String          @default("PENDING")
-  contractSyncedStatus    ResourceStatus?
-  contractTransactionHash String?
-  contractSyncedAt         DateTime?
-  contractSyncError        String?
-  verifiedAt      DateTime?
-  suspendedAt     DateTime?
-  revokedAt       DateTime?
+  organization            Organization             @relation(fields: [organizationId], references: [id])
+  stellarAddress          String                   @unique
+  status                  ResourceStatus           @default(PENDING)
   /// Optimistic-concurrency revision, incremented by every administrative
   /// change. Address rotation requests must name the revision they were based
   /// on, so a command built from a stale view of the issuer is rejected.
-  revision        Int             @default(0)
-  createdAt       DateTime        @default(now())
-  updatedAt       DateTime        @updatedAt
-  trustedSources  TrustedSource[]
-  attestations    Attestation[]
-  addressRotations IssuerAddressRotation[]
-  addressHistory   IssuerAddressHistory[]
-  invoiceSettlements ProofInvoiceSettlement[]
+  revision                Int                      @default(0)
+  metadataHash            String?
+  publicMetadata          Json?
+  contractSyncState       String                   @default("PENDING")
+  contractSyncedStatus    ResourceStatus?
+  contractTransactionHash String?
   contractSyncedAt        DateTime?
   contractSyncError       String?
   verifiedAt              DateTime?
   suspendedAt             DateTime?
   revokedAt               DateTime?
-  createdAt               DateTime        @default(now())
-  updatedAt               DateTime        @updatedAt
+  createdAt               DateTime                 @default(now())
+  updatedAt               DateTime                 @updatedAt
   trustedSources          TrustedSource[]
   attestations            Attestation[]
-  credentialVerificationKeyTrustPins CredentialVerificationKeyTrustPin[]
+  addressRotations        IssuerAddressRotation[]
+  addressHistory          IssuerAddressHistory[]
+  policyCommitments       IssuerPolicyCommitment[]
+  invoiceSettlements      ProofInvoiceSettlement[]
+  signingKeys             IssuerSigningKey[]
 
   @@index([organizationId])
   @@index([status])
@@ -629,39 +585,103 @@ model IssuerAddressHistory {
   @@index([stellarAddress])
 }
 
-model SupportedAsset {
-  id        String         @id @default(cuid())
-  assetKey  String         @unique
-  code      String
-  issuer    String?
-  network   String
-  status    ResourceStatus @default(ACTIVE)
-  createdAt DateTime       @default(now())
-  updatedAt DateTime       @updatedAt
+/// Immutable audit trail of issuer policy versions with deterministic commit hashes.
+/// Tracks exact issuer policy commitment version effective at proof issuance (#307).
+/// Captures issuer state (signing key, metadata, address) at each policy change.
+///
+/// Pattern: Similar to SupportedAsset → assetPolicySnapshot. Each issuer change
+/// creates a new commitment row; proofs reference the commitment by ID, enabling
+/// proof verification even after the issuer policy changes.
+model IssuerPolicyCommitment {
+  id                String   @id @default(cuid())
+  issuerId          String
+  issuer            Issuer   @relation(fields: [issuerId], references: [id])
+  
+  /// Version tracking: incremental per issuer. Monotonically increasing.
+  /// Combined with issuerId, enforces: reordered events cannot regress versions.
+  version           Int
+  
+  /// Commitment identification
+  /// SHA-256 hash of canonicalized policy inputs: "sha256:<hex>"
+  /// Deterministic: identical policy → identical hash → prevents duplicate rows.
+  commitment        String
+  /// SHA-256 hash of the canonical policy JSON snapshot for deduplication.
+  policyInputsHash  String
+  
+  /// Policy snapshot (immutable after creation)
+  /// Complete issuer state at this version: {signingKeyVersionId, address, metadata, ...}
+  /// Frozen at issuance time; proofs reference this snapshot, enabling verification
+  /// even if the live Issuer row later changes/deletes.
+  policySnapshot    Json
+  
+  /// Lifecycle markers
+  effectiveAt       DateTime
+  supersededAt      DateTime?  // NULL = current active commitment
+  
+  /// Audit & correlation
+  /// Links to domain event or audit log entry for full change history
+  correlationId     String?
+  createdAt         DateTime   @default(now())
+  
+  // Proofs that reference this commitment
+  proofs            Proof[]    @relation("ProofIssuerPolicyCommitment")
 
+  /// Unique constraints
+  /// Prevents version gaps and regressions: (issuerId, version) must be unique
+  @@unique([issuerId, version])
+  /// Prevents duplicate commits: commitment hash is globally unique
+  @@unique([commitment])
+  
+  /// Indexes for common queries
+  /// Current commitment: WHERE issuerId = ? AND supersededAt IS NULL
+  @@index([issuerId, effectiveAt])
+  /// Historical queries: WHERE issuerId = ? AND supersededAt IS NOT NULL
+  @@index([issuerId, supersededAt])
+  /// Lookups by commitment: WHERE commitment = ?
+  @@index([commitment])
+}
+
+model SupportedAsset {
+  id             String         @id @default(cuid())
+  organizationId String
+  organization   Organization   @relation(fields: [organizationId], references: [id])
+  assetKey       String
+  code           String
+  issuer         String?
+  network        String
+  decimals       Int            @default(7)
+  status         ResourceStatus @default(ACTIVE)
+  revision       Int            @default(0)
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  @@unique([organizationId, assetKey])
+  @@index([organizationId, status])
   @@index([network, status])
 }
 
 model Payment {
-  id                     String                @id @default(cuid())
-  userId                 String
-  user                   User                   @relation(fields: [userId], references: [id])
-  network                String?
-  stellarTransactionHash String
-  operationId            String                 @unique
+  id                          String                         @id @default(cuid())
+  userId                      String
+  user                        User                           @relation(fields: [userId], references: [id])
+  network                     String?
+  stellarTransactionHash      String
+  operationId                 String                         @unique
   /// Legacy plaintext. Never written by current code; cleared by the address
   /// backfill once the ciphertext is verified. Drop in a later release.
-  sourceAddress          String?
+  sourceAddress               String?
   /// Legacy plaintext; see sourceAddress.
-  destinationAddress     String?
+  destinationAddress          String?
   /// aenc:v<N>:... AES-256-GCM ciphertext, field-bound. See protected-address.ts.
   sourceAddressEncrypted      String?
   destinationAddressEncrypted String?
   /// hmac:v<N>:... keyed lookup token for equality queries on the sender.
   sourceAddressLookup    String?
   operationIndex         Int?
-  sourceAddress          String
-  destinationAddress     String
+  pagingToken            String?
+  ledgerSequence         Int?
+  finalityHoldAt         DateTime?
+  finalityHoldReason     String?
   assetCode              String
   assetIssuer            String?
   amountEncrypted        String?
@@ -669,17 +689,14 @@ model Payment {
   /// Versioned memo (v2): {version, type, ciphertext} or {version, type: "none", omitted?}.
   /// Plaintext is never stored. See src/payments/payment-memo.ts and docs/payment-memos.md.
   memo                   Json?
-  classification         PaymentClassification  @default(UNKNOWN)
-  isEligible             Boolean                @default(false)
-  createdAt              DateTime               @default(now())
-  updatedAt              DateTime               @updatedAt
-  invoiceSettlement      ProofInvoiceSettlement?
   classification         PaymentClassification @default(UNKNOWN)
   classificationRevision Int                   @default(1)
   isEligible             Boolean               @default(false)
   createdAt              DateTime              @default(now())
   updatedAt              DateTime              @updatedAt
+  invoiceSettlement      ProofInvoiceSettlement?
   classificationHistory  PaymentClassificationHistory[]
+  eligibilityDecisions   PaymentEligibilityDecision[]
 
   // Canonical identity of an indexed payment. A transaction hash alone is not
   // enough — one transaction can hold several payment operations — so network,
@@ -696,28 +713,59 @@ model Payment {
   @@index([classification])
 }
 
+/// One evaluation of a payment's eligibility under a versioned policy.
+/// Exactly one decision per payment is active; superseded decisions are kept
+/// for audit. Stores derived factors and reason codes only: never a memo,
+/// an amount, or a counterparty address.
+model PaymentEligibilityDecision {
+  id            String    @id @default(cuid())
+  paymentId     String
+  payment       Payment   @relation(fields: [paymentId], references: [id])
+  /// Denormalised owner, so owner-scoped reads never need a join.
+  userId        String
+  policyVersion String
+  eligible      Boolean
+  factors       Json
+  reasonCodes   String[]
+  /// sha256 of (policyVersion, factors). Equal hashes mean an identical decision.
+  inputsHash    String
+  trigger       String
+  evaluatedAt   DateTime
+  supersededAt  DateTime?
+  /// TRUE for the active decision, NULL once superseded. The unique index on
+  /// (paymentId, isActive) lets PostgreSQL itself refuse a second active
+  /// decision, because NULLs never collide.
+  isActive      Boolean?
+  createdAt     DateTime  @default(now())
+
+  @@unique([paymentId, isActive])
+  @@index([paymentId, evaluatedAt])
+  @@index([userId, isActive])
+  @@index([policyVersion, isActive])
+}
+
 /// Last verified position in a wallet's Horizon payments feed.
 /// Records the ledger sequence and hash the checkpoint was taken at, so a later
 /// sync can prove Horizon still agrees before it trusts anything past it.
 model PaymentSyncCheckpoint {
-  id               String                      @id @default(cuid())
-  userId           String                      @unique
-  user             User                        @relation(fields: [userId], references: [id])
-  pagingToken      String
-  operationId      String
-  transactionHash  String
-  ledgerSequence   Int
-  ledgerHash       String
-  status           PaymentSyncCheckpointStatus @default(VERIFIED)
-  divergenceReason String?
-  divergedAt       DateTime?
+  id                   String                      @id @default(cuid())
+  userId               String                      @unique
+  user                 User                        @relation(fields: [userId], references: [id])
+  pagingToken          String
+  operationId          String
+  transactionHash      String
+  ledgerSequence       Int
+  ledgerHash           String
+  status               PaymentSyncCheckpointStatus @default(VERIFIED)
+  divergenceReason     String?
+  divergedAt           DateTime?
   /// Where a bounded reconciliation read stopped; the next sync continues from here.
   reconciliationCursor String?
-  verifiedAt       DateTime
+  verifiedAt           DateTime
   /// Optimistic concurrency guard: every transition must match the version it read.
-  version          Int                         @default(0)
-  createdAt        DateTime                    @default(now())
-  updatedAt        DateTime                    @updatedAt
+  version              Int                         @default(0)
+  createdAt            DateTime                    @default(now())
+  updatedAt            DateTime                    @updatedAt
 
   @@index([status])
 }
@@ -741,12 +789,12 @@ model TrustedSource {
 }
 
 model Proof {
-  id                      String                @id @default(cuid())
+  id                      String                  @id @default(cuid())
   userId                  String
-  user                    User                  @relation(fields: [userId], references: [id])
+  user                    User                    @relation(fields: [userId], references: [id])
   proofType               ProofType
   schemaVersion           String
-  status                  ProofStatus           @default(ACTIVE)
+  status                  ProofStatus             @default(ACTIVE)
   network                 String
   assetCode               String
   assetIssuer             String?
@@ -754,7 +802,7 @@ model Proof {
   periodEnd               DateTime?
   expiresAt               DateTime
   commitment              String?
-  credentialHash          String                @unique
+  credentialHash          String                  @unique
   contractTransactionHash String?
   // Snapshot of the SupportedAsset policy that was live-validated at issuance
   // time. Intentionally NOT a foreign key: the registry row may later be
@@ -763,6 +811,14 @@ model Proof {
   // (possibly since-changed) live SupportedAsset row.
   assetPolicyId           String?
   assetPolicySnapshot     Json?
+  // Snapshot of the issuer policy commitment that was active at proof issuance.
+  // Similar to assetPolicySnapshot: enables offline verification even if the
+  // issuer policy later changes. Null for proofs issued before this feature.
+  issuerPolicyCommitmentId String?
+  issuerPolicyCommitment  IssuerPolicyCommitment? @relation("ProofIssuerPolicyCommitment", fields: [issuerPolicyCommitmentId], references: [id])
+  // Complete issuer policy snapshot at issuance: {signingKeyVersionId, address, metadata, ...}
+  // Immutable after creation; used for offline verification and audit.
+  issuerPolicySnapshot    Json?
   revokedAt               DateTime?
   /// Class of principal that revoked this proof. Null until revoked.
   revokedByType           RevocationActorType?
@@ -777,20 +833,18 @@ model Proof {
   /// Optional fixed-size (sha256) commitment to off-chain revocation
   /// evidence, in the same "sha256:<hex>" form as `commitment`.
   revocationEvidenceHash  String?
-  createdAt               DateTime              @default(now())
-  updatedAt               DateTime              @updatedAt
   // Renewal / supersession chain. `supersedesId` is unique so a predecessor
   // can have at most one successor: concurrent renewals race on this
   // constraint and exactly one wins, which is what prevents forks.
-  supersedesId            String?             @unique
-  supersedes              Proof?              @relation("ProofSupersession", fields: [supersedesId], references: [id])
-  supersededBy            Proof?              @relation("ProofSupersession")
+  supersedesId            String?                 @unique
+  supersedes              Proof?                  @relation("ProofSupersession", fields: [supersedesId], references: [id])
+  supersededBy            Proof?                  @relation("ProofSupersession")
   supersededAt            DateTime?
   // Hash of the renewal request that produced this successor, so a retried
   // identical request returns the same successor instead of a conflict.
   renewalRequestHash      String?
-  createdAt               DateTime            @default(now())
-  updatedAt               DateTime            @updatedAt
+  createdAt               DateTime                @default(now())
+  updatedAt               DateTime                @updatedAt
   claim                   ProofClaim?
   verificationEvents      VerificationEvent[]
   anchoringIntents        AnchoringIntent[]
@@ -798,13 +852,15 @@ model Proof {
   invoiceSettlement       ProofInvoiceSettlement?
   sharingEvents           ProofSharingEvent[]
   disclosureReceipts      DisclosureReceipt[]
-  provenances             VerificationProvenance[]
+  disputes                ProofDispute[]
+  expirationReminderDeliveries ProofExpirationReminderDelivery[]
 
   @@index([userId, status])
   @@index([userId, createdAt, id])
   @@index([proofType])
   @@index([expiresAt])
   @@index([status, expiresAt])
+  @@index([issuerPolicyCommitmentId])
 }
 
 model ProofClaim {
@@ -851,6 +907,10 @@ model Attestation {
   type                 AttestationType
   schemaVersion        String          @default("1.0")
   signingKeyVersionId  String          @default("1")
+  /// Policy version captured at attestation issuance time, for versioned proofs.
+  /// Enables proofs to reference the exact attestation policy state when issued.
+  /// Null for attestations issued before this feature.
+  policyVersion        String?
   status               ResourceStatus  @default(ACTIVE)
   signedPayload        Json
   expiresAt            DateTime?
@@ -1049,14 +1109,14 @@ model ApiKey {
   prefix           String                  @db.VarChar(8)
   keyHash          String                  @unique
   scopeAssignments ApiKeyScopeAssignment[] @relation("apiKeyScopeAssignments")
-  quotas         ApiKeyQuota[]
-  status         ResourceStatus  @default(ACTIVE)
-  lastUsedAt     DateTime?
-  rotatedAt      DateTime?
-  revokedAt      DateTime?
-  expiresAt      DateTime?
-  createdAt      DateTime        @default(now())
-  usageSummaries ApiKeyUsageSummary[]
+  quotas           ApiKeyQuota[]
+  status           ResourceStatus          @default(ACTIVE)
+  lastUsedAt       DateTime?
+  rotatedAt        DateTime?
+  revokedAt        DateTime?
+  expiresAt        DateTime?
+  createdAt        DateTime                @default(now())
+  usageSummaries   ApiKeyUsageSummary[]
 
   @@index([organizationId, status])
   @@index([prefix])
@@ -1072,22 +1132,21 @@ model ApiKeyScopeAssignment {
 }
 
 model Webhook {
-  id               String            @id @default(cuid())
-  organizationId   String
-  organization     Organization      @relation(fields: [organizationId], references: [id])
-  url              String
-  secretEncrypted  String
-  events           Json
-  /// Webhook payload schema version this endpoint is pinned to. Existing
-  /// endpoints keep receiving the version they subscribed with until they opt
-  /// in to a newer one; see docs/webhook-payloads.md.
-  payloadVersion   String            @default("1")
-  status           ResourceStatus    @default(ACTIVE)
-  revision         Int               @default(0)
-  createdAt        DateTime          @default(now())
-  updatedAt        DateTime          @updatedAt
-  deliveries       WebhookDelivery[]
-  circuitBreaker   WebhookCircuitState?
+  id                 String                     @id @default(cuid())
+  organizationId     String
+  organization       Organization               @relation(fields: [organizationId], references: [id])
+  url                String
+  secretEncrypted    String
+  events             Json
+  status             ResourceStatus             @default(ACTIVE)
+  mtlsRequired       Boolean                    @default(false)
+  payloadVersion     String                     @default("1")
+  revision           Int                        @default(0)
+  createdAt          DateTime                   @default(now())
+  updatedAt          DateTime                   @updatedAt
+  deliveries         WebhookDelivery[]
+  clientCertificates WebhookClientCertificate[]
+  circuitBreaker     WebhookCircuit?
 
   @@index([organizationId, status])
 }
@@ -1099,24 +1158,31 @@ enum WebhookDeliveryStatus {
 }
 
 model WebhookDelivery {
-  id            String                @id @default(cuid())
-  webhookId     String
-  webhook       Webhook               @relation(fields: [webhookId], references: [id])
-  eventType     String
-  eventId       String
-  payload       Json
-  attempt       Int                   @default(1)
-  status        WebhookDeliveryStatus @default(PENDING)
-  statusCode    Int?
-  responseBody  String?
-  durationMs    Int?
-  failureReason String?
-  replayOf      String?
-  replayedBy    String?
-  replayKey     String?               @unique
-  deliveredAt   DateTime?
-  nextRetryAt   DateTime?
-  createdAt     DateTime              @default(now())
+  id               String                @id @default(cuid())
+  webhookId        String
+  webhook          Webhook               @relation(fields: [webhookId], references: [id])
+  eventType        String
+  eventId          String
+  payload          Json
+  schemaVersion    String                @default("1")
+  payloadBody      String                @default("")
+  attempt          Int                   @default(1)
+  status           WebhookDeliveryStatus @default(PENDING)
+  statusCode       Int?
+  responseBody     String?
+  durationMs       Int?
+  failureReason    String?
+  replayOf         String?
+  replayedBy       String?
+  replayKey        String?               @unique
+  deliveredAt      DateTime?
+  nextRetryAt      DateTime?
+  deadLetteredAt   DateTime?
+  deadLetterReason String?
+  redrivenAt       DateTime?
+  redrivenBy       String?
+  redriveReason    String?
+  createdAt        DateTime              @default(now())
 
   @@index([webhookId, createdAt])
   @@index([eventId])
@@ -1125,14 +1191,14 @@ model WebhookDelivery {
 }
 
 model AuditLog {
-  id             String        @id @default(cuid())
-  actorType      String
-  actorId        String?
-  action         String
-  resourceType   String
-  resourceId     String?
-  metadata       Json?
-  createdAt      DateTime      @default(now())
+  id           String   @id @default(cuid())
+  actorType    String
+  actorId      String?
+  action       String
+  resourceType String
+  resourceId   String?
+  metadata     Json?
+  createdAt    DateTime @default(now())
 
   // Tamper-evidence chain fields. Every record belongs to exactly one
   // hash chain, partitioned by `chainKey` (the organization id, or the
@@ -1150,11 +1216,19 @@ model AuditLog {
   prevHash       String?
   hash           String        @default("")
 
+  // Correlation graph fields (#283)
+  correlationId  String?
+  parentId       String?
+  parent         AuditLog?     @relation("AuditLogLineage", fields: [parentId], references: [id])
+  children       AuditLog[]    @relation("AuditLogLineage")
+
   @@unique([chainKey, sequence])
   @@index([actorType, actorId])
   @@index([resourceType, resourceId])
   @@index([createdAt])
   @@index([organizationId, createdAt])
+  @@index([organizationId, correlationId])
+  @@index([parentId])
 }
 
 /// Per-chain append cursor for the AuditLog hash chain.
@@ -1201,7 +1275,6 @@ model AnchoringIntent {
   @@index([proofId])
   @@index([status, quarantineDecision])
 }
-
 
 enum ProofShareScope {
   /// Verification result and public proof metadata only.
@@ -1251,6 +1324,8 @@ model OrganizationQuotaUsage {
 
   @@id([organizationId, quota, windowStart])
   @@index([windowStart])
+}
+
 model AuthAuditEvent {
   id                 String        @id @default(cuid())
   eventType          AuthEventType
@@ -1264,6 +1339,210 @@ model AuthAuditEvent {
   @@index([walletHash, createdAt])
   @@index([eventType, createdAt])
   @@index([createdAt])
+}
+
+// ---------------------------------------------------------------------------
+// Privileged operation approval queue (#313)
+// ---------------------------------------------------------------------------
+
+enum ApprovalRequestStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  CANCELLED
+  EXPIRED
+  EXECUTED
+}
+
+/// A request to perform a privileged, side-effecting operation. Requires an
+/// explicit approval decision from someone other than the requester before
+/// the operation may be executed, and every decision is terminal.
+model ApprovalRequest {
+  id                  String                @id @default(cuid())
+  operationType       String
+  /// Canonical hash of `payload`, used so callers can detect a changed
+  /// request before approving it.
+  payloadHash         String
+  payload             Json
+  requestedById       String
+  status              ApprovalRequestStatus @default(PENDING)
+  decidedById         String?
+  decidedAt           DateTime?
+  decisionReason      String?
+  /// Set the moment execution claims this request, atomically, so a
+  /// concurrently-triggered execution cannot run the operation twice.
+  executionLeaseToken String?               @unique
+  executionLeasedAt   DateTime?
+  executedAt          DateTime?
+  expiresAt           DateTime
+  createdAt           DateTime              @default(now())
+  updatedAt           DateTime              @updatedAt
+
+  @@index([status, expiresAt])
+  @@index([requestedById])
+  @@index([operationType, status])
+}
+
+// ---------------------------------------------------------------------------
+// Organization data residency policies (#317)
+// ---------------------------------------------------------------------------
+
+enum DataResidencyClass {
+  PAYMENT_DATA
+  PROOF_DATA
+  AUDIT_DATA
+  BACKUP_DATA
+  QUEUE_DATA
+}
+
+enum DataResidencyPolicyStatus {
+  ACTIVE
+  SUPERSEDED
+}
+
+/// A versioned, explicit allow-list of regions an organization permits for a
+/// given class of regulated data. Policies are never mutated in place —
+/// changing the allow-list creates a new version and supersedes the old one.
+model DataResidencyPolicy {
+  id             String                    @id @default(cuid())
+  organizationId String
+  organization   Organization              @relation(fields: [organizationId], references: [id])
+  dataClass      DataResidencyClass
+  /// JSON string array of allowed region codes. Explicit allow-list — there
+  /// is no implicit default region, so an unmapped data class is denied.
+  allowedRegions Json
+  version        Int
+  status         DataResidencyPolicyStatus @default(ACTIVE)
+  supersedesId   String?                   @unique
+  createdById    String
+  createdAt      DateTime                  @default(now())
+
+  @@unique([organizationId, dataClass, version])
+  @@index([organizationId, dataClass, status])
+}
+
+/// Tracks which region a concrete piece of org-scoped data (a write, export,
+/// backup, queued job, or deployment target) currently lives in, so policy
+/// changes can be checked against reality before they take effect.
+model DataResidencyAssignment {
+  id             String             @id @default(cuid())
+  organizationId String
+  organization   Organization       @relation(fields: [organizationId], references: [id])
+  dataClass      DataResidencyClass
+  resourceType   String
+  resourceId     String
+  region         String
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+
+  @@unique([organizationId, dataClass, resourceType, resourceId])
+  @@index([organizationId, dataClass, region])
+}
+
+// ---------------------------------------------------------------------------
+// Schema import validation with dry-run jobs (#320)
+// ---------------------------------------------------------------------------
+
+enum SchemaImportStatus {
+  UPLOADED
+  DRY_RUN_RUNNING
+  DRY_RUN_COMPLETE
+  APPROVED
+  APPLYING
+  APPLIED
+  REJECTED
+  FAILED
+}
+
+/// A bulk schema-metadata import. Upload and dry-run never mutate
+/// `SchemaDefinition`; only `apply`, gated on the exact reviewed hash, does.
+model SchemaImportJob {
+  id             String             @id @default(cuid())
+  organizationId String
+  organization   Organization       @relation(fields: [organizationId], references: [id])
+  status         SchemaImportStatus @default(UPLOADED)
+  rowCount       Int
+  uploadedById   String
+  /// Canonical hash of the normalized dry-run result. `apply` must be given
+  /// this exact value — it is the "reviewed hash" the caller approved.
+  canonicalHash  String?
+  conflictCount  Int                @default(0)
+  errorCount     Int                @default(0)
+  approvedById   String?
+  approvedAt     DateTime?
+  appliedAt      DateTime?
+  failureReason  String?
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+  rows           SchemaImportRow[]
+
+  @@index([organizationId, status])
+}
+
+/// One row of a schema import, with its normalization result from the
+/// dry-run phase. Rows are written during dry-run but never applied to
+/// `SchemaDefinition` until the job is approved and applied.
+model SchemaImportRow {
+  id             String          @id @default(cuid())
+  jobId          String
+  job            SchemaImportJob @relation(fields: [jobId], references: [id])
+  rowIndex       Int
+  schemaKey      String
+  version        String
+  definition     Json
+  normalizedHash String
+  conflict       Boolean         @default(false)
+  errors         Json?
+
+  @@unique([jobId, rowIndex])
+  @@index([jobId, conflict])
+}
+
+/// The applied, canonical schema metadata. Only written by
+/// `SchemaImportsService.apply`.
+model SchemaDefinition {
+  id          String   @id @default(cuid())
+  schemaKey   String
+  version     String
+  definition  Json
+  importJobId String?
+  createdAt   DateTime @default(now())
+
+  @@unique([schemaKey, version])
+  @@index([schemaKey])
+}
+
+// ---------------------------------------------------------------------------
+// Webhook mutual TLS authentication (#322)
+// ---------------------------------------------------------------------------
+
+enum WebhookCertificateStatus {
+  PENDING
+  ACTIVE
+  ROTATING
+  EXPIRED
+  REVOKED
+}
+
+/// A client certificate usable for mTLS webhook delivery. The private key is
+/// encrypted at rest with the same AEAD scheme used for webhook signing
+/// secrets and is never exposed through the API or logs.
+model WebhookClientCertificate {
+  id                  String                   @id @default(cuid())
+  webhookId           String
+  webhook             Webhook                  @relation(fields: [webhookId], references: [id])
+  certificatePem      String
+  privateKeyEncrypted String
+  fingerprintSha256   String                   @unique
+  status              WebhookCertificateStatus @default(PENDING)
+  notBefore           DateTime
+  notAfter            DateTime
+  activatedAt         DateTime?
+  retiredAt           DateTime?
+  createdAt           DateTime                 @default(now())
+
+  @@index([webhookId, status])
+  @@index([notAfter])
 }
 
 enum ApiKeyEndpointCategory {
@@ -1335,6 +1614,8 @@ model ContractDriftAcknowledgement {
   createdAt      DateTime @default(now())
 
   @@index([driftKey, expiresAt])
+}
+
 /// Immutable history of payment classification changes.
 /// Used for auditability and proof eligibility reconstruction.
 model PaymentClassificationHistory {
@@ -1400,20 +1681,20 @@ model MembershipImportResult {
 /// Periodic organization access review campaign.
 /// Captures membership snapshot for review decisions.
 model AccessReviewCampaign {
-  id               String                      @id @default(cuid())
-  organizationId   String
-  organization     Organization                @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  createdById      String
-  createdBy        User                        @relation("CreatedAccessReviews", fields: [createdById], references: [id])
-  name             String
-  description      String?
-  status           AccessReviewCampaignStatus  @default(OPEN)
-  snapshotVersion  Int
-  completedAt      DateTime?
-  cancelledAt      DateTime?
-  createdAt        DateTime                    @default(now())
-  updatedAt        DateTime                    @updatedAt
-  entries          AccessReviewEntry[]
+  id              String                     @id @default(cuid())
+  organizationId  String
+  organization    Organization               @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  createdById     String
+  createdBy       User                       @relation("CreatedAccessReviews", fields: [createdById], references: [id])
+  name            String
+  description     String?
+  status          AccessReviewCampaignStatus @default(OPEN)
+  snapshotVersion Int
+  completedAt     DateTime?
+  cancelledAt     DateTime?
+  createdAt       DateTime                   @default(now())
+  updatedAt       DateTime                   @updatedAt
+  entries         AccessReviewEntry[]
 
   @@index([organizationId, status])
   @@index([createdById, createdAt])
@@ -1423,22 +1704,22 @@ model AccessReviewCampaign {
 /// Individual review entries for organization members.
 /// Links to membership snapshot and tracks decisions.
 model AccessReviewEntry {
-  id               String                @id @default(cuid())
+  id               String                  @id @default(cuid())
   campaignId       String
-  campaign         AccessReviewCampaign  @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  campaign         AccessReviewCampaign    @relation(fields: [campaignId], references: [id], onDelete: Cascade)
   memberId         String
-  member           OrganizationMember    @relation(fields: [memberId], references: [id], onDelete: Restrict)
+  member           OrganizationMember      @relation(fields: [memberId], references: [id], onDelete: Restrict)
   snapshotRole     OrganizationMemberRole
   decision         AccessReviewDecision?
   recommendedRole  OrganizationMemberRole?
   reviewedById     String?
-  reviewedBy       User?                 @relation("ReviewedAccessEntries", fields: [reviewedById], references: [id])
+  reviewedBy       User?                   @relation("ReviewedAccessEntries", fields: [reviewedById], references: [id])
   reviewedAt       DateTime?
   appliedAt        DateTime?
-  conflictDetected Boolean               @default(false)
+  conflictDetected Boolean                 @default(false)
   notes            String?
-  createdAt        DateTime              @default(now())
-  updatedAt        DateTime              @updatedAt
+  createdAt        DateTime                @default(now())
+  updatedAt        DateTime                @updatedAt
 
   @@unique([campaignId, memberId])
   @@index([campaignId, decision])
@@ -1448,7 +1729,7 @@ model AccessReviewEntry {
 
 /// Webhook circuit breaker state per endpoint.
 /// Tracks failure counts and recovery windows.
-model WebhookCircuitState {
+model WebhookCircuit {
   id                    String              @id @default(cuid())
   webhookId             String              @unique
   webhook               Webhook             @relation(fields: [webhookId], references: [id], onDelete: Cascade)
@@ -1497,16 +1778,16 @@ model RecentAuthAssertion {
 /// Defines rate limits specific to each scope an API key can use.
 /// Supports unlimited (null limit), disabled (0 limit), and finite quotas.
 model ApiKeyQuota {
-  id             String      @id @default(cuid())
-  apiKeyId       String
-  apiKey         ApiKey      @relation(fields: [apiKeyId], references: [id], onDelete: Cascade)
-  scope          ApiKeyScope
+  id            String      @id @default(cuid())
+  apiKeyId      String
+  apiKey        ApiKey      @relation(fields: [apiKeyId], references: [id], onDelete: Cascade)
+  scope         ApiKeyScope
   /// Quota limit: null = unlimited, 0 = disabled, positive = requests per window
-  quotaLimit     Int?
+  quotaLimit    Int?
   /// Rolling window in seconds
-  windowSeconds  Int         @default(3600)
-  createdAt      DateTime    @default(now())
-  updatedAt      DateTime    @updatedAt
+  windowSeconds Int         @default(3600)
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
 
   @@unique([apiKeyId, scope])
   @@index([apiKeyId])
@@ -1516,26 +1797,26 @@ model ApiKeyQuota {
 /// Records sharing token usage outcomes without storing raw tokens or verifier identities.
 /// Retention is independent from general verification events.
 model ProofSharingEvent {
-  id                 String         @id @default(cuid())
-  proofId            String
-  proof              Proof          @relation(fields: [proofId], references: [id], onDelete: Cascade)
-  organizationId     String
-  organization       Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  id             String         @id @default(cuid())
+  proofId        String
+  proof          Proof          @relation(fields: [proofId], references: [id], onDelete: Cascade)
+  organizationId String
+  organization   Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   /// SHA-256 hash of the sharing token - never stores raw token
-  tokenHash          String
+  tokenHash      String
   /// SHA-256 hash of anonymized IP address (subnet level)
-  ipHash             String?
+  ipHash         String?
   /// SHA-256 hash of user agent string
-  userAgentHash      String?
+  userAgentHash  String?
   /// Access outcome
-  outcome            SharingOutcome
+  outcome        SharingOutcome
   /// Purpose of the sharing request (sanitized)
-  purpose            String?
+  purpose        String?
   /// Who requested the sharing token
-  requestedBy        String?
-  createdAt          DateTime       @default(now())
+  requestedBy    String?
+  createdAt      DateTime       @default(now())
   /// When this event should be purged for data retention
-  expiresAt          DateTime
+  expiresAt      DateTime
 
   @@index([organizationId, proofId, createdAt])
   @@index([proofId, createdAt])
@@ -1545,15 +1826,15 @@ model ProofSharingEvent {
 /// Immutable policy versions with content hash commitments.
 /// Each published version has a unique content hash for tamper detection.
 model PolicyVersion {
-  id            String       @id @default(cuid())
-  policyType    PolicyType
-  version       String
+  id          String       @id @default(cuid())
+  policyType  PolicyType
+  version     String
   /// SHA-256 hash of the exact policy content accepted
-  contentHash   String
-  status        PolicyStatus @default(DRAFT)
-  publishedAt   DateTime?
-  createdAt     DateTime     @default(now())
-  updatedAt     DateTime     @updatedAt
+  contentHash String
+  status      PolicyStatus @default(DRAFT)
+  publishedAt DateTime?
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
 
   @@unique([policyType, version])
   @@index([policyType, status])
@@ -1563,17 +1844,17 @@ model PolicyVersion {
 /// Immutable consent acceptance and withdrawal history.
 /// Preserves audit trail of policy version acceptance by authenticated users.
 model ConsentRecord {
-  id              String        @id @default(cuid())
-  userId          String
-  user            User          @relation(fields: [userId], references: [id], onDelete: Cascade)
-  organizationId  String
-  organization    Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  policyType      PolicyType
-  policyVersion   String
+  id             String        @id @default(cuid())
+  userId         String
+  user           User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organizationId String
+  organization   Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  policyType     PolicyType
+  policyVersion  String
   /// Content hash from PolicyVersion - ensures integrity
-  contentHash     String
-  action          ConsentAction
-  createdAt       DateTime      @default(now())
+  contentHash    String
+  action         ConsentAction
+  createdAt      DateTime      @default(now())
 
   @@index([userId, policyType, createdAt])
   @@index([organizationId, userId])
@@ -1600,187 +1881,55 @@ model DisclosureReceipt {
   @@index([organizationId, createdAt])
 }
 
-/// Health incident state for sustained-failure and sustained-recovery hysteresis.
-/// Prevents transient probe failures from triggering false incidents while preserving
-/// evidence of actual problems through bounded state transitions and acknowledged recoveries.
-/// Incidents are scoped to a single dependency and track state changes with timestamps,
-/// acknowledgements, and recovery checkpoints.
-enum HealthIncidentStatus {
-  /// Dependency is healthy; no incident open.
-  HEALTHY
-  /// Sustained failures detected; investigation required.
-  UNHEALTHY
-  /// Acknowledged by operator; tracking recovery status.
-  ACKNOWLEDGED
-  /// Recovered and verified; incident closed.
-  RECOVERED
-}
-
-/// Bounded state transition reason codes, never raw errors.
-/// Allows dashboards and alerting to group incidents without parsing prose.
-enum HealthIncidentReasonCode {
-  /// Dependency probe exceeded configured timeout threshold.
-  PROBE_TIMEOUT
-  /// Dependency explicitly returned an error status.
-  PROBE_ERROR
-  /// Probe succeeded but reported degraded operation.
-  PROBE_DEGRADED
-  /// Sustained failure threshold (count and duration) was exceeded.
-  SUSTAINED_FAILURE
-  /// Dependency recovered and passed verification probes.
-  SUSTAINED_RECOVERY
-  /// Manually acknowledged by operator; tracking recovery.
-  OPERATOR_ACKNOWLEDGED
-}
-
-/// Incident lifecycle transition, immutable once created.
-/// Each transition is a point-in-time checkpoint: reason, actor, probe count, duration.
-/// Transitions form a timeline of the incident, never reordered or modified.
-model HealthTransition {
-  id                    String                   @id @default(cuid())
-  incidentId            String
-  incident              HealthIncident           @relation(fields: [incidentId], references: [id], onDelete: Cascade)
-  /// Reason for this transition (e.g., threshold exceeded, recovery verified).
-  reason                HealthIncidentReasonCode
-  /// Current status after this transition.
-  status                HealthIncidentStatus
-  /// Probe count since previous transition (or incident creation).
-  probeCount            Int                      @default(0)
-  /// Duration in milliseconds from previous transition (or incident creation) to this transition.
-  durationMs            BigInt                   @default(0)
-  /// Optional operator actor ID (audit trail).
-  actorId               String?
-  /// Optional operator note (never raw error text; always redacted).
-  note                  String?
-  /// When this transition occurred.
-  createdAt             DateTime                 @default(now())
-
-  @@index([incidentId, createdAt])
-  @@index([createdAt])
-}
-
-/// Operator acknowledgement of an unhealthy dependency incident.
-/// Prevents alert fatigue while preserving the incident history.
-/// Acknowledgements are immutable; to un-acknowledge, create a new incident.
-model HealthIncidentAcknowledgement {
-  id                    String                   @id @default(cuid())
-  incidentId            String                   @unique
-  incident              HealthIncident           @relation(fields: [incidentId], references: [id], onDelete: Cascade)
-  /// Who acknowledged this incident (audit trail).
-  acknowledgedBy        String
-  /// Human-readable note for the audit log.
-  note                  String
-  /// When the acknowledgement expires (tracking window).
-  expiresAt             DateTime
-  /// When the acknowledgement was created.
-  createdAt             DateTime                 @default(now())
-
-  @@index([acknowledgedBy, createdAt])
-  @@index([expiresAt])
-}
-
-/// Health incident state machine and timeline.
-/// One incident per dependency name at a time. Transient failures do NOT create incidents
-/// unless they sustained past configurable thresholds (count + duration). Once created,
-/// the incident is acknowledged by operators or auto-closes on sustained recovery.
-model HealthIncident {
-  id                           String                           @id @default(cuid())
-  /// Dependency name being tracked (e.g., "database", "horizon").
-  dependencyName               String                           @unique
-  /// Current incident status (HEALTHY, UNHEALTHY, ACKNOWLEDGED, RECOVERED).
-  status                       HealthIncidentStatus             @default(HEALTHY)
-  /// Bounded reason code for the current status (never raw error).
-  reasonCode                   HealthIncidentReasonCode?
-  /// Hysteresis configuration version (for schema evolution).
-  configVersion                Int                              @default(1)
-  /// Failure threshold: number of consecutive failures to trigger UNHEALTHY state.
-  failureThreshold             Int                              @default(3)
-  /// Recovery threshold: number of consecutive successes to trigger RECOVERED state.
-  recoveryThreshold            Int                              @default(5)
-  /// Sustained failure window: milliseconds for failure threshold to be considered.
-  failureWindowMs              BigInt                           @default(60000)
-  /// Sustained recovery window: milliseconds for recovery threshold to be considered.
-  recoveryWindowMs             BigInt                           @default(120000)
-  /// When the incident was first opened (transitions to UNHEALTHY).
-  openedAt                     DateTime?
-  /// When the incident was acknowledged by an operator.
-  acknowledgedAt               DateTime?
-  /// When the incident was closed (transitions to RECOVERED).
-  closedAt                     DateTime?
-  /// Current probe count (consecutive failures or successes, depending on status).
-  currentProbeCount            Int                              @default(0)
-  /// When the current probe count window started.
-  probeCountWindowStart        DateTime?
-  /// Total number of failed probes since incident opened.
-  totalFailedProbes            Int                              @default(0)
-  /// Total number of successful probes since incident opened.
-  totalSuccessfulProbes        Int                              @default(0)
-  /// Version counter for optimistic concurrency control.
-  version                      Int                              @default(0)
-  /// When the incident record was created.
-  createdAt                    DateTime                         @default(now())
-  /// When the incident record was last updated (any field change).
-  updatedAt                    DateTime                         @updatedAt
-  /// Transitions form the incident timeline (immutable, ordered).
-  transitions                  HealthTransition[]
-  /// Current acknowledgement (if any).
-  acknowledgement              HealthIncidentAcknowledgement?
-
-  @@index([status])
-  @@index([openedAt])
-  @@index([closedAt])
-  @@index([updatedAt])
-}
-
 /// Migration deployment lease for preventing concurrent migration execution.
 /// Only one deployment may hold the migration lease at a time.
 /// Uses both PostgreSQL advisory locks for mutual exclusion and persisted state for observability.
 model MigrationLease {
-  id              String   @id @default("migration_deployment")
+  id             String   @id @default("migration_deployment")
   /// Process/deployment identifier holding the lease (hostname, container ID, etc).
-  ownerId         String
+  ownerId        String
   /// When the lease was acquired.
-  acquiredAt      DateTime @default(now())
+  acquiredAt     DateTime @default(now())
   /// When the lease expires and can be recovered by another deployment.
-  expiresAt       DateTime
+  expiresAt      DateTime
   /// Current migration state/version being processed.
-  migrationState  String?
+  migrationState String?
   /// Last successful migration version completed.
-  lastVersion     String?
+  lastVersion    String?
   /// Whether migration execution is currently active.
-  isActive        Boolean  @default(true)
+  isActive       Boolean  @default(true)
   /// Deployment/process metadata for debugging.
-  ownerMetadata   Json?
-  updatedAt       DateTime @updatedAt
+  ownerMetadata  Json?
+  updatedAt      DateTime @updatedAt
 
   @@index([expiresAt])
 }
 
 /// Proof state reconciliation checkpoints for tracking contract synchronization progress.
 model ProofReconciliationCheckpoint {
-  id                    String   @id @default("proof_reconciliation")
+  id                   String    @id @default("proof_reconciliation")
   /// Contract address being reconciled.
-  contractId            String
+  contractId           String
   /// Stellar network (testnet, mainnet, etc).
-  network               String
+  network              String
   /// Last processed ledger sequence number.
-  lastLedger            BigInt?
+  lastLedger           BigInt?
   /// Last processed event cursor/position.
-  lastEventCursor       String?
+  lastEventCursor      String?
   /// Contract schema version being processed.
-  contractVersion       String?
+  contractVersion      String?
   /// Reconciliation progress state.
-  syncState             String   @default("PENDING")
+  syncState            String    @default("PENDING")
   /// Last successful reconciliation timestamp.
-  lastSyncedAt          DateTime?
+  lastSyncedAt         DateTime?
   /// Any reconciliation errors for visibility.
-  lastError             String?
+  lastError            String?
   /// Number of events processed in last run.
-  eventsProcessed       Int      @default(0)
+  eventsProcessed      Int       @default(0)
   /// Number of conflicts quarantined.
-  conflictsQuarantined  Int      @default(0)
-  createdAt             DateTime @default(now())
-  updatedAt             DateTime @updatedAt
+  conflictsQuarantined Int       @default(0)
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
 
   @@index([contractId, network])
   @@index([lastSyncedAt])
@@ -1788,29 +1937,29 @@ model ProofReconciliationCheckpoint {
 
 /// Issuer state reconciliation checkpoints for tracking registry synchronization progress.
 model IssuerReconciliationCheckpoint {
-  id                    String   @id @default("issuer_reconciliation")
+  id                   String    @id @default("issuer_reconciliation")
   /// Registry contract address being reconciled.
-  contractId            String
+  contractId           String
   /// Stellar network (testnet, mainnet, etc).
-  network               String
+  network              String
   /// Last processed ledger sequence number.
-  lastLedger            BigInt?
+  lastLedger           BigInt?
   /// Last processed event cursor/position.
-  lastEventCursor       String?
+  lastEventCursor      String?
   /// Contract schema version being processed.
-  contractVersion       String?
+  contractVersion      String?
   /// Reconciliation progress state.
-  syncState             String   @default("PENDING")
+  syncState            String    @default("PENDING")
   /// Last successful reconciliation timestamp.
-  lastSyncedAt          DateTime?
+  lastSyncedAt         DateTime?
   /// Any reconciliation errors for visibility.
-  lastError             String?
+  lastError            String?
   /// Number of events processed in last run.
-  eventsProcessed       Int      @default(0)
+  eventsProcessed      Int       @default(0)
   /// Number of conflicts quarantined.
-  conflictsQuarantined  Int      @default(0)
-  createdAt             DateTime @default(now())
-  updatedAt             DateTime @updatedAt
+  conflictsQuarantined Int       @default(0)
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
 
   @@index([contractId, network])
   @@index([lastSyncedAt])
@@ -1832,35 +1981,35 @@ enum ReconciliationConflictStatus {
 
 /// Quarantine for reconciliation conflicts that cannot be resolved automatically.
 model ReconciliationConflict {
-  id                String                        @id @default(cuid())
+  id               String                       @id @default(cuid())
   /// Type of reconciliation (proof, issuer).
-  resourceType      String
+  resourceType     String
   /// Resource ID (proof ID, issuer ID).
-  resourceId        String
+  resourceId       String
   /// Contract address where conflict occurred.
-  contractId        String
+  contractId       String
   /// Stellar network.
-  network           String
+  network          String
   /// Type of conflict detected.
-  conflictType      ReconciliationConflictType
+  conflictType     ReconciliationConflictType
   /// Current resolution status.
-  status            ReconciliationConflictStatus  @default(QUARANTINED)
+  status           ReconciliationConflictStatus @default(QUARANTINED)
   /// Event/ledger position where conflict occurred.
-  eventPosition     String?
+  eventPosition    String?
   /// Observed contract state that conflicts.
-  contractState     Json?
+  contractState    Json?
   /// Local state that conflicts.
-  localState        Json?
+  localState       Json?
   /// Additional context for debugging.
-  metadata          Json?
+  metadata         Json?
   /// When conflict was detected.
-  detectedAt        DateTime                      @default(now())
+  detectedAt       DateTime                     @default(now())
   /// When conflict was resolved (if resolved).
-  resolvedAt        DateTime?
+  resolvedAt       DateTime?
   /// Resolution method/reason.
-  resolutionReason  String?
+  resolutionReason String?
   /// Who resolved it (for audit).
-  resolvedBy        String?
+  resolvedBy       String?
 
   @@index([resourceType, resourceId])
   @@index([contractId, network])
@@ -1892,39 +2041,39 @@ enum CredentialVerificationKeyTrustPinStatus {
 /// Proof dispute workflow for business/audit review process.
 /// This is separate from cryptographic verification - disputes are business workflow.
 model ProofDispute {
-  id                  String          @id @default(cuid())
+  id                 String          @id @default(cuid())
   /// Organization that owns this dispute (tenant isolation).
-  organizationId      String
-  organization        Organization    @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  organizationId     String
+  organization       Organization    @relation(fields: [organizationId], references: [id], onDelete: Restrict)
   /// Proof being disputed.
-  proofId             String
-  proof               Proof           @relation(fields: [proofId], references: [id], onDelete: Restrict)
+  proofId            String
+  proof              Proof           @relation(fields: [proofId], references: [id], onDelete: Restrict)
   /// Dispute category for classification.
-  category            DisputeCategory
+  category           DisputeCategory
   /// Current lifecycle status.
-  status              DisputeStatus   @default(OPEN)
+  status             DisputeStatus   @default(OPEN)
   /// Hash/commitment of evidence (not raw evidence).
-  evidenceCommitment  String?
+  evidenceCommitment String?
   /// Actor who submitted the dispute.
-  submittedBy         String
+  submittedBy        String
   /// Actor assigned to review (if assigned).
-  assignedTo          String?
+  assignedTo         String?
   /// Resolution outcome/reason.
-  resolutionOutcome   String?
+  resolutionOutcome  String?
   /// Resolution details.
-  resolutionReason    String?
+  resolutionReason   String?
   /// Actor who resolved the dispute.
-  resolvedBy          String?
+  resolvedBy         String?
   /// When dispute was submitted.
-  submittedAt         DateTime        @default(now())
+  submittedAt        DateTime        @default(now())
   /// When dispute was assigned (if assigned).
-  assignedAt          DateTime?
+  assignedAt         DateTime?
   /// When dispute was resolved (if resolved).
-  resolvedAt          DateTime?
+  resolvedAt         DateTime?
   /// When dispute was withdrawn (if withdrawn).
-  withdrawnAt         DateTime?
+  withdrawnAt        DateTime?
   /// Additional metadata (bounded).
-  metadata            Json?
+  metadata           Json?
 
   @@unique([proofId, category, status], name: "one_active_dispute_per_proof_category", map: "proof_dispute_unique_active")
   @@index([organizationId])
@@ -1935,233 +2084,711 @@ model ProofDispute {
   @@index([submittedAt])
 }
 
-model Organization {
-  id          String          @id @default(cuid())
-  name        String
-  slug        String          @unique
-  website     String?
-  status      ResourceStatus  @default(PENDING)
-  revision    Int             @default(0)
-  createdById String
-  createdBy   User            @relation(fields: [createdById], references: [id])
-  createdAt   DateTime        @default(now())
-  updatedAt   DateTime        @updatedAt
-  issuers     Issuer[]
-  apiKeys     ApiKey[]
-  webhooks    Webhook[]
-  members     OrganizationMember[]
-  idempotencyRecords IdempotencyRecord[]
-  disputes    ProofDispute[]
-  invitationSuppressions InvitationDeliverySuppression[]
-  invitationOutcomes InvitationDeliveryOutcomeRecord[]
-  invitationCooldowns InvitationResendCooldown[]
-  invitationAttemptWindows InvitationResendAttemptWindow[]
-  invitationQuota InvitationDeliveryQuota?
-  invitationOverrides InvitationDeliveryOverride[]
-  invitationAuditEvents InvitationDeliveryAuditEvent[]
+// ---------------------------------------------------------------------------
+// Organization Data Exports (#200)
+// ---------------------------------------------------------------------------
 
-  @@index([status])
+enum OrganizationExportStatus {
+  QUEUED
+  RUNNING
+  COMPLETED
+  FAILED
+  CANCELLED
+  EXPIRED
 }
 
-model Proof {
-  id                      String              @id @default(cuid())
-  userId                  String
-  user                    User                @relation(fields: [userId], references: [id])
-  proofType               ProofType
-  schemaVersion           String
-  status                  ProofStatus         @default(ACTIVE)
-  network                 String
-  assetCode               String
-  assetIssuer             String?
-  periodStart             DateTime?
-  periodEnd               DateTime?
-  expiresAt               DateTime
-  commitment              String?
-  credentialHash          String              @unique
-  contractTransactionHash String?
-  revokedAt               DateTime?
-  createdAt               DateTime            @default(now())
-  updatedAt               DateTime            @updatedAt
-  claim                   ProofClaim?
-  verificationEvents      VerificationEvent[]
-  anchoringIntents        AnchoringIntent[]
-  disputes                ProofDispute[]
+enum OrganizationExportCategory {
+  ORGANIZATION_PROFILE
+  ISSUERS
+  API_KEYS
+  WEBHOOKS
+  AUDIT_LOGS
+}
+
+model OrganizationExportJob {
+  id                String                       @id @default(cuid())
+  organizationId    String
+  organization      Organization                 @relation(fields: [organizationId], references: [id])
+  requestedById     String
+  categories        OrganizationExportCategory[]
+  status            OrganizationExportStatus     @default(QUEUED)
+  attemptCount      Int                          @default(0)
+  artifactPath      String?
+  archiveDigest     String?
+  sizeBytes         Int?
+  errorCategory     String?
+  downloadTokenHash String?                      @unique
+  downloadExpiresAt DateTime?
+  expiresAt         DateTime
+  requestedAt       DateTime                     @default(now())
+  startedAt         DateTime?
+  completedAt       DateTime?
+  createdAt         DateTime                     @default(now())
+  updatedAt         DateTime                     @updatedAt
+
+  @@index([organizationId, requestedAt])
+  @@index([status, expiresAt])
+}
+
+enum PaymentBackfillStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  CANCELLED
+  FAILED
+}
+
+model PaymentBackfillJob {
+  id                String                @id @default(cuid())
+  userId            String
+  user              User                  @relation(fields: [userId], references: [id])
+  requestedById     String
+  startLedger       Int
+  endLedger         Int
+  status            PaymentBackfillStatus @default(PENDING)
+  checkpointCursor  String?
+  pagesProcessed    Int                   @default(0)
+  recordsSeen       Int                   @default(0)
+  paymentsCreated   Int                   @default(0)
+  duplicatesSkipped Int                   @default(0)
+  attempts          Int                   @default(0)
+  leaseOwner        String?
+  leaseExpiresAt    DateTime?
+  cancelRequestedAt DateTime?
+  lastErrorSafe     String?
+  completedAt       DateTime?
+  createdAt         DateTime              @default(now())
+  updatedAt         DateTime              @updatedAt
 
   @@index([userId, status])
-  @@index([userId, createdAt, id])
-  @@index([proofType])
+  @@index([status, leaseExpiresAt])
+}
+
+// ---------------------------------------------------------------------------
+// Time-limited support access grants (#318)
+// ---------------------------------------------------------------------------
+
+enum SupportAccessStatus {
+  PENDING
+  APPROVED
+  ACTIVE
+  REVOKED
+  EXPIRED
+}
+
+model SupportAccessGrant {
+  id               String              @id @default(cuid())
+  organizationId   String
+  organization     Organization        @relation(fields: [organizationId], references: [id])
+  supportUserId    String
+  requestedById    String
+  approvedById     String?
+  reason           String
+  capabilities     Json
+  status           SupportAccessStatus @default(PENDING)
+  expiresAt        DateTime
+  activatedAt      DateTime?
+  revokedAt        DateTime?
+  revokedById      String?
+  revocationReason String?
+  createdAt        DateTime            @default(now())
+  updatedAt        DateTime            @updatedAt
+
+  @@index([organizationId, status])
+  @@index([supportUserId, status])
   @@index([expiresAt])
 }
 
-/// Hashed email suppression entries to prevent delivery to bounced/complained addresses.
-/// Stores salted SHA-256 hashes to prevent enumeration while enabling deduplication.
-/// Tenant-scoped: one organization cannot see another's suppression list.
-model InvitationDeliverySuppression {
-  id                String          @id @default(cuid())
-  organizationId    String
-  organization      Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  /// SHA-256 hash of (email + organizationSecret) to prevent enumeration across tenants.
-  recipientEmailHash String
-  /// Reason for suppression: BOUNCED, COMPLAINT, MANUAL_REMOVAL, POLICY_VIOLATION
-  reason            String
-  /// Original delivery outcome that caused suppression (if applicable).
-  sourceOutcome     InvitationDeliveryOutcome?
-  /// ISO timestamp when the suppression was triggered.
-  suppressedAt      DateTime        @default(now())
-  /// When the suppression should expire (null = permanent).
-  expiresAt         DateTime?
-  /// Free-form operator note (bounded, redacted).
-  note              String?         @db.VarChar(500)
-  createdAt         DateTime        @default(now())
-  updatedAt         DateTime        @updatedAt
+// ---------------------------------------------------------------------------
+// Job Execution History (#201)
+// ---------------------------------------------------------------------------
 
-  /// Compound unique: organization + email hash prevents duplicate suppressions per tenant.
-  @@unique([organizationId, recipientEmailHash])
-  @@index([organizationId, expiresAt])
-  @@index([suppressedAt])
+enum JobExecutionOutcome {
+  SUCCEEDED
+  FAILED
+  CANCELLED
+  CRASHED
+  TIMED_OUT
 }
 
-/// Per-tenant invitation delivery outcome tracking.
-/// Records delivery attempts and their outcomes for audit and abuse detection.
-model InvitationDeliveryOutcomeRecord {
-  id                String          @id @default(cuid())
-  organizationId    String
-  organization      Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  /// SHA-256 hash of (recipient email + organizationSecret).
-  recipientEmailHash String
-  /// Delivery outcome: SENT, BOUNCED, COMPLAINT, SUPPRESSED, RATE_LIMITED, FAILED.
-  outcome           InvitationDeliveryOutcome
-  /// HTTP status code (if applicable).
-  statusCode        Int?
-  /// Bounded failure reason (never raw error message).
-  failureReason     String?         @db.VarChar(200)
-  /// Number of delivery attempts for this invitation.
-  attemptCount      Int             @default(1)
-  /// ISO timestamp of the delivery attempt.
-  attemptedAt       DateTime        @default(now())
-  /// When this outcome should be cleaned up for retention.
-  expiresAt         DateTime
-  createdAt         DateTime        @default(now())
+model JobExecution {
+  id                  String               @id @default(cuid())
+  jobName             String
+  jobVersion          String
+  leaseOwner          String
+  attempt             Int                  @default(1)
+  startedAt           DateTime             @default(now())
+  finishedAt          DateTime?
+  outcome             JobExecutionOutcome?
+  errorCategory       String?
+  originalExecutionId String?
+  originalExecution   JobExecution?        @relation("JobExecutionRetries", fields: [originalExecutionId], references: [id])
+  retries             JobExecution[]       @relation("JobExecutionRetries")
+  retainUntil         DateTime
+  createdAt           DateTime             @default(now())
 
-  @@index([organizationId, recipientEmailHash, createdAt])
-  @@index([organizationId, outcome, attemptedAt])
-  @@index([expiresAt])
+  @@index([jobName, startedAt])
+  @@index([outcome])
+  @@index([retainUntil])
+  @@index([originalExecutionId])
+  @@index([finishedAt, startedAt])
 }
 
-/// Per-recipient resend cooldown to prevent delivery storms.
-/// Resets when cooldown period expires or when an override is applied.
-model InvitationResendCooldown {
-  id                String          @id @default(cuid())
-  organizationId    String
-  organization      Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  /// SHA-256 hash of (recipient email + organizationSecret).
-  recipientEmailHash String
-  /// Last invitation sent to this recipient (for cooldown calculation).
-  lastSentAt        DateTime
-  /// When the cooldown period expires and resend becomes available.
-  availableAt       DateTime
-  /// Optional reason cooldown was set (e.g., "BOUNCE_DETECTED").
-  reason            String?
-  createdAt         DateTime        @default(now())
-  updatedAt         DateTime        @updatedAt
+// ---------------------------------------------------------------------------
+// Issuer Signing Key Lifecycle State (#285)
+// ---------------------------------------------------------------------------
 
-  /// Compound unique: organization + email hash ensures one cooldown per recipient per tenant.
-  @@unique([organizationId, recipientEmailHash])
-  @@index([organizationId, availableAt])
+enum IssuerKeyLifecycleState {
+  PENDING
+  ACTIVE
+  RETIRED
+  COMPROMISED
+  REVOKED
 }
 
-/// Per-recipient, per-hour resend attempts counter for rate limiting.
-/// Resets on hourly boundary. Used to enforce per-recipient limits.
-model InvitationResendAttemptWindow {
-  id                String          @id @default(cuid())
-  organizationId    String
-  organization      Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  /// SHA-256 hash of (recipient email + organizationSecret).
-  recipientEmailHash String
-  /// Start of the hourly window (ISO timestamp).
-  windowStart       DateTime
-  /// Number of delivery attempts in this window.
-  attemptCount      Int             @default(0)
-  createdAt         DateTime        @default(now())
-  updatedAt         DateTime        @updatedAt
+model IssuerSigningKey {
+  id               String                  @id @default(cuid())
+  issuerId         String
+  issuer           Issuer                  @relation(fields: [issuerId], references: [id])
+  keyId            String
+  publicKey        String
+  commitmentHash   String
+  state            IssuerKeyLifecycleState @default(PENDING)
+  activatedAt      DateTime?
+  retiredAt        DateTime?
+  compromisedAt    DateTime?
+  revokedAt        DateTime?
+  contractSyncedAt DateTime?
+  createdAt        DateTime                @default(now())
+  updatedAt        DateTime                @updatedAt
 
-  /// Compound unique: organization + email hash + window ensures one counter per window.
-  @@unique([organizationId, recipientEmailHash, windowStart])
-  @@index([organizationId, windowStart])
+  @@unique([issuerId, keyId])
+  @@index([issuerId, state])
+  @@index([commitmentHash])
 }
 
-/// Per-tenant invitation delivery quota tracking (e.g., invitations per day).
-/// Fixed-window counter; resets daily.
-model InvitationDeliveryQuota {
-  organizationId    String          @id
-  organization      Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  /// Start of the current quota window (ISO date at midnight UTC).
-  windowStart       DateTime
-  /// Number of invitations sent in this window.
-  count             Int             @default(0)
-  /// Maximum invitations allowed per day (null = unlimited).
-  limit             Int?
-  updatedAt         DateTime        @updatedAt
+// ---------------------------------------------------------------------------
+// Contract Governance Proposals (#286)
+// ---------------------------------------------------------------------------
 
-  @@index([organizationId, windowStart])
+enum ProposalLifecycleState {
+  PROPOSED
+  APPROVED
+  COOLDOWN
+  EXECUTED
+  CANCELLED
+  EXPIRED
 }
 
-/// Authorized override of suppression or rate limits.
-/// Requires recent authorization (recent signed assertion). Single-use.
-/// Reviewed and audited; only ADMIN+ can create.
-model InvitationDeliveryOverride {
-  id                String          @id @default(cuid())
-  organizationId    String
-  organization      Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  /// SHA-256 hash of (recipient email + organizationSecret).
-  recipientEmailHash String
-  /// What is being overridden: SUPPRESSION, RATE_LIMIT, COOLDOWN.
-  overrideType      String
-  /// Reason: COMPLIANCE_REVIEW, CUSTOMER_REQUEST, FRAUD_INVESTIGATION, etc.
-  reason            InvitationOverrideReason
-  /// Who authorized this override (user id, never raw PII).
-  authorizedById    String
-  /// ISO timestamp of the authorization (must be recent, e.g. < 1 hour).
-  authorizedAt      DateTime
-  /// SHA-256 of the recent authorization assertion token.
-  assertionTokenHash String
-  /// Optional description of the override decision.
-  description       String?         @db.VarChar(1000)
-  /// When this override expires (null = permanent until manually cleared).
-  expiresAt         DateTime?
-  /// Set when the override is explicitly revoked or cleared.
-  revokedAt         DateTime?
-  /// Who revoked this override (if revoked).
-  revokedById       String?
-  createdAt         DateTime        @default(now())
-  updatedAt         DateTime        @updatedAt
+model ContractGovernanceProposal {
+  id              String                 @id @default(cuid())
+  network         String
+  contractId      String
+  proposalId      String
+  proposerAddress String
+  action          String
+  actionPayload   Json
+  rawPayloadHash  String
+  status          ProposalLifecycleState @default(PROPOSED)
+  cooldownUntil   DateTime?
+  executedAt      DateTime?
+  cancelledAt     DateTime?
+  expiresAt       DateTime?
+  observedLedger  BigInt
+  observedAt      DateTime               @default(now())
+  createdAt       DateTime               @default(now())
+  updatedAt       DateTime               @updatedAt
 
-  @@index([organizationId, recipientEmailHash])
-  @@index([organizationId, overrideType, expiresAt])
-  @@index([authorizedById, createdAt])
-  @@index([expiresAt])
+  @@unique([network, contractId, proposalId])
+  @@index([network, contractId, status])
+  @@index([status, expiresAt])
 }
 
-/// Audit trail for invitation delivery control changes.
-/// Links to Organization AuditLog via chainKey for tamper detection.
-model InvitationDeliveryAuditEvent {
-  id                String          @id @default(cuid())
-  organizationId    String
-  organization      Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  /// Action: ADD_SUPPRESSION, REMOVE_SUPPRESSION, APPLY_OVERRIDE, REVOKE_OVERRIDE, RESET_COOLDOWN.
-  action            String
-  /// Hash of recipient email (for sensitive PII protection).
-  recipientEmailHash String?
-  /// Actor: user id, never raw PII.
-  actorId           String
-  /// Override reason if applicable.
-  overrideReason    String?
-  /// Metadata: { suppressionReason, outcomeCode, limitExceeded, etc. }
+// ---------------------------------------------------------------------------
+// Protocol Pause and Incident State (#287)
+// ---------------------------------------------------------------------------
+
+model ProtocolPauseState {
+  id                 String    @id @default(cuid())
+  network            String
+  contractId         String
+  isPaused           Boolean   @default(false)
+  scopes             String[]  @default([])
+  incidentCommitment String?
+  pauseObservedAt    DateTime?
+  unpauseObservedAt  DateTime?
+  lastCheckedAt      DateTime  @default(now())
+  observedLedger     BigInt?
+  updatedAt          DateTime  @updatedAt
+
+  @@unique([network, contractId])
+  @@index([network, isPaused])
+}
+
+// ---------------------------------------------------------------------------
+// Protocol Schema Lifecycle and Compatibility (#288)
+// ---------------------------------------------------------------------------
+
+enum SchemaLifecycleStatus {
+  ACTIVE
+  DEPRECATED
+  SUNSET
+}
+
+model ProtocolSchema {
+  id                 String                @id @default(cuid())
+  schemaId           String                @unique
+  version            String
+  proofType          ProofType
+  status             SchemaLifecycleStatus @default(ACTIVE)
+  predecessorId      String?
+  predecessor        ProtocolSchema?       @relation("SchemaLineage", fields: [predecessorId], references: [id])
+  successors         ProtocolSchema[]      @relation("SchemaLineage")
+  maxPayloadBytes    Int                   @default(65536)
+  contractCompatible Boolean               @default(true)
+  definition         Json
+  activatedAt        DateTime              @default(now())
+  deprecatedAt       DateTime?
+  sunsetAt           DateTime?
+  configVersion      String
+  network            String
+  contractId         String?
+  createdAt          DateTime              @default(now())
+  updatedAt          DateTime              @updatedAt
+
+  @@index([proofType, status])
+  @@index([network, status])
+}
+
+// ---------------------------------------------------------------------------
+// Payment Sync Checkpoint Health Snapshots (#280)
+// ---------------------------------------------------------------------------
+
+enum CheckpointHealthClassification {
+  NORMAL_LAG
+  STALLED_INGESTION
+  HORIZON_OUTAGE
+  RATE_LIMITING
+  REORGANIZATION_RECOVERY
+}
+
+model PaymentCheckpointHealthSnapshot {
+  id                String                         @id @default(cuid())
+  userId            String
+  user              User                           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organizationId    String?
+  organization      Organization?                  @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+  network           String
+  walletAddressHash String
+  ledgerSequence    Int
+  latestKnownLedger Int
+  ledgerLag         Int
+  classification    CheckpointHealthClassification @default(NORMAL_LAG)
+  pagingToken       String
+  isStalled         Boolean                        @default(false)
+  isReorganizing    Boolean                        @default(false)
+  recoveryAttempts  Int                            @default(0)
+  lastRecoveredAt   DateTime?
   metadata          Json?
-  /// When the event occurred.
-  occurredAt        DateTime        @default(now())
-  createdAt         DateTime        @default(now())
+  recordedAt        DateTime                       @default(now())
+  createdAt         DateTime                       @default(now())
 
-  @@index([organizationId, action, occurredAt])
-  @@index([actorId, occurredAt])
+  @@index([userId, recordedAt])
+  @@index([network, classification])
+  @@index([organizationId, recordedAt])
+}
+
+// ---------------------------------------------------------------------------
+// Proof Expiration Reminders (#281)
+// ---------------------------------------------------------------------------
+
+enum ReminderDeliveryStatus {
+  SCHEDULED
+  ENQUEUED
+  DELIVERED
+  CANCELLED
+}
+
+model ProofExpirationReminderPreference {
+  id            String    @id @default(cuid())
+  userId        String    @unique
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  enabled       Boolean   @default(true)
+  leadTimeHours Int[]     @default([24, 72, 168])
+  optedOutAt    DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@index([userId, enabled])
+}
+
+model ProofExpirationReminderDelivery {
+  id                 String                 @id @default(cuid())
+  proofId            String
+  proof              Proof                  @relation(fields: [proofId], references: [id], onDelete: Cascade)
+  userId             String
+  user               User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  windowHours        Int
+  targetDate         DateTime
+  status             ReminderDeliveryStatus @default(SCHEDULED)
+  scheduledFor       DateTime
+  deliveredAt        DateTime?
+  cancelledAt        DateTime?
+  cancellationReason String?
+  notificationRecord Json?
+  retryCount         Int                    @default(0)
+  createdAt          DateTime               @default(now())
+  updatedAt          DateTime               @updatedAt
+
+  @@unique([proofId, windowHours])
+  @@index([status, scheduledFor])
+  @@index([userId, status])
+enum TransactionConfirmationStatus {
+  SUBMITTED
+  PENDING
+  CONFIRMED
+  FAILED
+  REPLACED
+  TIMEOUT
+}
+
+/// Durable tracking for Stellar and Soroban transactions from submission through finality.
+model TransactionConfirmation {
+  id              String                        @id @default(cuid())
+  organizationId  String
+  organization    Organization                  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  network         String                        @db.VarChar(32)
+  transactionHash String                        @db.VarChar(128)
+  operationType   String                        @db.VarChar(64)
+  operationRef    String?                       @db.VarChar(128)
+  status          TransactionConfirmationStatus @default(SUBMITTED)
+  submittedAt     DateTime                      @default(now())
+  ledgerSequence  Int?
+  ledgerHash      String?                       @db.VarChar(128)
+  confirmedAt     DateTime?
+  replacedByHash  String?                       @db.VarChar(128)
+  failureReason   String?
+  errorCode       String?                       @db.VarChar(64)
+  retryCount      Int                           @default(0)
+  nextPollAt      DateTime?
+  metadata        Json?
+  createdAt       DateTime                      @default(now())
+  updatedAt       DateTime                      @updatedAt
+
+  @@unique([network, transactionHash])
+  @@index([organizationId, status])
+  @@index([organizationId, operationRef])
+  @@index([status, nextPollAt])
+}
+
+enum DomainEventStatus {
+  PENDING
+  LEASED
+  PROCESSED
+  FAILED
+  QUARANTINED
+}
+
+/// Transactional internal domain event outbox for reliable asynchronous messaging.
+model DomainEventOutbox {
+  id             String            @id @default(cuid())
+  organizationId String
+  organization   Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  eventType      String            @db.VarChar(128)
+  eventVersion   Int               @default(1)
+  aggregateType  String            @db.VarChar(64)
+  aggregateId    String            @db.VarChar(128)
+  correlationId  String?           @db.VarChar(128)
+  causationId    String?           @db.VarChar(128)
+  payload        Json
+  status         DomainEventStatus @default(PENDING)
+  leaseOwner     String?           @db.VarChar(128)
+  leaseExpiresAt DateTime?
+  attempts       Int               @default(0)
+  maxAttempts    Int               @default(5)
+  lastError      String?
+  processedAt    DateTime?
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+
+  @@index([status, leaseExpiresAt])
+  @@index([organizationId, aggregateType, aggregateId])
+  @@index([correlationId])
+}
+
+/// Idempotent consumer tracking for domain outbox events to prevent duplicate side effects.
+model DomainEventConsumerRecord {
+  id           String   @id @default(cuid())
+  eventId      String   @db.VarChar(128)
+  consumerName String   @db.VarChar(128)
+  processedAt  DateTime @default(now())
+
+  @@unique([eventId, consumerName])
+  @@index([consumerName, processedAt])
+}
+
+// ---------------------------------------------------------------------------
+// Session Risk Events and Reauthentication History (#284)
+// ---------------------------------------------------------------------------
+
+enum SessionRiskType {
+  WALLET_MISMATCH
+  ORIGIN_ANOMALY
+  REPLAY_SUSPECTED
+  ROTATION_ANOMALY
+  UNRECOGNIZED_DEVICE
+  CONCURRENT_GEO_ANOMALY
+}
+
+enum SessionRiskSeverity {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+model SessionRiskEvent {
+  id          String              @id @default(cuid())
+  userId      String
+  user        User                @relation(fields: [userId], references: [id])
+  sessionId   String?
+  riskType    SessionRiskType
+  severity    SessionRiskSeverity @default(LOW)
+  signals     Json
+  resolvedAt  DateTime?
+  retainUntil DateTime
+  createdAt   DateTime            @default(now())
+
+  @@index([userId, createdAt])
+  @@index([sessionId])
+  @@index([riskType, createdAt])
+  @@index([retainUntil])
+}
+
+// ---------------------------------------------------------------------------
+// Bounded Bulk Administration Jobs (#290)
+// ---------------------------------------------------------------------------
+
+enum BulkAdminJobType {
+  MEMBER_ROLE_UPDATE
+  ISSUER_STATUS_UPDATE
+  KEY_ROTATION
+  WEBHOOK_CONFIG_UPDATE
+}
+
+enum BulkAdminJobStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  CANCELLED
+  FAILED
+}
+
+enum BulkAdminItemStatus {
+  PENDING
+  SUCCESS
+  FAILED
+  SKIPPED
+}
+
+model BulkAdminJob {
+  id                String             @id @default(cuid())
+  organizationId    String
+  organization      Organization       @relation(fields: [organizationId], references: [id])
+  requestedById     String
+  jobType           BulkAdminJobType
+  status            BulkAdminJobStatus @default(PENDING)
+  atomic            Boolean            @default(false)
+  totalItems        Int                @default(0)
+  processedItems    Int                @default(0)
+  succeededItems    Int                @default(0)
+  failedItems       Int                @default(0)
+  idempotencyKey    String             @unique
+  leaseOwner        String?
+  leaseExpiresAt    DateTime?
+  cancelRequestedAt DateTime?
+  retainUntil       DateTime
+  items             BulkAdminJobItem[]
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+  completedAt       DateTime?
+
+  @@index([organizationId, status])
+  @@index([status, leaseExpiresAt])
+  @@index([retainUntil])
+}
+
+model BulkAdminJobItem {
+  id            String              @id @default(cuid())
+  jobId         String
+  job           BulkAdminJob        @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  itemIndex     Int
+  action        String
+  resourceId    String
+  payload       Json
+  status        BulkAdminItemStatus @default(PENDING)
+  errorCategory String?
+  errorMessage  String?
+  retries       Int                 @default(0)
+  completedAt   DateTime?
+  createdAt     DateTime            @default(now())
+
+  @@unique([jobId, itemIndex])
+  @@index([jobId, status])
+}
+
+// ---------------------------------------------------------------------------
+// Tenant-Scoped Security Notification Inbox (#293)
+// ---------------------------------------------------------------------------
+
+enum SecurityNotificationType {
+  SUSPICIOUS_LOGIN
+  API_KEY_EXHAUSTED
+  KEY_ROTATION_REQUIRED
+  ACCESS_REVIEW_REQUIRED
+  CIRCUIT_BREAKER_TRIPPED
+  DISPUTE_FILED
+  SYSTEM_SECURITY_ALERT
+}
+
+enum SecurityNotificationSeverity {
+  INFO
+  WARNING
+  HIGH
+  CRITICAL
+}
+
+model SecurityNotification {
+  id               String                       @id @default(cuid())
+  organizationId   String
+  organization     Organization                 @relation(fields: [organizationId], references: [id])
+  userId           String?
+  type             SecurityNotificationType
+  severity         SecurityNotificationSeverity @default(INFO)
+  title            String                       @db.VarChar(128)
+  summary          String                       @db.VarChar(512)
+  data             Json
+  acknowledgedAt   DateTime?
+  acknowledgedById String?
+  resolutionUrl    String?                      @db.VarChar(256)
+  retainUntil      DateTime
+  createdAt        DateTime                     @default(now())
+  updatedAt        DateTime                     @updatedAt
+
+  @@index([organizationId, createdAt])
+  @@index([organizationId, acknowledgedAt])
+  @@index([userId, createdAt])
+  @@index([type, createdAt])
+  @@index([retainUntil])
+}
+
+
+// ---------------------------------------------------------------------------
+// Contract Successor Migration Readiness Assessment (#306)
+// ---------------------------------------------------------------------------
+
+/// Enum for contract successor finding acknowledgement states.
+/// Used to track lifecycle of operator acknowledgements for readiness findings.
+enum SuccessorFindingSeverity {
+  BLOCKING
+  ADVISORY
+  INFORMATIONAL
+}
+
+/// Acknowledgements of contract successor readiness findings.
+/// Operators can acknowledge expected blocking findings for a bounded time (max 7 days).
+/// This allows planned migrations to proceed despite temporary conditions.
+model ContractSuccessorFindingAcknowledgement {
+  id             String   @id @default(cuid())
+  /// Fully-qualified finding key: network:contractId:findingKey
+  findingKey     String
+  /// Who acknowledged it (actorId from the audit system — never raw PII).
+  acknowledgedBy String
+  /// Human-readable note stored for the audit trail.
+  note           String
+  /// When this acknowledgement expires. After this time it is ignored.
+  expiresAt      DateTime
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([findingKey, expiresAt])
+  @@index([acknowledgedBy, createdAt])
+}
+
+/// Contract successor migration checkpoint.
+/// Immutable record of passed/failed validation gates during successor assessment.
+/// Each successful assessment creates a new checkpoint for audit trail.
+model ContractSuccessorMigrationCheckpoint {
+  id             String   @id @default(cuid())
+  /// Composite key: network:contractId
+  contractKey    String
+  network        String
+  contractId     String
+  /// Ledger sequence observed during checkpoint validation
+  observedLedger BigInt
+  /// Which validation gates were passed (JSON array)
+  passedGates    String[]
+  /// Which validation gates failed (JSON array)
+  failedGates    String[]
+  /// Who initiated the checkpoint (actorId from audit system)
+  initiatedBy    String
+  createdAt      DateTime @default(now())
+
+  @@unique([network, contractId, observedLedger])
+  @@index([network, contractId, createdAt])
+  @@index([observedLedger])
+}
+
+/// Contract successor readiness assessment cache.
+/// Stores the last assessed readiness state for each successor contract.
+/// Cache is invalidated when acknowledgements change or assessment ages beyond threshold.
+model ContractSuccessorReadinessCache {
+  id             String   @id @default(cuid())
+  /// Composite key: network:contractId:version
+  cacheKey       String   @unique
+  network        String
+  contractId     String
+  expectedVersion Int
+  /// Latest assessment verdict: ready | not_ready
+  status         String   @db.VarChar(16)
+  /// Reason if not ready (deterministic status code, never raw error)
+  reason         String?
+  /// Serialized findings (JSON array)
+  findings       Json
+  /// Overall severity: blocking | advisory | informational | none
+  overall        String   @db.VarChar(16)
+  /// When the assessment was performed
+  assessedAt     DateTime
+  /// Latest passed checkpoint (JSON)
+  latestCheckpoint Json?
+  /// How long the assessment remains valid (ms)
+  cacheTtlMs     Int      @default(5000)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([network, contractId])
+  @@index([status, createdAt])
+  @@index([updatedAt])
+}
+
+/// Contract identity and versioning for successor tracking.
+/// Maps network + contractId to schema versions for compatibility checks.
+model ContractVersion {
+  id             String   @id @default(cuid())
+  network        String
+  contractId     String
+  /// Schema version deployed on this contract
+  schemaVersion  Int
+  /// When this version was observed live
+  observedAt     DateTime
+  /// Ledger sequence when first observed
+  observedLedger BigInt?
+  /// Whether this version is still current
+  isCurrent      Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([network, contractId, schemaVersion])
+  @@index([network, contractId, isCurrent])
+  @@index([network, isCurrent])
 }

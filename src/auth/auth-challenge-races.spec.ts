@@ -143,7 +143,6 @@ describe("Auth challenge replay and race-condition tests", () => {
             .mockResolvedValue({ message, walletAddress: walletAddressA, usedAt: new Date() }),
           findUnique: jest
             .fn()
-            .mockResolvedValueOnce({ message, walletAddress: walletAddressA }),
             .mockResolvedValueOnce({ message, walletAddress: walletAddressA, networkPassphrase: "Test SDF Network ; September 2015", origin: "http://localhost:3000" })
             .mockResolvedValueOnce({ message, walletAddress: walletAddressA, networkPassphrase: "Test SDF Network ; September 2015", origin: "http://localhost:3000" }),
         },
@@ -161,8 +160,7 @@ describe("Auth challenge replay and race-condition tests", () => {
         },
       };
 
-      const authService = buildAuthService(mockPrisma);
-      authService = buildAuthService(mockPrisma, mockConfig);
+      const authService = buildAuthService(mockPrisma, mockConfig);
 
       // First verification succeeds
       const result1 = await authService.verifyChallenge({

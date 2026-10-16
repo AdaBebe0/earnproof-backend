@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Injectable,
   NotFoundException,
@@ -9,7 +10,7 @@ import { createHash } from "crypto";
 import { AuthenticatedUser } from "../auth/auth.types";
 import { sha256 } from "../common/crypto/hash";
 import { PrismaService } from "../database/prisma.service";
-import { ConflictException } from "../common/exceptions/domain.exceptions";
+import { ConflictException as OptimisticLockConflictException } from "../common/exceptions/domain.exceptions";
 import { IssuerRegistryService } from "./issuer-registry.service";
 import { CreateIssuerDto } from "./dto/create-issuer.dto";
 import {
@@ -78,7 +79,7 @@ export class IssuersService {
     });
 
     if (existing) {
-      throw new ForbiddenException(
+      throw new ConflictException(
         `Issuer with Stellar address "${input.stellarAddress}" already exists`,
       );
     }
@@ -154,14 +155,13 @@ export class IssuersService {
         publicMetadata,
         contractSyncState: "PENDING",
         contractSyncError: null,
-        revision: { increment: 1 },
         revision: input.expectedRevision + 1,
       },
     });
 
     // If no records were updated, the revision didn't match
     if (updated.count === 0) {
-      throw new ConflictException(
+      throw new OptimisticLockConflictException(
         "Issuer has been modified by another request. Please refresh and retry.",
         issuer.revision,
       );
@@ -222,7 +222,6 @@ export class IssuersService {
       status: input.status,
       contractSyncState: "PENDING",
       contractSyncError: null,
-      revision: { increment: 1 },
       revision: input.expectedRevision + 1,
     };
 
@@ -252,7 +251,7 @@ export class IssuersService {
 
     // If no records were updated, the revision didn't match
     if (updated.count === 0) {
-      throw new ConflictException(
+      throw new OptimisticLockConflictException(
         "Issuer has been modified by another request. Please refresh and retry.",
         issuer.revision,
       );
@@ -498,7 +497,6 @@ export class IssuersService {
       contractSyncState: issuer.contractSyncState,
       contractTransactionHash: issuer.contractTransactionHash,
       contractSyncedAt: issuer.contractSyncedAt,
-      revision: issuer.revision,
       verifiedAt: issuer.verifiedAt,
       suspendedAt: issuer.suspendedAt,
       revokedAt: issuer.revokedAt,

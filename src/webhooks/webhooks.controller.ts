@@ -8,8 +8,6 @@ import {
   HttpCode,
   HttpStatus,
   Param,
-  HttpCode,
-  HttpStatus,
   Patch,
   Post,
   Query,
@@ -42,8 +40,10 @@ import {
 import { UpdateWebhookEventsDto } from "./dto/update-webhook-events.dto";
 import { UpdateWebhookCircuitConfigDto } from "./dto/webhook-circuit-config.dto";
 import { WebhookCircuitStatsDto } from "./dto/webhook-circuit-stats.dto";
+import { WebhookTestDeliveryResponseDto } from "./dto/webhook-test-delivery-response.dto";
 import { WebhooksService } from "./webhooks.service";
 import { WebhookCircuitBreakerService } from "./webhook-circuit-breaker.service";
+import { WebhookDeadLetterService } from "./webhook-dead-letter.service";
 
 /**
  * Resolves the organisation ID from the current authenticated user.
@@ -72,6 +72,7 @@ export class WebhooksController {
     private readonly webhooksService: WebhooksService,
     private readonly circuitBreakerService: WebhookCircuitBreakerService,
     private readonly prisma: PrismaService,
+    private readonly deadLetters: WebhookDeadLetterService,
   ) {}
 
   // ---------------------------------------------------------------------------

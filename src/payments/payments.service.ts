@@ -12,16 +12,18 @@ import { PaymentEncryptionKeyringService } from "../common/crypto/payment-encryp
 import { PrismaService } from "../database/prisma.service";
 import { OrganizationQuotaService } from "../quotas/organization-quota.service";
 import { StellarService } from "../stellar/stellar.service";
-import { normalizeMemoDetailed } from "../stellar/memo-normalizer";
-import { NormalizedMemo } from "../stellar/stellar.types";
+import { normalizeMemoDetailed, normalizeMemo } from "../stellar/memo-normalizer";
 import { StoredMemo, decodeStoredMemo, encodeStoredMemo } from "./payment-memo";
-import { normalizeMemo } from "../stellar/memo-normalizer";
 import { ledgerSequenceFromPagingToken } from "../stellar/ledger-finality";
 import { NormalizedMemo, NormalizedPayment } from "../stellar/stellar.types";
 import {
   FinalityOutcome,
   PaymentFinalityService,
 } from "./payment-finality.service";
+import { operationIndexFromToid } from "../stellar/operation-identity";
+import { PaymentEligibilityService } from "./payment-eligibility.service";
+import { PaymentClassificationHistoryService } from "./payment-classification-history.service";
+import { PaymentAddressCipher } from "../common/crypto/payment-address-cipher";
 
 /**
  * A plan is re-read at most once per sync: when a forward read diverges, the
@@ -29,28 +31,25 @@ import {
  * left for the next sync rather than looping against an inconsistent Horizon.
  */
 const MAX_READS_PER_SYNC = 2;
-import { operationIndexFromToid } from "../stellar/operation-identity";
-import { NormalizedMemo } from "../stellar/stellar.types";
-import { PaymentEligibilityService } from "./payment-eligibility.service";
-import { PaymentClassificationHistoryService } from "./payment-classification-history.service";
 
 @Injectable()
 export class PaymentsService {
-  private readonly paymentEncryptionKey: string;
   private readonly stellarNetwork: string;
   private readonly paymentEncryptionKeyring: PaymentEncryptionKeyringService;
+  private readonly addressCipher: PaymentAddressCipher;
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly stellarService: StellarService,
-    configService: ConfigService,
-    private readonly finality: PaymentFinalityService,
     private readonly configService: ConfigService,
+    private readonly finality: PaymentFinalityService,
     private readonly classificationHistoryService: PaymentClassificationHistoryService,
+    private readonly eligibility: PaymentEligibilityService,
   ) {
     this.paymentEncryptionKeyring = new PaymentEncryptionKeyringService(
       configService,
     );
+    this.addressCipher = this.paymentEncryptionKeyring.addressCipher();
     this.stellarNetwork = configService.getOrThrow<string>("stellar.network");
   }
 
@@ -170,7 +169,6 @@ export class PaymentsService {
     // of them.
     const memoCache = new Map<string, StoredMemo>();
     let conflicts = 0;
-    const memoCache = new Map<string, NormalizedMemo>();
     const syncedPaymentIds: string[] = [];
 
     for (const payment of incomingPayments) {
@@ -280,12 +278,12 @@ export class PaymentsService {
             isEligible,
             occurredAt: payment.occurredAt,
             memo: memoContext as Prisma.InputJsonValue,
-            network,
+            network: this.stellarNetwork,
             operationIndex,
           },
           create: {
-            userId: user.id,
-            network,
+            userId: userId,
+            network: this.stellarNetwork,
             operationId: payment.operationId,
             operationIndex,
             stellarTransactionHash: payment.stellarTransactionHash,
@@ -334,12 +332,6 @@ export class PaymentsService {
       skipped: counts.skipped,
       enrichmentErrors: counts.enrichmentErrors,
       finality,
-      totalFetched: incomingPayments.length,
-      created,
-      updated,
-      skipped,
-      enrichmentErrors,
-      conflicts,
     };
   }
 
@@ -465,8 +457,11 @@ export class PaymentsService {
       "classification_changed",
     );
 
-    return this.toPaymentDto(updated);
     return this.toPaymentDto(result);
+  }
+
+  async explainEligibility(userId: string, paymentId: string) {
+    return this.eligibility.explain(userId, paymentId);
   }
 
   private protectAmount(amount: string) {
