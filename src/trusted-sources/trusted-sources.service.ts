@@ -336,11 +336,10 @@ export class TrustedSourcesService {
     });
 
     // An issuer link change can change SOURCE_ISSUER_VERIFIED.
-    if ((existing.issuerId || null) !== (updated.issuerId || null)) {
-      await this.eligibility.reevaluateSource(user.id, updated.sourceAddress);
+    if ((existing.issuerId || null) !== (result.issuerId || null)) {
+      await this.eligibility.reevaluateSource(user.id, result.sourceAddress);
     }
 
-    return this.formatTrustedSource(updated);
     return this.formatTrustedSource(result);
   }
 

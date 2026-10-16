@@ -156,6 +156,7 @@ export const FIELD_LIMITS = {
    * smuggle an unbounded document into an audit-log row.
    */
   revocationReason: 500,
+  /**
    * Proof ids per batch verification request.
    *
    * A relying party reconciling a page of proofs verifies tens at a time, not

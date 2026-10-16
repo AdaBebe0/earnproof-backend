@@ -82,6 +82,8 @@ enum IssuerAddressRotationStatus {
   SUBMITTED
   CONFIRMED
   FAILED
+}
+
 enum PaymentSyncCheckpointStatus {
   VERIFIED
   DIVERGED
@@ -221,49 +223,8 @@ enum PolicyStatus {
 enum ConsentAction {
   ACCEPT
   WITHDRAW
-model ApiKey {
-  id           String   @id @default(uuid())
-  key          String   @unique
-  name         String
-  organization String
-  allowlistCidrs String[] @default([])
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
 }
 
-model SecurityNotificationPreference {
-  id             String   @id @default(uuid())
-  userId         String?
-  organizationId String?
-  category       String
-  enabled        Boolean  @default(true)
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
-
-  @@unique([userId, organizationId, category])
-}
-
-model SecurityNotificationOutbox {
-  id             String   @id @default(uuid())
-  eventId        String
-  category       String
-  mandatory      Boolean  @default(false)
-  payload        Json
-  status         String   @default("PENDING") // PENDING, DELIVERED, FAILED
-  attempts       Int      @default(0)
-  nextAttemptAt  DateTime @default(now())
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
-}
-
-model WebhookEndpoint {
-  id                 String   @id @default(uuid())
-  url                String
-  secret             String
-  concurrencyLimit   Int      @default(5)
-  isPartitionOrdered Boolean  @default(true)
-  enabled            Boolean  @default(true)
-  createdAt          DateTime @default(now())
 enum MembershipImportStatus {
   PENDING
   PROCESSING
@@ -318,7 +279,7 @@ model User {
   walletRotations    WalletRotation[]
   organizationMemberships OrganizationMember[] @relation("organizationMemberships")
   paymentBackfillJobs PaymentBackfillJob[]
-  organizationMemberships OrganizationMember[]
+  consentRecords     ConsentRecord[]
   createdImportJobs  MembershipImportJob[] @relation("CreatedImportJobs")
   createdAccessReviews AccessReviewCampaign[] @relation("CreatedAccessReviews")
   reviewedAccessEntries AccessReviewEntry[] @relation("ReviewedAccessEntries")
@@ -357,21 +318,11 @@ model AuthSession {
   walletHash  String?
   createdAt   DateTime  @default(now())
   expiresAt   DateTime
-  lastUsedAt  DateTime?
-  tokenHash          String    @unique
-  userId             String
-  user               User      @relation(fields: [userId], references: [id])
-  createdAt          DateTime  @default(now())
-  expiresAt          DateTime
-  lastUsedAt         DateTime?
-  tokenHash         String       @unique
-  userId            String
-  user              User         @relation(fields: [userId], references: [id])
-  createdAt         DateTime     @default(now())
-  expiresAt         DateTime
   lastUsedAt        DateTime?
-  /// Set when the session is explicitly revoked (logout or rotation).
   revokedAt         DateTime?
+  deviceLabel       String?
+  firstSeenAt       DateTime  @default(now())
+  lastSeenAt        DateTime  @default(now())
   /// Optional device fingerprint for session inventory (e.g., user-agent hash, IP hash).
   deviceFingerprint String?
   /// Optional reason for revocation (e.g., "REMOTE_REVOCATION", "DEVICE_LOSS").
@@ -433,16 +384,7 @@ model Organization {
   residencyPolicies    DataResidencyPolicy[]
   residencyAssignments DataResidencyAssignment[]
   schemaImportJobs     SchemaImportJob[]
-  id          String         @id @default(cuid())
-  name        String
-  slug        String         @unique
-  website     String?
-  status      ResourceStatus  @default(PENDING)
   revision    Int             @default(0)
-  createdById String
-  createdBy   User            @relation(fields: [createdById], references: [id])
-  createdAt   DateTime        @default(now())
-  updatedAt   DateTime        @updatedAt
   /// Set while the organization is archived. Every privileged operation on
   /// the organization and its keys, webhooks and issuers is refused while set.
   /// Cleared on restore; kept on deletion.
@@ -454,12 +396,6 @@ model Organization {
   /// Set when the organization is deleted. The row survives as a tombstone
   /// so issuers, attestations and audit records keep resolving.
   deletedAt   DateTime?
-  createdBy   User           @relation(fields: [createdById], references: [id])
-  createdAt   DateTime       @default(now())
-  updatedAt   DateTime       @updatedAt
-  issuers     Issuer[]
-  apiKeys     ApiKey[]
-  webhooks    Webhook[]
   quotaUsage  OrganizationQuotaUsage[]
   auditLogs   AuditLog[]
   members     OrganizationMember[]
@@ -469,6 +405,8 @@ model Organization {
   disclosureReceipts DisclosureReceipt[]
   membershipImports MembershipImportJob[]
   accessReviews AccessReviewCampaign[]
+  disputes    ProofDispute[]
+  supportedAssets SupportedAsset[]
 
   @@index([status])
   @@index([archivedAt])
@@ -539,10 +477,6 @@ model Issuer {
   verifiedAt      DateTime?
   suspendedAt     DateTime?
   revokedAt       DateTime?
-  /// Optimistic-concurrency revision, incremented by every administrative
-  /// change. Address rotation requests must name the revision they were based
-  /// on, so a command built from a stale view of the issuer is rejected.
-  revision        Int             @default(0)
   createdAt       DateTime        @default(now())
   updatedAt       DateTime        @updatedAt
   trustedSources  TrustedSource[]
@@ -550,15 +484,6 @@ model Issuer {
   addressRotations IssuerAddressRotation[]
   addressHistory   IssuerAddressHistory[]
   invoiceSettlements ProofInvoiceSettlement[]
-  contractSyncedAt        DateTime?
-  contractSyncError       String?
-  verifiedAt              DateTime?
-  suspendedAt             DateTime?
-  revokedAt               DateTime?
-  createdAt               DateTime        @default(now())
-  updatedAt               DateTime        @updatedAt
-  trustedSources          TrustedSource[]
-  attestations            Attestation[]
 
   @@index([organizationId])
   @@index([status])
@@ -614,15 +539,21 @@ model IssuerAddressHistory {
 }
 
 model SupportedAsset {
-  id        String         @id @default(cuid())
-  assetKey  String         @unique
-  code      String
-  issuer    String?
-  network   String
-  status    ResourceStatus @default(ACTIVE)
-  createdAt DateTime       @default(now())
-  updatedAt DateTime       @updatedAt
+  id             String         @id @default(cuid())
+  organizationId String
+  organization   Organization   @relation(fields: [organizationId], references: [id])
+  assetKey       String
+  code           String
+  issuer         String?
+  network        String
+  decimals       Int            @default(7)
+  status         ResourceStatus @default(ACTIVE)
+  revision       Int            @default(0)
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
 
+  @@unique([organizationId, assetKey])
+  @@index([organizationId, status])
   @@index([network, status])
 }
 
@@ -644,8 +575,10 @@ model Payment {
   /// hmac:v<N>:... keyed lookup token for equality queries on the sender.
   sourceAddressLookup    String?
   operationIndex         Int?
-  sourceAddress          String
-  destinationAddress     String
+  pagingToken            String?
+  ledgerSequence         Int?
+  finalityHoldAt         DateTime?
+  finalityHoldReason     String?
   assetCode              String
   assetIssuer            String?
   amountEncrypted        String?
@@ -653,17 +586,14 @@ model Payment {
   /// Versioned memo (v2): {version, type, ciphertext} or {version, type: "none", omitted?}.
   /// Plaintext is never stored. See src/payments/payment-memo.ts and docs/payment-memos.md.
   memo                   Json?
-  classification         PaymentClassification  @default(UNKNOWN)
-  isEligible             Boolean                @default(false)
-  createdAt              DateTime               @default(now())
-  updatedAt              DateTime               @updatedAt
-  invoiceSettlement      ProofInvoiceSettlement?
   classification         PaymentClassification @default(UNKNOWN)
   classificationRevision Int                   @default(1)
   isEligible             Boolean               @default(false)
   createdAt              DateTime              @default(now())
   updatedAt              DateTime              @updatedAt
+  invoiceSettlement      ProofInvoiceSettlement?
   classificationHistory  PaymentClassificationHistory[]
+  eligibilityDecisions   PaymentEligibilityDecision[]
 
   // Canonical identity of an indexed payment. A transaction hash alone is not
   // enough — one transaction can hold several payment operations — so network,
@@ -678,6 +608,37 @@ model Payment {
   @@index([sourceAddressLookup])
   @@index([assetCode, assetIssuer])
   @@index([classification])
+}
+
+/// One evaluation of a payment's eligibility under a versioned policy.
+/// Exactly one decision per payment is active; superseded decisions are kept
+/// for audit. Stores derived factors and reason codes only: never a memo,
+/// an amount, or a counterparty address.
+model PaymentEligibilityDecision {
+  id            String    @id @default(cuid())
+  paymentId     String
+  payment       Payment   @relation(fields: [paymentId], references: [id])
+  /// Denormalised owner, so owner-scoped reads never need a join.
+  userId        String
+  policyVersion String
+  eligible      Boolean
+  factors       Json
+  reasonCodes   String[]
+  /// sha256 of (policyVersion, factors). Equal hashes mean an identical decision.
+  inputsHash    String
+  trigger       String
+  evaluatedAt   DateTime
+  supersededAt  DateTime?
+  /// TRUE for the active decision, NULL once superseded. The unique index on
+  /// (paymentId, isActive) lets PostgreSQL itself refuse a second active
+  /// decision, because NULLs never collide.
+  isActive      Boolean?
+  createdAt     DateTime  @default(now())
+
+  @@unique([paymentId, isActive])
+  @@index([paymentId, evaluatedAt])
+  @@index([userId, isActive])
+  @@index([policyVersion, isActive])
 }
 
 /// Last verified position in a wallet's Horizon payments feed.
@@ -773,8 +734,7 @@ model Proof {
   // Hash of the renewal request that produced this successor, so a retried
   // identical request returns the same successor instead of a conflict.
   renewalRequestHash      String?
-  createdAt               DateTime            @default(now())
-  updatedAt               DateTime            @updatedAt
+  disputes                ProofDispute[]
   claim                   ProofClaim?
   verificationEvents      VerificationEvent[]
   anchoringIntents        AnchoringIntent[]
@@ -938,12 +898,8 @@ model Webhook {
   /// endpoints keep receiving the version they subscribed with until they opt
   /// in to a newer one; see docs/webhook-payloads.md.
   payloadVersion   String            @default("1")
-  status           ResourceStatus    @default(ACTIVE)
   revision         Int               @default(0)
-  createdAt        DateTime          @default(now())
-  updatedAt        DateTime          @updatedAt
-  deliveries       WebhookDelivery[]
-  circuitBreaker   WebhookCircuitState?
+  circuitBreaker   WebhookCircuit?
 
   @@index([organizationId, status])
 }
@@ -955,24 +911,31 @@ enum WebhookDeliveryStatus {
 }
 
 model WebhookDelivery {
-  id            String                @id @default(cuid())
-  webhookId     String
-  webhook       Webhook               @relation(fields: [webhookId], references: [id])
-  eventType     String
-  eventId       String
-  payload       Json
-  attempt       Int                   @default(1)
-  status        WebhookDeliveryStatus @default(PENDING)
-  statusCode    Int?
-  responseBody  String?
-  durationMs    Int?
-  failureReason String?
-  replayOf      String?
-  replayedBy    String?
-  replayKey     String?               @unique
-  deliveredAt   DateTime?
-  nextRetryAt   DateTime?
-  createdAt     DateTime              @default(now())
+  id               String                @id @default(cuid())
+  webhookId        String
+  webhook          Webhook               @relation(fields: [webhookId], references: [id])
+  eventType        String
+  eventId          String
+  payload          Json
+  schemaVersion    String                @default("1")
+  payloadBody      String                @default("")
+  attempt          Int                   @default(1)
+  status           WebhookDeliveryStatus @default(PENDING)
+  statusCode       Int?
+  responseBody     String?
+  durationMs       Int?
+  failureReason    String?
+  replayOf         String?
+  replayedBy       String?
+  replayKey        String?               @unique
+  deliveredAt      DateTime?
+  nextRetryAt      DateTime?
+  deadLetteredAt   DateTime?
+  deadLetterReason String?
+  redrivenAt       DateTime?
+  redrivenBy       String?
+  redriveReason    String?
+  createdAt        DateTime              @default(now())
 
   @@index([webhookId, createdAt])
   @@index([eventId])
@@ -1107,6 +1070,8 @@ model OrganizationQuotaUsage {
 
   @@id([organizationId, quota, windowStart])
   @@index([windowStart])
+}
+
 model AuthAuditEvent {
   id                 String        @id @default(cuid())
   eventType          AuthEventType
@@ -1324,6 +1289,8 @@ model WebhookClientCertificate {
 
   @@index([webhookId, status])
   @@index([notAfter])
+}
+
 enum ApiKeyEndpointCategory {
   PROOF
   PAYMENT
@@ -1393,6 +1360,8 @@ model ContractDriftAcknowledgement {
   createdAt      DateTime @default(now())
 
   @@index([driftKey, expiresAt])
+}
+
 /// Immutable history of payment classification changes.
 /// Used for auditability and proof eligibility reconstruction.
 model PaymentClassificationHistory {
@@ -1506,7 +1475,7 @@ model AccessReviewEntry {
 
 /// Webhook circuit breaker state per endpoint.
 /// Tracks failure counts and recovery windows.
-model WebhookCircuitState {
+model WebhookCircuit {
   id                    String              @id @default(cuid())
   webhookId             String              @unique
   webhook               Webhook             @relation(fields: [webhookId], references: [id], onDelete: Cascade)
@@ -1656,6 +1625,8 @@ model DisclosureReceipt {
 
   @@index([organizationId, proofId])
   @@index([organizationId, createdAt])
+}
+
 /// Migration deployment lease for preventing concurrent migration execution.
 /// Only one deployment may hold the migration lease at a time.
 /// Uses both PostgreSQL advisory locks for mutual exclusion and persisted state for observability.
@@ -1853,53 +1824,37 @@ model ProofDispute {
   @@index([submittedAt])
 }
 
-model Organization {
-  id          String          @id @default(cuid())
-  name        String
-  slug        String          @unique
-  website     String?
-  status      ResourceStatus  @default(PENDING)
-  revision    Int             @default(0)
-  createdById String
-  createdBy   User            @relation(fields: [createdById], references: [id])
-  createdAt   DateTime        @default(now())
-  updatedAt   DateTime        @updatedAt
-  issuers     Issuer[]
-  apiKeys     ApiKey[]
-  webhooks    Webhook[]
-  members     OrganizationMember[]
-  idempotencyRecords IdempotencyRecord[]
-  disputes    ProofDispute[]
 
-  @@index([status])
+enum PaymentBackfillStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  CANCELLED
+  FAILED
 }
 
-model Proof {
-  id                      String              @id @default(cuid())
-  userId                  String
-  user                    User                @relation(fields: [userId], references: [id])
-  proofType               ProofType
-  schemaVersion           String
-  status                  ProofStatus         @default(ACTIVE)
-  network                 String
-  assetCode               String
-  assetIssuer             String?
-  periodStart             DateTime?
-  periodEnd               DateTime?
-  expiresAt               DateTime
-  commitment              String?
-  credentialHash          String              @unique
-  contractTransactionHash String?
-  revokedAt               DateTime?
-  createdAt               DateTime            @default(now())
-  updatedAt               DateTime            @updatedAt
-  claim                   ProofClaim?
-  verificationEvents      VerificationEvent[]
-  anchoringIntents        AnchoringIntent[]
-  disputes                ProofDispute[]
+model PaymentBackfillJob {
+  id                String                @id @default(cuid())
+  userId            String
+  user              User                  @relation(fields: [userId], references: [id])
+  requestedById     String
+  startLedger       Int
+  endLedger         Int
+  status            PaymentBackfillStatus @default(PENDING)
+  checkpointCursor  String?
+  pagesProcessed    Int                   @default(0)
+  recordsSeen       Int                   @default(0)
+  paymentsCreated   Int                   @default(0)
+  duplicatesSkipped Int                   @default(0)
+  attempts          Int                   @default(0)
+  leaseOwner        String?
+  leaseExpiresAt    DateTime?
+  cancelRequestedAt DateTime?
+  lastErrorSafe     String?
+  completedAt       DateTime?
+  createdAt         DateTime              @default(now())
+  updatedAt         DateTime              @updatedAt
 
   @@index([userId, status])
-  @@index([userId, createdAt, id])
-  @@index([proofType])
-  @@index([expiresAt])
+  @@index([status, leaseExpiresAt])
 }

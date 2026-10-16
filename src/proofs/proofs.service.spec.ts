@@ -1,4 +1,4 @@
-﻿import {
+import {
   AnchoringOperation,
   AnchoringStatus,
   PaymentClassification,
@@ -1338,8 +1338,6 @@ describe("ProofsService", () => {
   });
 
   // ---------------------------------------------------------------------------
-  // createIncomeRangeProof
-  // ---------------------------------------------------------------------------
 
   describe("createIncomeRangeProof", () => {
     function makePayment(overrides: Record<string, unknown> = {}) {
@@ -1371,12 +1369,6 @@ describe("ProofsService", () => {
       return {
         payment: {
           findMany: jest.fn().mockResolvedValue(payments),
-  describe("supported-asset policy enforcement at issuance", () => {
-    it("persists assetPolicyId and assetPolicySnapshot on the created proof (positive)", async () => {
-      const capturedProofData: Record<string, unknown>[] = [];
-      const prisma = {
-        payment: {
-          findMany: jest.fn().mockResolvedValue(singlePayment),
         },
         $transaction: jest
           .fn()
@@ -1407,16 +1399,6 @@ describe("ProofsService", () => {
                   return { id: "intent_1", ...data };
                 }),
               },
-              supportedAsset: {
-                findFirst: jest.fn().mockResolvedValue(activeSupportedAsset),
-              },
-              proof: {
-                create: jest.fn().mockImplementation(({ data }) => {
-                  capturedProofData.push(data);
-                  return { ...data, claim: data.claim.create };
-                }),
-              },
-              anchoringIntent: { create: jest.fn() },
             };
             return fn(tx);
           }),
@@ -1601,48 +1583,6 @@ describe("ProofsService", () => {
         makePayment({ id: "payment_1", assetCode: "XLM" }),
         makePayment({ id: "payment_2", assetCode: "USDC" }),
       ]);
-      await service.createMinimumIncomeProof(user, {
-        selectedPaymentIds: ["payment_1"],
-        thresholdAmount: "100",
-        assetCode: "XLM",
-        periodStart: "2026-08-01T00:00:00.000Z",
-        periodEnd: "2026-08-31T23:59:59.000Z",
-      });
-
-      expect(capturedProofData).toHaveLength(1);
-      expect(capturedProofData[0]).toMatchObject({
-        assetPolicyId: "asset_1",
-        assetPolicySnapshot: expect.objectContaining({
-          supportedAssetId: "asset_1",
-          code: "XLM",
-          issuer: null,
-          network: "testnet",
-          status: ResourceStatus.ACTIVE,
-          canonicalAssetId: "testnet:native:XLM",
-        }),
-      });
-    });
-
-    it("rejects issuance and writes no proof when the asset is no longer active (negative)", async () => {
-      const proofCreate = jest.fn();
-      const prisma = {
-        payment: {
-          findMany: jest.fn().mockResolvedValue(singlePayment),
-        },
-        $transaction: jest
-          .fn()
-          .mockImplementation(async (fn: (tx: unknown) => unknown) => {
-            const tx = {
-              supportedAsset: {
-                // Asset was deactivated between sync and issuance.
-                findFirst: jest.fn().mockResolvedValue(null),
-              },
-              proof: { create: proofCreate },
-              anchoringIntent: { create: jest.fn() },
-            };
-            return fn(tx);
-          }),
-      };
       const service = new ProofsService(
         prisma as never,
         config as never,
@@ -1719,45 +1659,6 @@ describe("ProofsService", () => {
 
     it("rejects when periodStart is after periodEnd", async () => {
       const prisma = makeIncomeRangePrisma([makePayment()]);
-        service.createMinimumIncomeProof(user, {
-          selectedPaymentIds: ["payment_1"],
-          thresholdAmount: "100",
-          assetCode: "XLM",
-          periodStart: "2026-08-01T00:00:00.000Z",
-          periodEnd: "2026-08-31T23:59:59.000Z",
-        }),
-      ).rejects.toMatchObject({
-        response: expect.objectContaining({ code: "ASSET_NOT_SUPPORTED" }),
-      });
-      expect(proofCreate).not.toHaveBeenCalled();
-    });
-
-    it("rejects payment-receipt issuance when the asset is no longer active (negative, second issuance path)", async () => {
-      const proofCreate = jest.fn();
-      const prisma = {
-        payment: {
-          findFirst: jest.fn().mockResolvedValue({
-            operationId: "op_1",
-            sourceAddress: "GA",
-            assetCode: "XLM",
-            assetIssuer: null,
-            amountEncrypted: `redacted:${Buffer.from("10").toString("base64url")}`,
-            classification: PaymentClassification.INCOME,
-            isEligible: true,
-            occurredAt: new Date("2026-08-01T00:00:00.000Z"),
-          }),
-        },
-        $transaction: jest
-          .fn()
-          .mockImplementation(async (fn: (tx: unknown) => unknown) => {
-            const tx = {
-              supportedAsset: { findFirst: jest.fn().mockResolvedValue(null) },
-              proof: { create: proofCreate },
-              anchoringIntent: { create: jest.fn() },
-            };
-            return fn(tx);
-          }),
-      };
       const service = new ProofsService(
         prisma as never,
         config as never,
@@ -1784,20 +1685,6 @@ describe("ProofsService", () => {
               amountEncrypted: `redacted:${Buffer.from("777").toString("base64url")}`,
             }),
           ]),
-        service.createPaymentReceiptProof(user, { paymentId: "payment_1" }),
-      ).rejects.toMatchObject({
-        response: expect.objectContaining({ code: "ASSET_NOT_SUPPORTED" }),
-      });
-      expect(proofCreate).not.toHaveBeenCalled();
-    });
-
-    it("keeps stale Payment.isEligible from making a deactivated asset newly eligible for a proof (regression, TOCTOU)", async () => {
-      // Payment.isEligible is still true (sync has not rerun since deactivation),
-      // but the live registry check inside the transaction is authoritative.
-      const proofCreate = jest.fn();
-      const prisma = {
-        payment: {
-          findMany: jest.fn().mockResolvedValue(singlePayment), // isEligible: true (stale)
         },
         $transaction: jest
           .fn()
@@ -1825,8 +1712,6 @@ describe("ProofsService", () => {
                   };
                 }),
               },
-              supportedAsset: { findFirst: jest.fn().mockResolvedValue(null) },
-              proof: { create: proofCreate },
               anchoringIntent: { create: jest.fn() },
             };
             return fn(tx);
@@ -1918,6 +1803,226 @@ describe("ProofsService", () => {
           operator: "range",
           lowerBound: "500",
           upperBound: "1500",
+          assetCode: "XLM",
+          assetIssuer: null,
+          periodStart: "2026-08-01T00:00:00.000Z",
+          periodEnd: "2026-08-31T23:59:59.000Z",
+          qualifyingPaymentCount: 1,
+        },
+        privacy: { exactIncomeHidden: true, sourceTransactionsHidden: true },
+        issuedAt: "2026-08-02T00:00:00.000Z",
+        expiresAt: "2026-10-01T00:00:00.000Z",
+      };
+      const prisma = {
+        proof: {
+          findUnique: jest.fn().mockResolvedValue({
+            id: "proof_range",
+            userId: "user_1",
+            proofType: ProofType.INCOME_RANGE,
+            schemaVersion: "earnproof.income-range.v1",
+            status: ProofStatus.ACTIVE,
+            network: "testnet",
+            assetCode: "XLM",
+            assetIssuer: null,
+            periodStart: new Date("2026-08-01T00:00:00.000Z"),
+            periodEnd: new Date("2026-08-31T23:59:59.000Z"),
+            expiresAt: new Date("2026-10-01T00:00:00.000Z"),
+            revokedAt: null,
+            createdAt: new Date("2026-08-02T00:00:00.000Z"),
+            credentialHash: `sha256:${sha256(canonicalize(credential))}`,
+            contractTransactionHash: null,
+            user: { walletHash: "sha256:wallet" },
+            claim: {
+              thresholdEncrypted: null,
+              frequency: null,
+              disclosurePolicy: {
+                qualifyingPaymentCount: 1,
+                lowerBound: "500",
+                upperBound: "1500",
+              },
+            },
+          }),
+        },
+        verificationEvent: {
+          create: jest.fn().mockResolvedValue({ id: "event_1" }),
+        },
+      };
+      const service = new ProofsService(
+        prisma as never,
+        config as never,
+        mockVerificationEventService,
+      );
+
+      const result = await service.verifyProof("proof_range");
+
+      expect(result.result).toBe(VerificationResult.VALID);
+      expect(result.status).toBe("valid");
+      expect(result.credential?.claim).toMatchObject({
+        operator: "range",
+        lowerBound: "500",
+        upperBound: "1500",
+      });
+    });
+  });
+
+  describe("supported-asset policy enforcement at issuance", () => {
+    it("persists assetPolicyId and assetPolicySnapshot on the created proof (positive)", async () => {
+      const capturedProofData: Record<string, unknown>[] = [];
+      const prisma = {
+        payment: {
+          findMany: jest.fn().mockResolvedValue(singlePayment),
+        },
+        $transaction: jest
+          .fn()
+          .mockImplementation(async (fn: (tx: unknown) => unknown) => {
+            const tx = {
+              supportedAsset: {
+                findFirst: jest.fn().mockResolvedValue(activeSupportedAsset),
+              },
+              proof: {
+                create: jest.fn().mockImplementation(({ data }) => {
+                  capturedProofData.push(data);
+                  return { ...data, claim: data.claim.create };
+                }),
+              },
+              anchoringIntent: { create: jest.fn() },
+            };
+            return fn(tx);
+          }),
+      };
+      const service = new ProofsService(
+        prisma as never,
+        config as never,
+        mockVerificationEventService,
+      );
+
+      await service.createMinimumIncomeProof(user, {
+        selectedPaymentIds: ["payment_1"],
+        thresholdAmount: "100",
+        assetCode: "XLM",
+        periodStart: "2026-08-01T00:00:00.000Z",
+        periodEnd: "2026-08-31T23:59:59.000Z",
+      });
+
+      expect(capturedProofData).toHaveLength(1);
+      expect(capturedProofData[0]).toMatchObject({
+        assetPolicyId: "asset_1",
+        assetPolicySnapshot: expect.objectContaining({
+          supportedAssetId: "asset_1",
+          code: "XLM",
+          issuer: null,
+          network: "testnet",
+          status: ResourceStatus.ACTIVE,
+          canonicalAssetId: "testnet:native:XLM",
+        }),
+      });
+    });
+
+    it("rejects issuance and writes no proof when the asset is no longer active (negative)", async () => {
+      const proofCreate = jest.fn();
+      const prisma = {
+        payment: {
+          findMany: jest.fn().mockResolvedValue(singlePayment),
+        },
+        $transaction: jest
+          .fn()
+          .mockImplementation(async (fn: (tx: unknown) => unknown) => {
+            const tx = {
+              supportedAsset: {
+                // Asset was deactivated between sync and issuance.
+                findFirst: jest.fn().mockResolvedValue(null),
+              },
+              proof: { create: proofCreate },
+              anchoringIntent: { create: jest.fn() },
+            };
+            return fn(tx);
+          }),
+      };
+      const service = new ProofsService(
+        prisma as never,
+        config as never,
+        mockVerificationEventService,
+      );
+
+      await expect(
+        service.createMinimumIncomeProof(user, {
+          selectedPaymentIds: ["payment_1"],
+          thresholdAmount: "100",
+          assetCode: "XLM",
+          periodStart: "2026-08-01T00:00:00.000Z",
+          periodEnd: "2026-08-31T23:59:59.000Z",
+        }),
+      ).rejects.toMatchObject({
+        response: expect.objectContaining({ code: "ASSET_NOT_SUPPORTED" }),
+      });
+      expect(proofCreate).not.toHaveBeenCalled();
+    });
+
+    it("rejects payment-receipt issuance when the asset is no longer active (negative, second issuance path)", async () => {
+      const proofCreate = jest.fn();
+      const prisma = {
+        payment: {
+          findFirst: jest.fn().mockResolvedValue({
+            operationId: "op_1",
+            sourceAddress: "GA",
+            assetCode: "XLM",
+            assetIssuer: null,
+            amountEncrypted: `redacted:${Buffer.from("10").toString("base64url")}`,
+            classification: PaymentClassification.INCOME,
+            isEligible: true,
+            occurredAt: new Date("2026-08-01T00:00:00.000Z"),
+          }),
+        },
+        $transaction: jest
+          .fn()
+          .mockImplementation(async (fn: (tx: unknown) => unknown) => {
+            const tx = {
+              supportedAsset: { findFirst: jest.fn().mockResolvedValue(null) },
+              proof: { create: proofCreate },
+              anchoringIntent: { create: jest.fn() },
+            };
+            return fn(tx);
+          }),
+      };
+      const service = new ProofsService(
+        prisma as never,
+        config as never,
+        mockVerificationEventService,
+      );
+
+      await expect(
+        service.createPaymentReceiptProof(user, { paymentId: "payment_1" }),
+      ).rejects.toMatchObject({
+        response: expect.objectContaining({ code: "ASSET_NOT_SUPPORTED" }),
+      });
+      expect(proofCreate).not.toHaveBeenCalled();
+    });
+
+    it("keeps stale Payment.isEligible from making a deactivated asset newly eligible for a proof (regression, TOCTOU)", async () => {
+      // Payment.isEligible is still true (sync has not rerun since deactivation),
+      // but the live registry check inside the transaction is authoritative.
+      const proofCreate = jest.fn();
+      const prisma = {
+        payment: {
+          findMany: jest.fn().mockResolvedValue(singlePayment), // isEligible: true (stale)
+        },
+        $transaction: jest
+          .fn()
+          .mockImplementation(async (fn: (tx: unknown) => unknown) => {
+            const tx = {
+              supportedAsset: { findFirst: jest.fn().mockResolvedValue(null) },
+              proof: { create: proofCreate },
+              anchoringIntent: { create: jest.fn() },
+            };
+            return fn(tx);
+          }),
+      };
+      const service = new ProofsService(
+        prisma as never,
+        config as never,
+        mockVerificationEventService,
+      );
+
       await expect(
         service.createMinimumIncomeProof(user, {
           selectedPaymentIds: ["payment_1"],
@@ -2043,9 +2148,6 @@ describe("ProofsService", () => {
             network: "testnet",
             assetCode: "XLM",
             assetIssuer: null,
-            periodStart: new Date("2026-08-01T00:00:00.000Z"),
-            periodEnd: new Date("2026-08-31T23:59:59.000Z"),
-            expiresAt: new Date("2026-10-01T00:00:00.000Z"),
             // The asset this proof was issued against has since been
             // deactivated in SupportedAsset - but that must not matter here.
             assetPolicyId: "asset_1",
@@ -2067,13 +2169,6 @@ describe("ProofsService", () => {
             contractTransactionHash: null,
             user: { walletHash: "sha256:wallet" },
             claim: {
-              thresholdEncrypted: null,
-              frequency: null,
-              disclosurePolicy: {
-                qualifyingPaymentCount: 1,
-                lowerBound: "500",
-                upperBound: "1500",
-              },
               thresholdEncrypted: `redacted:${Buffer.from("100").toString("base64url")}`,
               disclosurePolicy: { qualifyingPaymentCount: 1 },
             },
@@ -2089,21 +2184,10 @@ describe("ProofsService", () => {
         mockVerificationEventService,
       );
 
-      const result = await service.verifyProof("proof_range");
-
-      expect(result.result).toBe(VerificationResult.VALID);
-      expect(result.status).toBe("valid");
-      expect(result.credential?.claim).toMatchObject({
-        operator: "range",
-        lowerBound: "500",
-        upperBound: "1500",
-      });
       await expect(
         service.verifyProof("proof_after_deactivation"),
       ).resolves.toMatchObject({ result: VerificationResult.VALID });
     });
   });
 });
-
-
 

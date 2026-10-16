@@ -31,6 +31,10 @@ export class PrismaService
     await this.$disconnect();
   }
 
+  get webhookCircuitState() {
+    return (this as any).webhookCircuit;
+  }
+
   /**
    * Makes every `auditLog.create(...)` call transparently participate in the
    * per-chain tamper-evidence hash chain, regardless of which service issued

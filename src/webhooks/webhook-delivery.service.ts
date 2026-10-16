@@ -11,20 +11,19 @@ import { Agent, type Dispatcher } from "undici";
 import { decryptProtectedAmount } from "../common/crypto/protected-amount";
 import { PrismaService } from "../database/prisma.service";
 import { WebhookClientCertificateService } from "./webhook-client-certificate.service";
-import { WebhookEnvelope, WebhookEventType } from "./webhook-event.types";
 import { PaymentEncryptionKeyringService } from "../common/crypto/payment-encryption-keyring.service";
 import { StructuredLogger } from "../common/logger";
-import { PrismaService } from "../database/prisma.service";
-import { WebhookEventSource, WebhookEventType } from "./webhook-event.types";
 import {
   payloadDeprecation,
   serializeWebhookEvent,
 } from "./webhook-payload.serializers";
 import {
+  CURRENT_WEBHOOK_PAYLOAD_VERSION,
   WEBHOOK_TEST_EVENT_ID_PREFIX,
   WEBHOOK_TEST_EVENT_TYPE,
   WEBHOOK_TEST_EVENT_VERSION,
   WebhookEnvelope,
+  WebhookEventSource,
   WebhookEventType,
   WebhookTestEnvelope,
 } from "./webhook-event.types";
@@ -93,7 +92,6 @@ type WebhookChain = { tail: Promise<void> };
 
 @Injectable()
 export class WebhookDeliveryService implements OnModuleInit {
-  private readonly logger = new Logger(WebhookDeliveryService.name);
   private readonly encryptionKey: string;
   private readonly maxAttempts: number;
   private readonly logger = new StructuredLogger(WebhookDeliveryService.name);
@@ -116,14 +114,14 @@ export class WebhookDeliveryService implements OnModuleInit {
     this.maxAttempts =
       configService.get<number>("webhooks.maxDeliveryAttempts") ??
       DEFAULT_MAX_DELIVERY_ATTEMPTS;
+    this.paymentEncryptionKeyring = new PaymentEncryptionKeyringService(
+      configService,
+    );
   }
 
   /** The configured retry threshold: attempts allowed per delivery chain. */
   get maxDeliveryAttempts(): number {
     return this.maxAttempts;
-    this.paymentEncryptionKeyring = new PaymentEncryptionKeyringService(
-      configService,
-    );
   }
 
   /**
@@ -182,7 +180,7 @@ export class WebhookDeliveryService implements OnModuleInit {
     if (!user || user.organizations.length === 0) return;
 
     const orgIds = user.organizations.map((o) => o.id);
-    await this.enqueueForOrganizations(orgIds, eventType, envelope);
+    await this.enqueueForOrganizations(orgIds, domainEvent);
   }
 
   /**
@@ -195,16 +193,19 @@ export class WebhookDeliveryService implements OnModuleInit {
    */
   async enqueueForOrganization(
     organizationId: string,
-    eventType: WebhookEventType,
-    envelope: Omit<WebhookEnvelope, "id" | "specVersion" | "createdAt">,
+    domainEventOrType: WebhookEventType | WebhookEventSource,
+    legacyEnvelope?: { event: WebhookEventType; data: any },
   ): Promise<void> {
-    await this.enqueueForOrganizations([organizationId], eventType, envelope);
+    const domainEvent: WebhookEventSource =
+      typeof domainEventOrType === "string"
+        ? ({ event: domainEventOrType, source: legacyEnvelope?.data ?? legacyEnvelope } as WebhookEventSource)
+        : domainEventOrType;
+    await this.enqueueForOrganizations([organizationId], domainEvent);
   }
 
   private async enqueueForOrganizations(
     orgIds: string[],
-    eventType: WebhookEventType,
-    envelope: Omit<WebhookEnvelope, "id" | "specVersion" | "createdAt">,
+    domainEvent: WebhookEventSource,
   ): Promise<void> {
     if (orgIds.length === 0) return;
 
@@ -262,7 +263,7 @@ export class WebhookDeliveryService implements OnModuleInit {
       // Initialize circuit breaker for webhook if needed
       await this.circuitBreaker.initializeCircuit(hook.id);
 
-      this.scheduleDelivery(delivery.id, hook.id, 0, fullEnvelope);
+      this.scheduleDelivery(delivery.id, hook.id, 0);
     }
   }
 
@@ -377,13 +378,7 @@ export class WebhookDeliveryService implements OnModuleInit {
                 return;
               }
 
-              await this.runDelivery(
-                deliveryId,
-                envelope,
-                undefined,
-                undefined,
-                true,
-              );
+              await this.runDelivery(deliveryId);
             } catch {
               // runDelivery swallows its own errors and logs them;
               // we must not let an uncaught rejection break the chain.
@@ -547,31 +542,6 @@ export class WebhookDeliveryService implements OnModuleInit {
         redirect: "error",
         signal: AbortSignal.timeout(DELIVERY_TIMEOUT_MS),
         ...(dispatcher ? ({ dispatcher } as Record<string, unknown>) : {}),
-    // The full public payload is persisted, so retries and crash recovery
-    // deliver exactly the same signed event rather than an empty envelope.
-    const envelope = (cachedEnvelope ?? delivery.payload) as WebhookEnvelope;
-
-    const outcome = await this.sendSignedRequest(
-      url,
-      signingSecret,
-      delivery.eventId,
-      delivery.eventType,
-      envelope,
-    );
-    const { statusCode, responseBody, durationMs, success } = outcome;
-    let failureReason = outcome.failureReason;
-
-    if (outcome.kind === "blocked") {
-      failureReason = outcome.error.message;
-      // SSRF block is permanent — do not retry.
-      await this.prisma.webhookDelivery.update({
-        where: { id: deliveryId },
-        data: {
-          status: WebhookDeliveryStatus.FAILED,
-          durationMs,
-          failureReason,
-          deliveredAt: new Date(),
-        },
       });
 
       durationMs = Date.now() - start;
@@ -732,6 +702,8 @@ export class WebhookDeliveryService implements OnModuleInit {
         deadLetterReason: reason,
       },
     });
+  }
+
   // ---------------------------------------------------------------------------
   // Synthetic test delivery
   // ---------------------------------------------------------------------------

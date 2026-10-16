@@ -40,7 +40,6 @@ import { OrganizationQuotaService } from "../quotas/organization-quota.service";
 import { WebhookDeliveryService } from "../webhooks/webhook-delivery.service";
 import { WebhookEventSource } from "../webhooks/webhook-event.types";
 import { AttestationsService } from "../attestations/attestations.service";
-import { WebhookDeliveryService } from "../webhooks/webhook-delivery.service";
 import {
   AggregateEarningsCalculator,
 } from "./aggregate-earnings.calculator";
@@ -53,10 +52,21 @@ import {
   SOURCE_SCOPES,
   SourceScope,
 } from "./aggregate-earnings.policy";
+import {
+  EmployerPaymentPeriodViolation,
+  MAX_EMPLOYER_PAYMENT_PERIOD_DAYS,
+} from "./employer-payment.policy";
+import {
+  ContinuityWindowViolation,
+  MIN_CONTINUITY_PERIODS,
+  MAX_CONTINUITY_PERIODS,
+} from "./employment-continuity.policy";
+import {
   ProofVerificationAbuseService,
   VerificationClientContext,
 } from "../common/rate-limit/proof-verification-abuse.service";
 import { ContractAnchoringService } from "./contract-anchoring.service";
+import { CreateAggregateEarningsProofDto } from "./dto/create-aggregate-earnings-proof.dto";
 import { CreateInvoiceSettlementProofDto } from "./dto/create-invoice-settlement-proof.dto";
 import { CreateIncomeRangeProofDto } from "./dto/create-income-range-proof.dto";
 import { CreateMinimumIncomeProofDto } from "./dto/create-minimum-income-proof.dto";
@@ -83,6 +93,7 @@ const PAYMENT_RECEIPT_SCHEMA_VERSION = "earnproof.payment-receipt.v1";
 const RECURRING_INCOME_SCHEMA_VERSION = "earnproof.recurring-income.v1";
 const INVOICE_SETTLEMENT_SCHEMA_VERSION = "earnproof.invoice-settlement.v1";
 const INCOME_RANGE_SCHEMA_VERSION = "earnproof.income-range.v1";
+const AGGREGATE_EARNINGS_SCHEMA_VERSION = "earnproof.aggregate-earnings.v1";
 const DEFAULT_EXPIRY_DAYS = 30;
 
 const EMPLOYER_PERIOD_MESSAGES: Record<EmployerPaymentPeriodViolation, string> =
@@ -184,6 +195,10 @@ type InvoiceSettlementCredential = {
     amount?: string;
   };
   privacy: { amountHidden: boolean };
+  issuedAt: string;
+  expiresAt: string;
+};
+
 type IncomeRangeCredential = {
   id: string;
   type: "EarnProofIncomeRangeCredential";
@@ -210,12 +225,42 @@ type IncomeRangeCredential = {
   expiresAt: string;
 };
 
+type AggregateEarningsCredential = {
+  id: string;
+  type: "EarnProofAggregateEarningsCredential";
+  schemaVersion: "earnproof.aggregate-earnings.v1";
+  issuer: "earnproof-backend";
+  subject: { walletHash: string };
+  claim: {
+    operator: "sum";
+    /** Floored to `rounding.increment`; never the exact total. */
+    aggregateAmount: string;
+    rounding: { mode: "floor"; increment: RoundingIncrement };
+    assetCode: string;
+    assetIssuer: string | null;
+    periodStart: string;
+    periodEnd: string;
+    periodBoundary: "start-inclusive-end-exclusive";
+    sourceScope: SourceScope;
+    qualifyingPaymentCount: number;
+    policyVersion: string;
+  };
+  privacy: {
+    exactIncomeHidden: true;
+    sourceTransactionsHidden: true;
+    sourceIdentitiesHidden: true;
+  };
+  issuedAt: string;
+  expiresAt: string;
+};
+
 type EarnProofCredential =
   | MinimumIncomeCredential
   | PaymentReceiptCredential
   | RecurringIncomeCredential
-  | InvoiceSettlementCredential;
-  | IncomeRangeCredential;
+  | InvoiceSettlementCredential
+  | IncomeRangeCredential
+  | AggregateEarningsCredential;
 
 type OwnedRenewableProof = Proof & {
   claim: ProofClaim | null;
@@ -265,7 +310,7 @@ export class ProofsService {
     this.aggregateEarnings = new AggregateEarningsCalculator(
       prisma,
       (amountEncrypted) => this.paymentEncryptionKeyring.decrypt(amountEncrypted),
-      this.signingSecret,
+      this.signingKeyring.activeSecret,
     );
   }
 
@@ -1628,11 +1673,7 @@ export class ProofsService {
         ? { anchored: false as const, reason: "pending" as const }
         : { anchored: false as const, reason: "disabled" as const };
 
-    this.emitWebhook(proof.userId, "proof.revoked", {
-      proofId: updated.id,
-      status: updated.status,
-      revokedAt: updated.revokedAt?.toISOString() ?? revokedAt.toISOString(),
-    this.emitWebhook(userId, {
+    this.emitWebhook(proof.userId, {
       event: "proof.revoked",
       source: {
         proofId: updated.id,
@@ -1655,12 +1696,11 @@ export class ProofsService {
    * share link; it is recorded on the privacy-safe verification event so the
    * owner can see link usage. It does not change the verification outcome.
    */
-  async verifyProof(proofId: string, context: { shareTokenId?: string } = {}) {
   async verifyProof(
     proofId: string,
-    clientContext?: VerificationClientContext,
+    context: VerificationClientContext & { shareTokenId?: string } = {},
   ) {
-    this.verificationAbuseService?.checkClientCardinality(clientContext, proofId);
+    this.verificationAbuseService?.checkClientCardinality(context, proofId);
     const proof = await this.prisma.proof.findUnique({
       where: {
         id: proofId,
@@ -1676,7 +1716,7 @@ export class ProofsService {
     });
 
     this.verificationAbuseService?.checkVerification(
-      clientContext,
+      context,
       proofId,
       Boolean(proof?.claim),
     );
@@ -1691,85 +1731,6 @@ export class ProofsService {
     }
 
     const credential = this.rebuildCredential({ ...proof, claim: proof.claim });
-    const policy = this.jsonPolicy(proof.claim.disclosurePolicy);
-    const cadence = this.revealCadence(proof.claim.frequency);
-    const credential =
-      proof.proofType === ProofType.AGGREGATE_EARNINGS
-        ? this.rebuildAggregateEarningsCredential({
-            ...proof,
-            claim: proof.claim!,
-          })
-        : proof.proofType === ProofType.RECURRING_INCOME
-        ? this.buildRecurringIncomeCredential({
-            id: proof.id,
-            walletHash: proof.user.walletHash,
-            cadence: proof.claim.frequency ?? "invalid",
-            intervalUnit: cadence?.intervalUnit ?? "month",
-            intervalCount: cadence?.intervalCount ?? 0,
-            assetCode: proof.assetCode,
-            assetIssuer: proof.assetIssuer,
-            periodStart: proof.periodStart ?? proof.createdAt,
-            periodEnd: proof.periodEnd ?? proof.createdAt,
-            qualifyingPaymentCount:
-              typeof policy["qualifyingPaymentCount"] === "number"
-                ? policy["qualifyingPaymentCount"]
-                : 0,
-            issuedAt: proof.createdAt,
-            expiresAt: proof.expiresAt,
-          })
-        : proof.proofType === ProofType.PAYMENT_RECEIPT
-          ? this.rebuildPaymentReceiptCredential({
-              ...proof,
-              claim: proof.claim!,
-            })
-          : proof.proofType === ProofType.INVOICE_SETTLEMENT
-            ? this.rebuildInvoiceSettlementCredential({
-                ...proof,
-                claim: proof.claim!,
-              })
-            : this.buildCredential({
-                id: proof.id,
-                walletHash: proof.user.walletHash,
-                thresholdAmount: this.revealThreshold(
-                  proof.claim.thresholdEncrypted,
-                ),
-          : proof.proofType === ProofType.INCOME_RANGE
-            ? this.buildIncomeRangeCredential({
-                id: proof.id,
-                walletHash: proof.user.walletHash,
-                lowerBound:
-                  typeof policy["lowerBound"] === "string"
-                    ? policy["lowerBound"]
-                    : "0",
-                upperBound:
-                  typeof policy["upperBound"] === "string"
-                    ? policy["upperBound"]
-                    : "0",
-                assetCode: proof.assetCode,
-                assetIssuer: proof.assetIssuer,
-                periodStart: proof.periodStart ?? proof.createdAt,
-                periodEnd: proof.periodEnd ?? proof.createdAt,
-                qualifyingPaymentCount: this.qualifyingPaymentCount(
-                  proof.claim,
-                ),
-                issuedAt: proof.createdAt,
-                expiresAt: proof.expiresAt,
-              });
-              })
-            : this.buildCredential({
-            id: proof.id,
-            walletHash: proof.user.walletHash,
-            thresholdAmount: this.revealThreshold(
-              proof.claim.thresholdEncrypted,
-            ),
-            assetCode: proof.assetCode,
-            assetIssuer: proof.assetIssuer,
-            periodStart: proof.periodStart ?? proof.createdAt,
-            periodEnd: proof.periodEnd ?? proof.createdAt,
-            qualifyingPaymentCount: this.qualifyingPaymentCount(proof.claim),
-            issuedAt: proof.createdAt,
-            expiresAt: proof.expiresAt,
-          });
     const signedCredential = this.signCredential(credential);
     const expectedHash = `sha256:${sha256(canonicalize(credential))}`;
 
@@ -1816,29 +1777,20 @@ export class ProofsService {
     // If event recording fails, the verification response is still returned.
     // This ensures verification availability over audit completeness.
     // Event recording errors are caught and logged by the service.
-    this.verificationEventService
-      .recordEvent(
-        outcome,
-        proof.id,
-        {
-          outcome: outcome,
-          timestamp: new Date(),
-        },
-        context,
-      )
-      .catch(() => {
-        // Error already logged by the service
-        // Verification continues unblocked
-      });
     const verificationEventService = this.verificationEventService as VerificationEventService & {
       tryConsumePrivacyBudget?: (proofId: string) => boolean;
     };
     if (verificationEventService.tryConsumePrivacyBudget?.(proof.id) ?? true) {
       this.verificationEventService
-        .recordEvent(outcome, proof.id, {
-          outcome: outcome,
-          timestamp: new Date(),
-        })
+        .recordEvent(
+          outcome,
+          proof.id,
+          {
+            outcome: outcome,
+            timestamp: new Date(),
+          },
+          context,
+        )
         .catch(() => {
           // Error already logged by the service
           // Verification continues unblocked
@@ -2357,40 +2309,72 @@ export class ProofsService {
   }): EarnProofCredential {
     const policy = this.jsonPolicy(proof.claim.disclosurePolicy);
     const cadence = this.revealCadence(proof.claim.frequency);
-    return proof.proofType === ProofType.RECURRING_INCOME
-      ? this.buildRecurringIncomeCredential({
-          id: proof.id,
-          walletHash: proof.user.walletHash,
-          cadence: proof.claim.frequency ?? "invalid",
-          intervalUnit: cadence?.intervalUnit ?? "month",
-          intervalCount: cadence?.intervalCount ?? 0,
-          assetCode: proof.assetCode,
-          assetIssuer: proof.assetIssuer,
-          periodStart: proof.periodStart ?? proof.createdAt,
-          periodEnd: proof.periodEnd ?? proof.createdAt,
-          qualifyingPaymentCount:
-            typeof policy["qualifyingPaymentCount"] === "number"
-              ? policy["qualifyingPaymentCount"]
-              : 0,
-          issuedAt: proof.createdAt,
-          expiresAt: proof.expiresAt,
-        })
-      : proof.proofType === ProofType.PAYMENT_RECEIPT
-        ? this.rebuildPaymentReceiptCredential(proof)
-        : this.buildCredential({
-            id: proof.id,
-            walletHash: proof.user.walletHash,
-            thresholdAmount: this.revealThreshold(
-              proof.claim.thresholdEncrypted,
-            ),
-            assetCode: proof.assetCode,
-            assetIssuer: proof.assetIssuer,
-            periodStart: proof.periodStart ?? proof.createdAt,
-            periodEnd: proof.periodEnd ?? proof.createdAt,
-            qualifyingPaymentCount: this.qualifyingPaymentCount(proof.claim),
-            issuedAt: proof.createdAt,
-            expiresAt: proof.expiresAt,
-          });
+
+    if (proof.proofType === ProofType.AGGREGATE_EARNINGS) {
+      return this.rebuildAggregateEarningsCredential({
+        ...proof,
+        claim: proof.claim,
+      });
+    }
+    if (proof.proofType === ProofType.RECURRING_INCOME) {
+      return this.buildRecurringIncomeCredential({
+        id: proof.id,
+        walletHash: proof.user.walletHash,
+        cadence: proof.claim.frequency ?? "invalid",
+        intervalUnit: cadence?.intervalUnit ?? "month",
+        intervalCount: cadence?.intervalCount ?? 0,
+        assetCode: proof.assetCode,
+        assetIssuer: proof.assetIssuer,
+        periodStart: proof.periodStart ?? proof.createdAt,
+        periodEnd: proof.periodEnd ?? proof.createdAt,
+        qualifyingPaymentCount:
+          typeof policy["qualifyingPaymentCount"] === "number"
+            ? policy["qualifyingPaymentCount"]
+            : 0,
+        issuedAt: proof.createdAt,
+        expiresAt: proof.expiresAt,
+      });
+    }
+    if (proof.proofType === ProofType.PAYMENT_RECEIPT) {
+      return this.rebuildPaymentReceiptCredential(proof);
+    }
+    if (proof.proofType === ProofType.INVOICE_SETTLEMENT) {
+      return this.rebuildInvoiceSettlementCredential({
+        ...proof,
+        claim: proof.claim,
+      });
+    }
+    if (proof.proofType === ProofType.INCOME_RANGE) {
+      return this.buildIncomeRangeCredential({
+        id: proof.id,
+        walletHash: proof.user.walletHash,
+        lowerBound:
+          typeof policy["lowerBound"] === "string" ? policy["lowerBound"] : "0",
+        upperBound:
+          typeof policy["upperBound"] === "string" ? policy["upperBound"] : "0",
+        assetCode: proof.assetCode,
+        assetIssuer: proof.assetIssuer,
+        periodStart: proof.periodStart ?? proof.createdAt,
+        periodEnd: proof.periodEnd ?? proof.createdAt,
+        qualifyingPaymentCount: this.qualifyingPaymentCount(proof.claim),
+        issuedAt: proof.createdAt,
+        expiresAt: proof.expiresAt,
+      });
+    }
+    return this.buildCredential({
+      id: proof.id,
+      walletHash: proof.user.walletHash,
+      thresholdAmount: this.revealThreshold(
+        proof.claim.thresholdEncrypted,
+      ),
+      assetCode: proof.assetCode,
+      assetIssuer: proof.assetIssuer,
+      periodStart: proof.periodStart ?? proof.createdAt,
+      periodEnd: proof.periodEnd ?? proof.createdAt,
+      qualifyingPaymentCount: this.qualifyingPaymentCount(proof.claim),
+      issuedAt: proof.createdAt,
+      expiresAt: proof.expiresAt,
+    });
   }
 
   private rebuildPaymentReceiptCredential(proof: {
@@ -2533,7 +2517,7 @@ export class ProofsService {
     if (!amountEncrypted) return null;
     try {
       return this.parseAmount(
-        decryptProtectedAmount(amountEncrypted, this.paymentEncryptionKey),
+        this.paymentEncryptionKeyring.decrypt(amountEncrypted),
       );
     } catch {
       return null;
@@ -2992,6 +2976,9 @@ export class ProofsService {
       status: updated.status,
       quarantineDecision: updated.quarantineDecision,
     };
+  }
+
+  /**
    * Validate that all active attestations for a subject wallet are still valid
    * (not expired, not revoked) for proof issuance.
    *

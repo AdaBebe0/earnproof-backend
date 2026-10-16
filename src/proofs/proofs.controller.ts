@@ -22,6 +22,7 @@ import {
   ApiTags,
 } from "@nestjs/swagger";
 import { SkipThrottle, Throttle } from "@nestjs/throttler";
+import { ApiKeyScope, SharingOutcome } from "@prisma/client";
 import { Request } from "express";
 import { AuthenticatedUser } from "../auth/auth.types";
 import { CurrentUser } from "../common/decorators/current-user.decorator";
@@ -615,9 +616,6 @@ export class ProofsController {
     @Param("intentId") intentId: string,
   ) {
     return this.proofsService.abandonProofAnchoring(user, id, intentId);
-  @AuthenticatedRoute({ ownership: "user" })
-  revokeProof(@CurrentUser() user: AuthenticatedUser, @Param("id") id: string) {
-    return this.proofsService.revokeProof(user.id, id);
   }
 
   @ApiBearerAuth()
@@ -862,7 +860,7 @@ export class ProofsController {
     type: ApiErrorDto,
   })
   @UseGuards(AuthGuard)
-  @RequireApiKeyScopes(["PROOF_READ"]) // Example of API key quota enforcement
+  @RequireApiKeyScopes(ApiKeyScope.PROOF_READ) // Example of API key quota enforcement
   @RequireConsent("PRIVACY_POLICY") // Example of consent requirement
   @Get(":id/verification-stats")
   @AuthenticatedRoute({ ownership: "user" })
@@ -910,6 +908,7 @@ export class ProofsController {
     @CurrentUser() user: AuthenticatedUser,
     @Param("id") proofId: string,
     @Body() body: CreateSharingTokenDto,
+    @Req() request: Request,
   ): Promise<SharingTokenResponseDto> {
     // Get user's organization (simplified - assumes single org membership)
     const orgMember = await this.getUserPrimaryOrganization(user.id);
@@ -926,12 +925,12 @@ export class ProofsController {
       orgMember.organizationId,
       proofId,
       {
-        purpose: body.purpose || "Proof sharing",
+        purpose: "Proof sharing",
         requestedBy: user.id,
       },
       {
         ipAddress: request.ip || "0.0.0.0",
-        userAgent: request.headers["user-agent"] || "unknown",
+        userAgent: (request.headers["user-agent"] as string) || "unknown",
       },
     );
 
@@ -979,14 +978,34 @@ export class ProofsController {
       organizationId = orgMember.organizationId;
     }
 
-    const summary = await this.proofSharingService.getSharingEvents(
+    const events = await this.proofSharingService.getSharingEvents(
       organizationId,
       {
         proofId: query.proofId,
       },
     );
 
-    return summary;
+    const aggregateMap = new Map<SharingOutcome, { count: number; lastAccessedAt: Date | null }>();
+    for (const event of events) {
+      const existing = aggregateMap.get(event.outcome) ?? { count: 0, lastAccessedAt: null };
+      existing.count += 1;
+      if (!existing.lastAccessedAt || event.createdAt > existing.lastAccessedAt) {
+        existing.lastAccessedAt = event.createdAt;
+      }
+      aggregateMap.set(event.outcome, existing);
+    }
+    const aggregates = Array.from(aggregateMap.entries()).map(([outcome, data]) => ({
+      outcome,
+      count: data.count,
+      lastAccessedAt: data.lastAccessedAt,
+    }));
+    const recentEvents = events.slice(0, 50).map((e: any) => ({
+      proofId: e.proofId,
+      outcome: e.outcome,
+      accessedAt: e.createdAt,
+    }));
+
+    return { aggregates, recentEvents };
   }
 
   /**
