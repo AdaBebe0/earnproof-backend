@@ -1433,6 +1433,140 @@ model DisclosureReceipt {
 
   @@index([organizationId, proofId])
   @@index([organizationId, createdAt])
+}
+
+/// Health incident state for sustained-failure and sustained-recovery hysteresis.
+/// Prevents transient probe failures from triggering false incidents while preserving
+/// evidence of actual problems through bounded state transitions and acknowledged recoveries.
+/// Incidents are scoped to a single dependency and track state changes with timestamps,
+/// acknowledgements, and recovery checkpoints.
+enum HealthIncidentStatus {
+  /// Dependency is healthy; no incident open.
+  HEALTHY
+  /// Sustained failures detected; investigation required.
+  UNHEALTHY
+  /// Acknowledged by operator; tracking recovery status.
+  ACKNOWLEDGED
+  /// Recovered and verified; incident closed.
+  RECOVERED
+}
+
+/// Bounded state transition reason codes, never raw errors.
+/// Allows dashboards and alerting to group incidents without parsing prose.
+enum HealthIncidentReasonCode {
+  /// Dependency probe exceeded configured timeout threshold.
+  PROBE_TIMEOUT
+  /// Dependency explicitly returned an error status.
+  PROBE_ERROR
+  /// Probe succeeded but reported degraded operation.
+  PROBE_DEGRADED
+  /// Sustained failure threshold (count and duration) was exceeded.
+  SUSTAINED_FAILURE
+  /// Dependency recovered and passed verification probes.
+  SUSTAINED_RECOVERY
+  /// Manually acknowledged by operator; tracking recovery.
+  OPERATOR_ACKNOWLEDGED
+}
+
+/// Incident lifecycle transition, immutable once created.
+/// Each transition is a point-in-time checkpoint: reason, actor, probe count, duration.
+/// Transitions form a timeline of the incident, never reordered or modified.
+model HealthTransition {
+  id                    String                   @id @default(cuid())
+  incidentId            String
+  incident              HealthIncident           @relation(fields: [incidentId], references: [id], onDelete: Cascade)
+  /// Reason for this transition (e.g., threshold exceeded, recovery verified).
+  reason                HealthIncidentReasonCode
+  /// Current status after this transition.
+  status                HealthIncidentStatus
+  /// Probe count since previous transition (or incident creation).
+  probeCount            Int                      @default(0)
+  /// Duration in milliseconds from previous transition (or incident creation) to this transition.
+  durationMs            BigInt                   @default(0)
+  /// Optional operator actor ID (audit trail).
+  actorId               String?
+  /// Optional operator note (never raw error text; always redacted).
+  note                  String?
+  /// When this transition occurred.
+  createdAt             DateTime                 @default(now())
+
+  @@index([incidentId, createdAt])
+  @@index([createdAt])
+}
+
+/// Operator acknowledgement of an unhealthy dependency incident.
+/// Prevents alert fatigue while preserving the incident history.
+/// Acknowledgements are immutable; to un-acknowledge, create a new incident.
+model HealthIncidentAcknowledgement {
+  id                    String                   @id @default(cuid())
+  incidentId            String                   @unique
+  incident              HealthIncident           @relation(fields: [incidentId], references: [id], onDelete: Cascade)
+  /// Who acknowledged this incident (audit trail).
+  acknowledgedBy        String
+  /// Human-readable note for the audit log.
+  note                  String
+  /// When the acknowledgement expires (tracking window).
+  expiresAt             DateTime
+  /// When the acknowledgement was created.
+  createdAt             DateTime                 @default(now())
+
+  @@index([acknowledgedBy, createdAt])
+  @@index([expiresAt])
+}
+
+/// Health incident state machine and timeline.
+/// One incident per dependency name at a time. Transient failures do NOT create incidents
+/// unless they sustained past configurable thresholds (count + duration). Once created,
+/// the incident is acknowledged by operators or auto-closes on sustained recovery.
+model HealthIncident {
+  id                           String                           @id @default(cuid())
+  /// Dependency name being tracked (e.g., "database", "horizon").
+  dependencyName               String                           @unique
+  /// Current incident status (HEALTHY, UNHEALTHY, ACKNOWLEDGED, RECOVERED).
+  status                       HealthIncidentStatus             @default(HEALTHY)
+  /// Bounded reason code for the current status (never raw error).
+  reasonCode                   HealthIncidentReasonCode?
+  /// Hysteresis configuration version (for schema evolution).
+  configVersion                Int                              @default(1)
+  /// Failure threshold: number of consecutive failures to trigger UNHEALTHY state.
+  failureThreshold             Int                              @default(3)
+  /// Recovery threshold: number of consecutive successes to trigger RECOVERED state.
+  recoveryThreshold            Int                              @default(5)
+  /// Sustained failure window: milliseconds for failure threshold to be considered.
+  failureWindowMs              BigInt                           @default(60000)
+  /// Sustained recovery window: milliseconds for recovery threshold to be considered.
+  recoveryWindowMs             BigInt                           @default(120000)
+  /// When the incident was first opened (transitions to UNHEALTHY).
+  openedAt                     DateTime?
+  /// When the incident was acknowledged by an operator.
+  acknowledgedAt               DateTime?
+  /// When the incident was closed (transitions to RECOVERED).
+  closedAt                     DateTime?
+  /// Current probe count (consecutive failures or successes, depending on status).
+  currentProbeCount            Int                              @default(0)
+  /// When the current probe count window started.
+  probeCountWindowStart        DateTime?
+  /// Total number of failed probes since incident opened.
+  totalFailedProbes            Int                              @default(0)
+  /// Total number of successful probes since incident opened.
+  totalSuccessfulProbes        Int                              @default(0)
+  /// Version counter for optimistic concurrency control.
+  version                      Int                              @default(0)
+  /// When the incident record was created.
+  createdAt                    DateTime                         @default(now())
+  /// When the incident record was last updated (any field change).
+  updatedAt                    DateTime                         @updatedAt
+  /// Transitions form the incident timeline (immutable, ordered).
+  transitions                  HealthTransition[]
+  /// Current acknowledgement (if any).
+  acknowledgement              HealthIncidentAcknowledgement?
+
+  @@index([status])
+  @@index([openedAt])
+  @@index([closedAt])
+  @@index([updatedAt])
+}
+
 /// Migration deployment lease for preventing concurrent migration execution.
 /// Only one deployment may hold the migration lease at a time.
 /// Uses both PostgreSQL advisory locks for mutual exclusion and persisted state for observability.

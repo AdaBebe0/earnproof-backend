@@ -1,4 +1,4 @@
-﻿import { Injectable, Logger } from "@nestjs/common";
+﻿import { Injectable, Logger, Optional } from "@nestjs/common";
  
 import { ContractDriftService } from "./contract-drift.service";
 import { ConfigService } from "@nestjs/config";
@@ -8,6 +8,7 @@ import {
   DeploymentMetadataService,
   DeploymentMetadataState,
 } from "./deployment-metadata.service";
+import { HealthHysteresisService } from "./health-hysteresis.service";
 import {
   DependencyKind,
   DependencyResult,
@@ -15,6 +16,7 @@ import {
   DependencyStatusValue,
   ReadinessResult,
 } from "./health.types";
+import { CircuitBreakerRegistry } from "../common/resilience/circuit-breaker-registry";
 
 /**
  * Default probe timeout.
@@ -77,6 +79,12 @@ export class HealthService {
     @Optional() private readonly circuits?: CircuitBreakerRegistry,
     private readonly contractDrift: ContractDriftService,
     private readonly migrationLease: MigrationLeaseService,
+    /**
+     * Optional hysteresis service for incident tracking. When present, probe
+     * results are recorded for state machine transitions. Absence is graceful:
+     * probes continue working without incident state.
+     */
+    @Optional() private readonly hysteresis?: HealthHysteresisService,
   ) {}
 
   /**
@@ -213,6 +221,9 @@ export class HealthService {
   /**
    * Serve a probe from cache when fresh, otherwise probe — coalescing concurrent
    * callers onto a single in-flight probe.
+   *
+   * After a fresh probe, hysteresis is applied to record the result in the
+   * incident state machine (if configured).
    */
   private async probeCached(
     name: string,
@@ -241,6 +252,8 @@ export class HealthService {
     const pending = probe()
       .then((result) => {
         this.cache.set(name, { result, storedAt: Date.now() });
+        // Apply hysteresis after a fresh probe
+        this.applyHysteresisAsync(name, result);
         return result;
       })
       .finally(() => {
@@ -251,6 +264,25 @@ export class HealthService {
 
     const result = await pending;
     return { ...result, kind };
+  }
+
+  /**
+   * Apply hysteresis asynchronously (fire-and-forget).
+   * @private
+   */
+  private applyHysteresisAsync(
+    dependencyName: string,
+    result: DependencyResult,
+  ): void {
+    if (!this.hysteresis) {
+      return;
+    }
+
+    this.hysteresis.applyHysteresis(dependencyName, result).catch((error) => {
+      this.logger.error(
+        `Failed to apply hysteresis for ${dependencyName}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    });
   }
 
   /** Probe the primary database with a trivial query. */
