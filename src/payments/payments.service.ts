@@ -9,6 +9,11 @@ import {
 import { canonicalAssetId } from "../common/assets/asset-identifier";
 import { encryptProtectedAmount } from "../common/crypto/protected-amount";
 import { PaymentEncryptionKeyringService } from "../common/crypto/payment-encryption-keyring.service";
+import {
+  buildPage,
+  cursorOrderBy,
+  cursorWhereFragment,
+} from "../common/pagination/keyset-paginate";
 import { PrismaService } from "../database/prisma.service";
 import { OrganizationQuotaService } from "../quotas/organization-quota.service";
 import { StellarService } from "../stellar/stellar.service";
@@ -337,21 +342,32 @@ export class PaymentsService {
 
   async listPayments(
     userId: string,
-    filters: { classification?: PaymentClassification; assetCode?: string },
+    filters: {
+      classification?: PaymentClassification;
+      assetCode?: string;
+      cursor?: string;
+      limit?: number;
+    },
   ) {
+    const limit = filters.limit ?? 20;
+    const cursorWhere = cursorWhereFragment(filters.cursor, "occurredAt");
     const payments = await this.prisma.payment.findMany({
       where: {
         userId,
         classification: filters.classification,
         assetCode: filters.assetCode,
+        ...(cursorWhere as Prisma.PaymentWhereInput),
       },
-      orderBy: {
-        occurredAt: "desc",
-      },
-      take: 100,
+      orderBy: cursorOrderBy("occurredAt"),
+      take: limit + 1,
     });
 
-    return payments.map((payment) => this.toPaymentDto(payment));
+    const { data, pageInfo } = buildPage(payments, limit, "occurredAt");
+
+    return {
+      data: data.map((payment) => this.toPaymentDto(payment)),
+      pageInfo,
+    };
   }
 
   async getPayment(userId: string, paymentId: string) {

@@ -7,6 +7,11 @@ import {
 import { ApiKeyScope, ResourceStatus } from "@prisma/client";
 import { randomBytes, timingSafeEqual } from "crypto";
 import { sha256 } from "../common/crypto/hash";
+import {
+  buildPage,
+  cursorOrderBy,
+  cursorWhereFragment,
+} from "../common/pagination/keyset-paginate";
 import { PrismaService } from "../database/prisma.service";
 import { OrganizationQuotaService } from "../quotas/organization-quota.service";
 import { ApiKeyUsageService } from "./api-key-usage.service";
@@ -329,9 +334,21 @@ export class ApiKeyService {
     });
   }
 
-  async listKeysForOrganization(organizationId: string) {
-    return this.prisma.apiKey.findMany({
-      where: { organizationId },
+  /**
+   * List all API keys for an organization (metadata only, no secrets).
+   *
+   * @param organizationId - Organization to list keys for
+   * @returns List of key metadata (id, prefix, name, status, scopes, dates)
+   */
+  async listKeysForOrganization(
+    organizationId: string,
+    pagination: { cursor?: string; limit?: number } = {},
+  ) {
+    const limit = pagination.limit ?? 20;
+    const cursorWhere = cursorWhereFragment(pagination.cursor, "createdAt");
+
+    const rows = await this.prisma.apiKey.findMany({
+      where: { organizationId, ...cursorWhere },
       select: {
         id: true,
         prefix: true,
@@ -344,8 +361,11 @@ export class ApiKeyService {
         expiresAt: true,
         lastUsedAt: true,
       },
-      orderBy: { createdAt: "desc" },
+      orderBy: cursorOrderBy("createdAt"),
+      take: limit + 1,
     });
+
+    return buildPage(rows, limit, "createdAt");
   }
 
   /**

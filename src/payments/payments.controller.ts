@@ -90,13 +90,31 @@ export class PaymentsController {
   @ApiOperation({
     summary: "List payments for the authenticated user",
     description:
-      "Returns up to 100 payments owned by the authenticated wallet, ordered by `occurredAt` " +
-      "descending. Filter by `classification` and/or `assetCode` as needed.",
+      "Returns a cursor-paginated page of payments owned by the authenticated wallet, " +
+      "ordered deterministically by `occurredAt` then `id` (both descending). Filter by " +
+      "`classification` and/or `assetCode` as needed. Pass `pageInfo.nextCursor` from a " +
+      "response as the next request's `cursor` to page further.",
   })
   @ApiResponse({
     status: HttpStatus.OK,
-    description: "Array of payment records. `amountEncrypted` is excluded from the response.",
-    type: [PaymentResponseDto],
+    description:
+      "A page of payment records plus pagination metadata. `amountEncrypted` is excluded " +
+      "from the response.",
+    schema: {
+      properties: {
+        data: {
+          type: "array",
+          items: { type: "object" },
+        },
+        pageInfo: {
+          type: "object",
+          properties: {
+            hasMore: { type: "boolean" },
+            nextCursor: { type: "string", nullable: true },
+          },
+        },
+      },
+    },
   })
   @ApiResponse({
     status: HttpStatus.UNPROCESSABLE_ENTITY,

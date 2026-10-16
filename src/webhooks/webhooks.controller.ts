@@ -37,6 +37,10 @@ import {
   RedriveDeadLetterDto,
   RedriveDeadLettersBatchDto,
 } from "./dto/dead-letter.dto";
+import {
+  ListWebhookDeliveriesDto,
+  ListWebhooksDto,
+} from "./dto/list-webhooks.dto";
 import { UpdateWebhookEventsDto } from "./dto/update-webhook-events.dto";
 import { UpdateWebhookCircuitConfigDto } from "./dto/webhook-circuit-config.dto";
 import { WebhookCircuitStatsDto } from "./dto/webhook-circuit-stats.dto";
@@ -201,28 +205,35 @@ export class WebhooksController {
   @ApiOperation({
     summary: "List webhook endpoints for your organisation",
     description:
-      "Returns every endpoint registered by the caller's organisation. Signing " +
-      "secrets are never included.",
+      "Returns a cursor-paginated, deterministically ordered page of endpoints " +
+      "registered by the caller's organisation. Signing secrets are never included. " +
+      "Pass `pageInfo.nextCursor` from a response as the next request's `cursor`.",
   })
   @ApiResponse({
     status: HttpStatus.OK,
-    description: "Endpoints owned by the caller's organisation.",
+    description: "Endpoints owned by the caller's organisation, plus pagination metadata.",
     schema: {
-      example: [
-        {
-          id: "ckv8v6h2b0002qzrm7t4k9xza",
-          url: "https://example.com/webhooks/earnproof",
-          events: ["proof.created", "proof.verified"],
-          status: "ACTIVE",
-          createdAt: "2026-08-24T12:00:00.000Z",
-          updatedAt: "2026-08-24T12:00:00.000Z",
-        },
-      ],
+      example: {
+        data: [
+          {
+            id: "ckv8v6h2b0002qzrm7t4k9xza",
+            url: "https://example.com/webhooks/earnproof",
+            events: ["proof.created", "proof.verified"],
+            status: "ACTIVE",
+            createdAt: "2026-08-24T12:00:00.000Z",
+            updatedAt: "2026-08-24T12:00:00.000Z",
+          },
+        ],
+        pageInfo: { hasMore: false, nextCursor: null },
+      },
     },
   })
-  async list(@CurrentUser() user: AuthenticatedUser) {
+  async list(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query() query: ListWebhooksDto,
+  ) {
     const orgId = await this.requireOrgId(user);
-    return this.webhooksService.listForOrg(orgId);
+    return this.webhooksService.listForOrg(orgId, query);
   }
 
   @Get(":id")
@@ -435,8 +446,10 @@ export class WebhooksController {
   @ApiOperation({
     summary: "List delivery records for a webhook endpoint",
     description:
-      "The 100 most recent delivery attempts, newest first. Request bodies and " +
-      "signing headers are never stored, so nothing here can leak a secret.",
+      "A cursor-paginated, deterministically ordered page of delivery attempts, newest " +
+      "first. Request bodies and signing headers are never stored, so nothing here can " +
+      "leak a secret. Pass `pageInfo.nextCursor` from a response as the next request's " +
+      "`cursor`.",
   })
   @ApiParam({
     name: "id",
@@ -445,35 +458,42 @@ export class WebhooksController {
   })
   @ApiResponse({
     status: HttpStatus.OK,
-    description: "Recent delivery attempts.",
+    description: "Recent delivery attempts, plus pagination metadata.",
     schema: {
-      example: [
-        {
-          id: "ckv8v6h2b0003qzrm4d8n2plq",
-          eventType: "proof.created",
-          eventId: "evt_01hxk8s3n7q9v2m4c6d8e0f2g4",
-          attempt: 1,
-          status: "DELIVERED",
-          statusCode: 200,
-          responseBody: '{"ok":true}',
-          durationMs: 142,
-          failureReason: null,
-          replayOf: null,
-          replayedBy: null,
-          deliveredAt: "2026-08-24T12:30:01.000Z",
-          nextRetryAt: null,
-          createdAt: "2026-08-24T12:30:00.000Z",
-        },
-      ],
+      example: {
+        data: [
+          {
+            id: "ckv8v6h2b0003qzrm4d8n2plq",
+            eventType: "proof.created",
+            eventId: "evt_01hxk8s3n7q9v2m4c6d8e0f2g4",
+            attempt: 1,
+            status: "DELIVERED",
+            statusCode: 200,
+            responseBody: '{"ok":true}',
+            durationMs: 142,
+            failureReason: null,
+            replayOf: null,
+            replayedBy: null,
+            deliveredAt: "2026-08-24T12:30:01.000Z",
+            nextRetryAt: null,
+            createdAt: "2026-08-24T12:30:00.000Z",
+          },
+        ],
+        pageInfo: { hasMore: false, nextCursor: null },
+      },
     },
   })
   @ApiNotFoundResponse({
     description: "No such endpoint in the caller's organisation.",
     type: ApiErrorDto,
   })
-  async listDeliveries(@CurrentUser() user: AuthenticatedUser, @Param("id") id: string) {
+  async listDeliveries(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("id") id: string,
+    @Query() query: ListWebhookDeliveriesDto,
+  ) {
     const orgId = await this.requireOrgId(user);
-    return this.webhooksService.listDeliveries(orgId, id);
+    return this.webhooksService.listDeliveries(orgId, id, query);
   }
 
   // ---------------------------------------------------------------------------

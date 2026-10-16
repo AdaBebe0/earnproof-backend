@@ -36,6 +36,7 @@ import { RecentAuthService, DESTRUCTIVE_ACTIONS } from "../auth/recent-auth.serv
 import { PrismaService } from "../database/prisma.service";
 import {
   CreateApiKeyDto,
+  ListApiKeysQueryDto,
   OrganizationApiKeysQueryDto,
 } from "./dto/api-key-request.dto";
 import {
@@ -181,26 +182,32 @@ export class ApiKeysController {
   @Get()
   @ApiOperation({
     summary: "List API keys for your organization",
-    description: "List all API keys for your organization (metadata only, no secrets).",
+    description:
+      "A cursor-paginated, deterministically ordered page of API keys for your " +
+      "organization (metadata only, no secrets). Pass `pageInfo.nextCursor` from a " +
+      "response as the next request's `cursor`.",
   })
   @ApiResponse({
     status: 200,
-    description: "List of API keys",
+    description: "A page of API keys, plus pagination metadata.",
     schema: {
-      example: [
-        {
-          id: "key_abc123",
-          prefix: "dGVzdGtl",
-          name: "GitHub CI",
-          status: "ACTIVE",
-          scopes: ["PROOF_VERIFY", "PAYMENT_READ"],
-          createdAt: "2026-08-24T12:00:00Z",
-          rotatedAt: null,
-          revokedAt: null,
-          expiresAt: null,
-          lastUsedAt: "2026-08-24T13:30:00Z",
-        },
-      ],
+      example: {
+        data: [
+          {
+            id: "key_abc123",
+            prefix: "dGVzdGtl",
+            name: "GitHub CI",
+            status: "ACTIVE",
+            scopes: ["PROOF_VERIFY", "PAYMENT_READ"],
+            createdAt: "2026-08-24T12:00:00Z",
+            rotatedAt: null,
+            revokedAt: null,
+            expiresAt: null,
+            lastUsedAt: "2026-08-24T13:30:00Z",
+          },
+        ],
+        pageInfo: { hasMore: false, nextCursor: null },
+      },
     },
   })
   @ApiResponse({
@@ -216,7 +223,7 @@ export class ApiKeysController {
   })
   async listKeys(
     @CurrentUser() user: AuthenticatedUser,
-    @Query() query: OrganizationApiKeysQueryDto = {},
+    @Query() query: ListApiKeysQueryDto = {},
   ) {
     // Authorization: User must be organization admin
     const organizationId = await this.getAuthorizedOrganizationId(
@@ -230,22 +237,26 @@ export class ApiKeysController {
       );
     }
 
-    const keys = await this.apiKeyService.listKeysForOrganization(
+    const { data, pageInfo } = await this.apiKeyService.listKeysForOrganization(
       organizationId,
+      { cursor: query.cursor, limit: query.limit },
     );
 
-    return keys.map((key) => ({
-      id: key.id,
-      prefix: key.prefix,
-      name: key.name,
-      status: key.status,
-      scopes: key.scopeAssignments.map((sa) => sa.scope),
-      createdAt: key.createdAt,
-      rotatedAt: key.rotatedAt,
-      revokedAt: key.revokedAt,
-      expiresAt: key.expiresAt,
-      lastUsedAt: key.lastUsedAt,
-    }));
+    return {
+      data: data.map((key) => ({
+        id: key.id,
+        prefix: key.prefix,
+        name: key.name,
+        status: key.status,
+        scopes: key.scopeAssignments.map((sa) => sa.scope),
+        createdAt: key.createdAt,
+        rotatedAt: key.rotatedAt,
+        revokedAt: key.revokedAt,
+        expiresAt: key.expiresAt,
+        lastUsedAt: key.lastUsedAt,
+      })),
+      pageInfo,
+    };
   }
 
   /**
