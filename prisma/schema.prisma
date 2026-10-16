@@ -421,24 +421,27 @@ enum WebhookDeliveryStatus {
 }
 
 model WebhookDelivery {
-  id            String                @id @default(cuid())
-  webhookId     String
-  webhook       Webhook               @relation(fields: [webhookId], references: [id])
-  eventType     String
-  eventId       String
-  payload       Json
-  attempt       Int                   @default(1)
-  status        WebhookDeliveryStatus @default(PENDING)
-  statusCode    Int?
-  responseBody  String?
-  durationMs    Int?
-  failureReason String?
-  replayOf      String?
-  replayedBy    String?
-  replayKey     String?               @unique
-  deliveredAt   DateTime?
-  nextRetryAt   DateTime?
-  createdAt     DateTime              @default(now())
+  id             String                @id @default(cuid())
+  webhookId      String
+  webhook        Webhook               @relation(fields: [webhookId], references: [id])
+  eventType      String
+  eventId        String
+  payload        Json
+  attempt        Int                   @default(1)
+  status         WebhookDeliveryStatus @default(PENDING)
+  statusCode     Int?
+  /// Safe webhook response with truncation flag, content hash, and redaction.
+  /// Structure: { truncatedBody: string, contentHash: string, wasTruncated: boolean, hadEncodingIssue: boolean }
+  /// null when delivery has not yet been attempted or when status is PENDING.
+  responseBody   Json?
+  durationMs     Int?
+  failureReason  String?
+  replayOf       String?
+  replayedBy     String?
+  replayKey      String?               @unique
+  deliveredAt    DateTime?
+  nextRetryAt    DateTime?
+  createdAt      DateTime              @default(now())
 
   @@index([webhookId, createdAt])
   @@index([eventId])

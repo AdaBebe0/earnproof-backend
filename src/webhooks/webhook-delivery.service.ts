@@ -16,9 +16,7 @@ import {
   SsrfBlockedError,
   assertSafeWebhookDestination,
 } from "./webhook-ssrf-guard";
-
-/** Maximum stored response body size in bytes (1 KiB). */
-const MAX_RESPONSE_BODY_BYTES = 1024;
+import { processWebhookResponse } from "./webhook-response-safety";
 
 /** Delivery timeout in milliseconds. */
 const DELIVERY_TIMEOUT_MS = 10_000;
@@ -345,7 +343,7 @@ export class WebhookDeliveryService implements OnModuleInit {
     const signature = this.signing.sign(signingSecret, timestamp, delivery.eventId, body);
 
     let statusCode: number | undefined;
-    let responseBody: string | undefined;
+    let responseBody: Prisma.InputJsonValue | undefined;
     let durationMs: number | undefined;
     let success = false;
     let failureReason: string | undefined;
@@ -373,11 +371,9 @@ export class WebhookDeliveryService implements OnModuleInit {
       durationMs = Date.now() - start;
       statusCode = response.status;
 
-      // Truncate response body to prevent large payloads in logs.
-      const rawText = redactSensitiveResponse(await response.text());
-      responseBody = rawText.length > MAX_RESPONSE_BODY_BYTES
-        ? rawText.slice(0, MAX_RESPONSE_BODY_BYTES) + "…[truncated]"
-        : rawText;
+      // Process response body: normalize encoding, redact secrets, compute hash, truncate.
+      const safeResponse = processWebhookResponse(await response.text());
+      responseBody = safeResponse as unknown as Prisma.InputJsonValue;
 
       success = response.ok;
       if (!success) {
@@ -502,13 +498,4 @@ export class WebhookDeliveryService implements OnModuleInit {
     }
     return [];
   }
-}
-
-function redactSensitiveResponse(value: string): string {
-  return value
-    .replace(
-      /(["']?(?:authorization|password|secret|token|api[_-]?key)["']?\s*[:=]\s*["']?)[^"'\s,}]*/gi,
-      "$1[REDACTED]",
-    )
-    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [REDACTED]");
 }
