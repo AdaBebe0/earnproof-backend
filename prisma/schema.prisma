@@ -93,6 +93,20 @@ enum AuthEventType {
   RATE_LIMITED
 }
 
+enum EncryptionKeyRewrapStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+enum EncryptionKeyRetirementStatus {
+  PENDING
+  GUARDING
+  SAFE_TO_RETIRE
+  FAILED
+}
+
 enum ApiKeyScope {
   // Proof verification and reading
   PROOF_READ
@@ -480,4 +494,46 @@ model AuthAuditEvent {
   @@index([walletHash, createdAt])
   @@index([eventType, createdAt])
   @@index([createdAt])
+}
+
+/// Tracks progress of rewrapping payments from one encryption key version to another.
+/// Supports resumable batch processing with crash recovery and checkpoint semantics.
+model EncryptionKeyRewrapIntent {
+  id                      String                       @id @default(cuid())
+  sourceKeyVersion        Int
+  targetKeyVersion        Int
+  status                  EncryptionKeyRewrapStatus    @default(PENDING)
+  processedCount          Int                          @default(0)
+  totalCount              Int?                         /// Estimated total payments to rewrap (null until first batch runs)
+  lastProcessedPaymentId  String?                      /// Cursor for resuming after crash
+  attemptCount            Int                          @default(0)
+  lastAttemptAt           DateTime?
+  nextRetryAt             DateTime?
+  lastErrorSafe           String?                      /// Redacted error message
+  permanentError          Boolean                      @default(false)
+  createdAt               DateTime                     @default(now())
+  updatedAt               DateTime                     @updatedAt
+
+  @@unique([sourceKeyVersion, targetKeyVersion])
+  @@index([nextRetryAt])
+  @@index([status])
+}
+
+/// Tracks progress of retiring an encryption key version after all ciphertext has been rewrapped.
+/// Prevents accidental retirement while dependent ciphertext remains.
+model EncryptionKeyRetirementIntent {
+  id                      String                        @id @default(cuid())
+  keyVersion              Int                           @unique
+  status                  EncryptionKeyRetirementStatus @default(PENDING)
+  dependentPaymentCount   Int                           @default(0)  /// Count of payments still encrypted with this version
+  attemptCount            Int                           @default(0)
+  lastAttemptAt           DateTime?
+  nextRetryAt             DateTime?
+  lastErrorSafe           String?                       /// Redacted error message
+  permanentError          Boolean                       @default(false)
+  createdAt               DateTime                      @default(now())
+  updatedAt               DateTime                      @updatedAt
+
+  @@index([nextRetryAt])
+  @@index([status])
 }
