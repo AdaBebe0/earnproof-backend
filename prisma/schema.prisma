@@ -185,6 +185,7 @@ enum IdempotencyStatus {
   PENDING
   COMPLETED
   FAILED
+  CANCELLED
 }
 
 enum WalletRotationStatus {
@@ -283,6 +284,10 @@ model User {
   createdAccessReviews    AccessReviewCampaign[] @relation("CreatedAccessReviews")
   reviewedAccessEntries   AccessReviewEntry[]    @relation("ReviewedAccessEntries")
   consentRecords          ConsentRecord[]
+  paymentCheckpointHealthSnapshots PaymentCheckpointHealthSnapshot[]
+  proofExpirationReminderPreference ProofExpirationReminderPreference?
+  proofExpirationReminderDeliveries ProofExpirationReminderDelivery[]
+  sessionRiskEvents       SessionRiskEvent[]
 
   @@index([walletHash])
   @@index([status])
@@ -409,6 +414,11 @@ model Organization {
   residencyAssignments DataResidencyAssignment[]
   schemaImportJobs     SchemaImportJob[]
   supportAccessGrants  SupportAccessGrant[]
+  paymentCheckpointHealthSnapshots PaymentCheckpointHealthSnapshot[]
+  transactionConfirmations TransactionConfirmation[]
+  domainEventsOutbox       DomainEventOutbox[]
+  bulkAdminJobs        BulkAdminJob[]
+  securityNotifications SecurityNotification[]
 
   @@index([status])
   @@index([archivedAt])
@@ -453,6 +463,20 @@ model IdempotencyRecord {
   responseStatusCode Int?
   /// Timestamp when this record should be considered expired (for cleanup).
   expiresAt          DateTime
+  /// Typed operation name (e.g. PROOF_CREATE, PAYMENT_SYNC).
+  operationType      String?           @db.VarChar(64)
+  /// Target resource type associated with this operation.
+  resourceType       String?           @db.VarChar(64)
+  /// Target resource identifier.
+  resourceId         String?           @db.VarChar(128)
+  /// Read-after-write consistency token issued on completion.
+  consistencyToken   String?
+  /// Number of invocation attempts under this key.
+  attemptCount       Int               @default(1)
+  /// Reason when cancelled.
+  cancellationReason String?
+  /// Additional operation metadata.
+  metadata           Json?
   createdAt          DateTime          @default(now())
   updatedAt          DateTime          @updatedAt
 
@@ -460,6 +484,7 @@ model IdempotencyRecord {
   /// Also serves as the compound index for fast lookups.
   @@unique([organizationId, idempotencyKey])
   @@index([organizationId, expiresAt])
+  @@index([organizationId, resourceType, resourceId])
 }
 
 model Issuer {
@@ -755,6 +780,7 @@ model Proof {
   sharingEvents           ProofSharingEvent[]
   disclosureReceipts      DisclosureReceipt[]
   disputes                ProofDispute[]
+  expirationReminderDeliveries ProofExpirationReminderDelivery[]
 
   @@index([userId, status])
   @@index([userId, createdAt, id])
@@ -980,11 +1006,19 @@ model AuditLog {
   prevHash       String?
   hash           String        @default("")
 
+  // Correlation graph fields (#283)
+  correlationId  String?
+  parentId       String?
+  parent         AuditLog?     @relation("AuditLogLineage", fields: [parentId], references: [id])
+  children       AuditLog[]    @relation("AuditLogLineage")
+
   @@unique([chainKey, sequence])
   @@index([actorType, actorId])
   @@index([resourceType, resourceId])
   @@index([createdAt])
   @@index([organizationId, createdAt])
+  @@index([organizationId, correlationId])
+  @@index([parentId])
 }
 
 /// Per-chain append cursor for the AuditLog hash chain.
@@ -2108,4 +2142,326 @@ model ProtocolSchema {
 
   @@index([proofType, status])
   @@index([network, status])
+}
+
+// ---------------------------------------------------------------------------
+// Payment Sync Checkpoint Health Snapshots (#280)
+// ---------------------------------------------------------------------------
+
+enum CheckpointHealthClassification {
+  NORMAL_LAG
+  STALLED_INGESTION
+  HORIZON_OUTAGE
+  RATE_LIMITING
+  REORGANIZATION_RECOVERY
+}
+
+model PaymentCheckpointHealthSnapshot {
+  id                String                         @id @default(cuid())
+  userId            String
+  user              User                           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organizationId    String?
+  organization      Organization?                  @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+  network           String
+  walletAddressHash String
+  ledgerSequence    Int
+  latestKnownLedger Int
+  ledgerLag         Int
+  classification    CheckpointHealthClassification @default(NORMAL_LAG)
+  pagingToken       String
+  isStalled         Boolean                        @default(false)
+  isReorganizing    Boolean                        @default(false)
+  recoveryAttempts  Int                            @default(0)
+  lastRecoveredAt   DateTime?
+  metadata          Json?
+  recordedAt        DateTime                       @default(now())
+  createdAt         DateTime                       @default(now())
+
+  @@index([userId, recordedAt])
+  @@index([network, classification])
+  @@index([organizationId, recordedAt])
+}
+
+// ---------------------------------------------------------------------------
+// Proof Expiration Reminders (#281)
+// ---------------------------------------------------------------------------
+
+enum ReminderDeliveryStatus {
+  SCHEDULED
+  ENQUEUED
+  DELIVERED
+  CANCELLED
+}
+
+model ProofExpirationReminderPreference {
+  id            String    @id @default(cuid())
+  userId        String    @unique
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  enabled       Boolean   @default(true)
+  leadTimeHours Int[]     @default([24, 72, 168])
+  optedOutAt    DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@index([userId, enabled])
+}
+
+model ProofExpirationReminderDelivery {
+  id                 String                 @id @default(cuid())
+  proofId            String
+  proof              Proof                  @relation(fields: [proofId], references: [id], onDelete: Cascade)
+  userId             String
+  user               User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  windowHours        Int
+  targetDate         DateTime
+  status             ReminderDeliveryStatus @default(SCHEDULED)
+  scheduledFor       DateTime
+  deliveredAt        DateTime?
+  cancelledAt        DateTime?
+  cancellationReason String?
+  notificationRecord Json?
+  retryCount         Int                    @default(0)
+  createdAt          DateTime               @default(now())
+  updatedAt          DateTime               @updatedAt
+
+  @@unique([proofId, windowHours])
+  @@index([status, scheduledFor])
+  @@index([userId, status])
+enum TransactionConfirmationStatus {
+  SUBMITTED
+  PENDING
+  CONFIRMED
+  FAILED
+  REPLACED
+  TIMEOUT
+}
+
+/// Durable tracking for Stellar and Soroban transactions from submission through finality.
+model TransactionConfirmation {
+  id              String                        @id @default(cuid())
+  organizationId  String
+  organization    Organization                  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  network         String                        @db.VarChar(32)
+  transactionHash String                        @db.VarChar(128)
+  operationType   String                        @db.VarChar(64)
+  operationRef    String?                       @db.VarChar(128)
+  status          TransactionConfirmationStatus @default(SUBMITTED)
+  submittedAt     DateTime                      @default(now())
+  ledgerSequence  Int?
+  ledgerHash      String?                       @db.VarChar(128)
+  confirmedAt     DateTime?
+  replacedByHash  String?                       @db.VarChar(128)
+  failureReason   String?
+  errorCode       String?                       @db.VarChar(64)
+  retryCount      Int                           @default(0)
+  nextPollAt      DateTime?
+  metadata        Json?
+  createdAt       DateTime                      @default(now())
+  updatedAt       DateTime                      @updatedAt
+
+  @@unique([network, transactionHash])
+  @@index([organizationId, status])
+  @@index([organizationId, operationRef])
+  @@index([status, nextPollAt])
+}
+
+enum DomainEventStatus {
+  PENDING
+  LEASED
+  PROCESSED
+  FAILED
+  QUARANTINED
+}
+
+/// Transactional internal domain event outbox for reliable asynchronous messaging.
+model DomainEventOutbox {
+  id             String            @id @default(cuid())
+  organizationId String
+  organization   Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  eventType      String            @db.VarChar(128)
+  eventVersion   Int               @default(1)
+  aggregateType  String            @db.VarChar(64)
+  aggregateId    String            @db.VarChar(128)
+  correlationId  String?           @db.VarChar(128)
+  causationId    String?           @db.VarChar(128)
+  payload        Json
+  status         DomainEventStatus @default(PENDING)
+  leaseOwner     String?           @db.VarChar(128)
+  leaseExpiresAt DateTime?
+  attempts       Int               @default(0)
+  maxAttempts    Int               @default(5)
+  lastError      String?
+  processedAt    DateTime?
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+
+  @@index([status, leaseExpiresAt])
+  @@index([organizationId, aggregateType, aggregateId])
+  @@index([correlationId])
+}
+
+/// Idempotent consumer tracking for domain outbox events to prevent duplicate side effects.
+model DomainEventConsumerRecord {
+  id           String   @id @default(cuid())
+  eventId      String   @db.VarChar(128)
+  consumerName String   @db.VarChar(128)
+  processedAt  DateTime @default(now())
+
+  @@unique([eventId, consumerName])
+  @@index([consumerName, processedAt])
+}
+
+// ---------------------------------------------------------------------------
+// Session Risk Events and Reauthentication History (#284)
+// ---------------------------------------------------------------------------
+
+enum SessionRiskType {
+  WALLET_MISMATCH
+  ORIGIN_ANOMALY
+  REPLAY_SUSPECTED
+  ROTATION_ANOMALY
+  UNRECOGNIZED_DEVICE
+  CONCURRENT_GEO_ANOMALY
+}
+
+enum SessionRiskSeverity {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+model SessionRiskEvent {
+  id          String              @id @default(cuid())
+  userId      String
+  user        User                @relation(fields: [userId], references: [id])
+  sessionId   String?
+  riskType    SessionRiskType
+  severity    SessionRiskSeverity @default(LOW)
+  signals     Json
+  resolvedAt  DateTime?
+  retainUntil DateTime
+  createdAt   DateTime            @default(now())
+
+  @@index([userId, createdAt])
+  @@index([sessionId])
+  @@index([riskType, createdAt])
+  @@index([retainUntil])
+}
+
+// ---------------------------------------------------------------------------
+// Bounded Bulk Administration Jobs (#290)
+// ---------------------------------------------------------------------------
+
+enum BulkAdminJobType {
+  MEMBER_ROLE_UPDATE
+  ISSUER_STATUS_UPDATE
+  KEY_ROTATION
+  WEBHOOK_CONFIG_UPDATE
+}
+
+enum BulkAdminJobStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  CANCELLED
+  FAILED
+}
+
+enum BulkAdminItemStatus {
+  PENDING
+  SUCCESS
+  FAILED
+  SKIPPED
+}
+
+model BulkAdminJob {
+  id                String             @id @default(cuid())
+  organizationId    String
+  organization      Organization       @relation(fields: [organizationId], references: [id])
+  requestedById     String
+  jobType           BulkAdminJobType
+  status            BulkAdminJobStatus @default(PENDING)
+  atomic            Boolean            @default(false)
+  totalItems        Int                @default(0)
+  processedItems    Int                @default(0)
+  succeededItems    Int                @default(0)
+  failedItems       Int                @default(0)
+  idempotencyKey    String             @unique
+  leaseOwner        String?
+  leaseExpiresAt    DateTime?
+  cancelRequestedAt DateTime?
+  retainUntil       DateTime
+  items             BulkAdminJobItem[]
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+  completedAt       DateTime?
+
+  @@index([organizationId, status])
+  @@index([status, leaseExpiresAt])
+  @@index([retainUntil])
+}
+
+model BulkAdminJobItem {
+  id            String              @id @default(cuid())
+  jobId         String
+  job           BulkAdminJob        @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  itemIndex     Int
+  action        String
+  resourceId    String
+  payload       Json
+  status        BulkAdminItemStatus @default(PENDING)
+  errorCategory String?
+  errorMessage  String?
+  retries       Int                 @default(0)
+  completedAt   DateTime?
+  createdAt     DateTime            @default(now())
+
+  @@unique([jobId, itemIndex])
+  @@index([jobId, status])
+}
+
+// ---------------------------------------------------------------------------
+// Tenant-Scoped Security Notification Inbox (#293)
+// ---------------------------------------------------------------------------
+
+enum SecurityNotificationType {
+  SUSPICIOUS_LOGIN
+  API_KEY_EXHAUSTED
+  KEY_ROTATION_REQUIRED
+  ACCESS_REVIEW_REQUIRED
+  CIRCUIT_BREAKER_TRIPPED
+  DISPUTE_FILED
+  SYSTEM_SECURITY_ALERT
+}
+
+enum SecurityNotificationSeverity {
+  INFO
+  WARNING
+  HIGH
+  CRITICAL
+}
+
+model SecurityNotification {
+  id               String                       @id @default(cuid())
+  organizationId   String
+  organization     Organization                 @relation(fields: [organizationId], references: [id])
+  userId           String?
+  type             SecurityNotificationType
+  severity         SecurityNotificationSeverity @default(INFO)
+  title            String                       @db.VarChar(128)
+  summary          String                       @db.VarChar(512)
+  data             Json
+  acknowledgedAt   DateTime?
+  acknowledgedById String?
+  resolutionUrl    String?                      @db.VarChar(256)
+  retainUntil      DateTime
+  createdAt        DateTime                     @default(now())
+  updatedAt        DateTime                     @updatedAt
+
+  @@index([organizationId, createdAt])
+  @@index([organizationId, acknowledgedAt])
+  @@index([userId, createdAt])
+  @@index([type, createdAt])
+  @@index([retainUntil])
 }

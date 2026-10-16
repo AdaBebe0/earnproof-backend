@@ -36,6 +36,7 @@ import { GovernanceModule } from "./governance/governance.module";
 import { SupportAccessModule } from "./support-access/support-access.module";
 import { ReconciliationModule } from "./reconciliation/reconciliation.module";
 import { DeploymentsModule } from "./deployments/deployments.module";
+import { NotificationsModule } from "./notifications/notifications.module";
 
 @Module({
   imports: [
@@ -75,6 +76,7 @@ import { DeploymentsModule } from "./deployments/deployments.module";
     SupportAccessModule,
     ReconciliationModule,
     DeploymentsModule,
+    NotificationsModule,
   ],
   providers: [
     {
