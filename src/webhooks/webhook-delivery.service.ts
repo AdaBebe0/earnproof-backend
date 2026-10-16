@@ -2,14 +2,23 @@ import { Injectable, Logger, OnModuleInit } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { Prisma, WebhookDeliveryStatus } from "@prisma/client";
 import { randomUUID } from "crypto";
+import { Agent, type Dispatcher } from "undici";
 import { decryptProtectedAmount } from "../common/crypto/protected-amount";
 import { PrismaService } from "../database/prisma.service";
+import { WebhookClientCertificateService } from "./webhook-client-certificate.service";
 import { WebhookEnvelope, WebhookEventType } from "./webhook-event.types";
 import { WebhookSigningService } from "./webhook-signing.service";
 import {
   SsrfBlockedError,
   assertSafeWebhookDestination,
 } from "./webhook-ssrf-guard";
+
+/** Thrown when a webhook requires mTLS but has no currently valid client certificate. */
+class MtlsCertificateUnavailableError extends Error {
+  constructor() {
+    super("no active client certificate available for mTLS delivery");
+  }
+}
 
 /** Maximum stored response body size in bytes (1 KiB). */
 const MAX_RESPONSE_BODY_BYTES = 1024;
@@ -56,6 +65,7 @@ export class WebhookDeliveryService implements OnModuleInit {
   constructor(
     private readonly prisma: PrismaService,
     private readonly signing: WebhookSigningService,
+    private readonly clientCertificates: WebhookClientCertificateService,
     configService: ConfigService,
   ) {
     this.encryptionKey = configService.getOrThrow<string>("paymentEncryptionKey");
@@ -282,6 +292,7 @@ export class WebhookDeliveryService implements OnModuleInit {
             url: true,
             secretEncrypted: true,
             status: true,
+            mtlsRequired: true,
           },
         },
       },
@@ -342,6 +353,21 @@ export class WebhookDeliveryService implements OnModuleInit {
 
     const start = Date.now();
     try {
+      let dispatcher: Dispatcher | undefined;
+      if (delivery.webhook.mtlsRequired) {
+        const certPair = await this.clientCertificates.selectActiveCertificate(
+          delivery.webhook.id,
+        );
+        if (!certPair) {
+          throw new MtlsCertificateUnavailableError();
+        }
+        // Never falls back to a plain connection: this dispatcher is only
+        // used when a currently-valid certificate was found above.
+        dispatcher = new Agent({
+          connect: { cert: certPair.certificatePem, key: certPair.privateKeyPem },
+        });
+      }
+
       await assertSafeWebhookDestination(url);
 
       const response = await fetch(url, {
@@ -358,6 +384,7 @@ export class WebhookDeliveryService implements OnModuleInit {
         // forwarding a signed payload to an internal address.
         redirect: "error",
         signal: AbortSignal.timeout(DELIVERY_TIMEOUT_MS),
+        ...(dispatcher ? ({ dispatcher } as Record<string, unknown>) : {}),
       });
 
       durationMs = Date.now() - start;
@@ -390,10 +417,17 @@ export class WebhookDeliveryService implements OnModuleInit {
         this.logger.warn(`Delivery ${deliveryId} blocked by SSRF guard: ${failureReason}`);
         return;
       }
-      failureReason =
-        err instanceof Error && err.name === "TimeoutError"
-          ? "delivery request timed out"
-          : "delivery request failed";
+      if (err instanceof MtlsCertificateUnavailableError) {
+        // Transient from the delivery's point of view: a certificate added
+        // before the next retry would let it succeed, so this follows the
+        // normal retry/backoff path rather than failing permanently.
+        failureReason = err.message;
+      } else {
+        failureReason =
+          err instanceof Error && err.name === "TimeoutError"
+            ? "delivery request timed out"
+            : "delivery request failed";
+      }
     }
 
     if (success) {

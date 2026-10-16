@@ -5,6 +5,7 @@ import { ThrottlerGuard, ThrottlerModule } from "@nestjs/throttler";
 import { ScheduleModule } from "@nestjs/schedule";
 import { AuditModule } from "./audit/audit.module";
 import { ApiKeysModule } from "./api-keys/api-keys.module";
+import { ApprovalsModule } from "./approvals/approvals.module";
 import { AuthModule } from "./auth/auth.module";
 import { configuration } from "./config/configuration";
 import { validateEnv } from "./config/env.validation";
@@ -16,8 +17,10 @@ import { ObservabilityModule } from "./common/observability/observability.module
 import { JobsModule } from "./jobs/jobs.module";
 import { IssuersModule } from "./issuers/issuers.module";
 import { OrganizationsModule } from "./organizations/organizations.module";
+import { DataResidencyModule } from "./organizations/residency/data-residency.module";
 import { PaymentsModule } from "./payments/payments.module";
 import { ProofsModule } from "./proofs/proofs.module";
+import { SchemaImportsModule } from "./schemas/schema-imports.module";
 import { TrustedSourcesModule } from "./trusted-sources/trusted-sources.module";
 import { WebhooksModule } from "./webhooks/webhooks.module";
 
@@ -40,13 +43,16 @@ import { WebhooksModule } from "./webhooks/webhooks.module";
     DatabaseModule,
     AuditModule,
     ApiKeysModule,
+    ApprovalsModule,
     AuthModule,
     HealthModule,
     OrganizationsModule,
+    DataResidencyModule,
     IssuersModule,
     PaymentsModule,
     ProofsModule,
     CredentialsModule,
+    SchemaImportsModule,
     TrustedSourcesModule,
     JobsModule,
     WebhooksModule,
