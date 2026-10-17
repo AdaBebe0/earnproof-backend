@@ -12,6 +12,8 @@ import { sha256 } from "../common/crypto/hash";
 import { StructuredLogger } from "../common/logger";
 import { DomainEventOutboxService } from "../common/events/domain-event-outbox.service";
 import { DisputeDecisionNotificationPayload } from "./events/dispute-decision-notification.types";
+import { SignedCursorService } from "../common/pagination/signed-cursor.service";
+import { computeFilterIdFromDto } from "../common/pagination/filter-id";
 
 export type CreateDisputeDto = {
   proofId: string;
@@ -58,6 +60,7 @@ export class DisputesService {
 
   constructor(
     private readonly prisma: PrismaService,
+    private readonly signedCursorService: SignedCursorService,
     private readonly webhookDeliveryService?: WebhookDeliveryService,
     private readonly domainEventOutbox?: DomainEventOutboxService,
   ) {}
@@ -206,7 +209,13 @@ export class DisputesService {
   }
 
   /**
-   * List disputes with filtering and pagination.
+   * List disputes with filtering and pagination using signed cursor tokens.
+   * 
+   * Cursor tokens are signed with:
+   * - Tenant binding (organizationId) to prevent cross-tenant data leaks
+   * - Filter binding to prevent using cursors across different filter sets
+   * - Expiry (15 minutes) for time-bound validity
+   * - HMAC-SHA256 signatures for tamper protection
    */
   async listDisputes(
     user: AuthenticatedUser,
@@ -217,16 +226,28 @@ export class DisputesService {
     await this.verifyOrganizationAccess(user, organizationId);
 
     const limit = Math.min(query.limit ?? 20, 100);
-    
-    // Validate cursor if provided
+
+    // Compute filter ID from query parameters (binds cursor to specific filters)
+    const filterId = computeFilterIdFromDto(query, ["status", "category", "assignedTo"]);
+
+    // Validate and decode cursor if provided
+    let cursorId: string | undefined;
     if (query.cursor) {
-      const cursorDispute = await this.prisma.proofDispute.findFirst({
-        where: { id: query.cursor, organizationId },
-        select: { id: true },
+      const verifyResult = this.signedCursorService.verify({
+        token: query.cursor,
+        tenantId: organizationId,
+        filterId,
       });
-      if (!cursorDispute) {
-        throw new BadRequestException("Invalid dispute cursor");
+
+      if (!verifyResult.ok) {
+        // Return stable error messages for all validation failures
+        const reason = verifyResult.reason;
+        throw new BadRequestException(
+          `Invalid pagination cursor: ${reason}. Please restart pagination.`
+        );
       }
+
+      cursorId = verifyResult.data.cursorId;
     }
 
     const where: any = {
@@ -245,17 +266,26 @@ export class DisputesService {
       },
       orderBy: [{ submittedAt: "desc" }, { id: "desc" }],
       take: limit + 1,
-      ...(query.cursor ? { cursor: { id: query.cursor }, skip: 1 } : {}),
+      ...(cursorId ? { cursor: { id: cursorId }, skip: 1 } : {}),
     });
 
     const hasMore = disputes.length > limit;
     const items = hasMore ? disputes.slice(0, limit) : disputes;
 
+    // Sign the next cursor token if there are more items
+    const nextCursor = hasMore
+      ? this.signedCursorService.sign({
+          cursorId: items[items.length - 1]?.id ?? "",
+          tenantId: organizationId,
+          filterId,
+        })
+      : null;
+
     return {
       items: items.map((dispute) => this.formatDisputeResponse(dispute)),
       pageInfo: {
         hasMore,
-        nextCursor: hasMore ? items[items.length - 1]?.id ?? null : null,
+        nextCursor,
       },
     };
   }
