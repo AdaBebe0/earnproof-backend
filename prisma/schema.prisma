@@ -488,6 +488,7 @@ model Organization {
   credentialVerificationKeyTrustPins CredentialVerificationKeyTrustPin[]
   credentialQuarantines CredentialQuarantine[]
   credentialQuarantineAudits CredentialQuarantineAudit[] @relation("quarantine_audit_org")
+  roleApprovalPolicies OrganizationRoleApprovalPolicy[]
 
   @@index([status])
   @@index([archivedAt])
@@ -3169,5 +3170,41 @@ model VerificationPolicy {
   updatedAt                       DateTime            @updatedAt
   
   @@unique([organizationId, name])
+  @@index([organizationId, status])
+}
+
+// ---------------------------------------------------------------------------
+// Organization role approval policies (#298)
+// ---------------------------------------------------------------------------
+
+enum RoleApprovalPolicyStatus {
+  ACTIVE
+  SUPERSEDED
+}
+
+/// A versioned dual-control policy for organization role changes. Versions are
+/// never edited in place: an update supersedes the ACTIVE version and creates
+/// the next one, so history is append-only. An organization with no row is
+/// governed by the platform default policy, reported as version 0.
+model OrganizationRoleApprovalPolicy {
+  id                               String                   @id @default(cuid())
+  organizationId                   String
+  organization                     Organization             @relation(fields: [organizationId], references: [id])
+  version                          Int
+  status                           RoleApprovalPolicyStatus @default(ACTIVE)
+  /// JSON array of OrganizationMemberRole values whose grant or removal
+  /// requires approval. Always a superset of the platform-protected roles.
+  protectedRoles                   Json
+  /// JSON array of OrganizationMemberRole values allowed to approve.
+  approverRoles                    Json
+  requiredApprovals                Int
+  approvalExpiryMinutes            Int
+  /// When true, a change that grants or removes OWNER needs an OWNER approver.
+  ownerChangesRequireOwnerApproval Boolean
+  supersedesId                     String?                  @unique
+  createdById                      String
+  createdAt                        DateTime                 @default(now())
+
+  @@unique([organizationId, version])
   @@index([organizationId, status])
 }
