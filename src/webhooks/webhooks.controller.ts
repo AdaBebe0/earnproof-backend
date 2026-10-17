@@ -436,7 +436,11 @@ export class WebhooksController {
     summary: "List delivery records for a webhook endpoint",
     description:
       "The 100 most recent delivery attempts, newest first. Request bodies and " +
-      "signing headers are never stored, so nothing here can leak a secret.",
+      "signing headers are never stored, so nothing here can leak a secret. " +
+      "Response bodies are stored as a safe JSON structure with truncation and redaction: " +
+      "truncatedBody (first 1024 bytes), contentHash (SHA-256), wasTruncated (boolean), " +
+      "hadEncodingIssue (boolean). Sensitive patterns (api_key, password, token, etc.) " +
+      "are redacted before storage.",
   })
   @ApiParam({
     name: "id",
@@ -445,7 +449,7 @@ export class WebhooksController {
   })
   @ApiResponse({
     status: HttpStatus.OK,
-    description: "Recent delivery attempts.",
+    description: "Recent delivery attempts with safe response bodies.",
     schema: {
       example: [
         {
@@ -453,9 +457,15 @@ export class WebhooksController {
           eventType: "proof.created",
           eventId: "evt_01hxk8s3n7q9v2m4c6d8e0f2g4",
           attempt: 1,
-          status: "DELIVERED",
+          status: "SUCCESS",
           statusCode: 200,
-          responseBody: '{"ok":true}',
+          responseBody: {
+            truncatedBody: '{"ok":true}',
+            contentHash:
+              "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+            wasTruncated: false,
+            hadEncodingIssue: false,
+          },
           durationMs: 142,
           failureReason: null,
           replayOf: null,
