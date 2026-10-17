@@ -343,6 +343,9 @@ model User {
   consentRecords          ConsentRecord[]
   paymentCheckpointHealthSnapshots PaymentCheckpointHealthSnapshot[]
   proofExpirationReminderPreference ProofExpirationReminderPreference?
+  quarantineDecisions     CredentialQuarantine[]      @relation("quarantine_decidedBy")
+  quarantineImports       CredentialQuarantine[]      @relation("quarantine_importedBy")
+  quarantineAuditEvents   CredentialQuarantineAudit[] @relation("quarantine_audit_actor")
   proofExpirationReminderDeliveries ProofExpirationReminderDelivery[]
   sessionRiskEvents       SessionRiskEvent[]
   declarationsApproved    PurposeDeclaration[]  @relation("declaration_approvedBy")
@@ -482,6 +485,9 @@ model Organization {
   purposeDefinitions   PurposeDefinition[]
   purposeDeclarations  PurposeDeclaration[]
   verificationPolicies VerificationPolicy[]
+  credentialVerificationKeyTrustPins CredentialVerificationKeyTrustPin[]
+  credentialQuarantines CredentialQuarantine[]
+  credentialQuarantineAudits CredentialQuarantineAudit[] @relation("quarantine_audit_org")
 
   @@index([status])
   @@index([archivedAt])
@@ -579,6 +585,7 @@ model Issuer {
   policyCommitments       IssuerPolicyCommitment[]
   invoiceSettlements      ProofInvoiceSettlement[]
   signingKeys             IssuerSigningKey[]
+  credentialVerificationKeyTrustPins CredentialVerificationKeyTrustPin[]
 
   @@index([organizationId])
   @@index([status])
@@ -898,6 +905,7 @@ model Proof {
   anchoringIntents        AnchoringIntent[]
   shareTokens             ProofShareToken[]
   invoiceSettlement       ProofInvoiceSettlement?
+  verificationProvenance  VerificationProvenance[]
   sharingEvents           ProofSharingEvent[]
   disclosureReceipts      DisclosureReceipt[]
   disputes                ProofDispute[]
@@ -1080,6 +1088,7 @@ model VerificationProvenance {
   id          String                          @id @default(cuid())
   proofId     String
   proof       Proof                           @relation(fields: [proofId], references: [id], onDelete: Cascade)
+  sourceRecords VerificationProvenanceSource[]
   /// Versioned decision schema (e.g., "earnproof.verification.provenance.v1")
   /// Allows evolution of decision structure over time.
   schemaVersion String
@@ -1208,6 +1217,7 @@ model Webhook {
   deliveries         WebhookDelivery[]
   clientCertificates WebhookClientCertificate[]
   circuitBreaker     WebhookCircuit?
+  secretVersions     WebhookSecretVersion[]
 
   @@index([organizationId, status])
 }
@@ -2532,6 +2542,8 @@ model ProofExpirationReminderDelivery {
   @@unique([proofId, windowHours])
   @@index([status, scheduledFor])
   @@index([userId, status])
+}
+
 enum TransactionConfirmationStatus {
   SUBMITTED
   PENDING
