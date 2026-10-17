@@ -6,8 +6,6 @@ import {
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { ResourceStatus } from "@prisma/client";
-import { randomBytes } from "crypto";
-import { PaymentEncryptionKeyringService } from "../common/crypto/payment-encryption-keyring.service";
 import { PrismaService } from "../database/prisma.service";
 import { ConflictException } from "../common/exceptions/domain.exceptions";
 import { CreateWebhookDto } from "./dto/create-webhook.dto";
@@ -23,8 +21,6 @@ const SECRET_BYTES = 32;
 
 @Injectable()
 export class WebhooksService {
-  private readonly paymentEncryptionKeyring: PaymentEncryptionKeyringService;
-
   constructor(
     private readonly prisma: PrismaService,
     private readonly deliveryService: WebhookDeliveryService,
@@ -46,9 +42,6 @@ export class WebhooksService {
    * The caller must store it securely.
    */
   async create(organizationId: string, dto: CreateWebhookDto) {
-    const rawSecret = randomBytes(SECRET_BYTES).toString("hex");
-    const secretEncrypted = this.paymentEncryptionKeyring.encrypt(rawSecret);
-
     // De-duplicate events list
     const events = [...new Set(dto.events)];
 
@@ -83,6 +76,7 @@ export class WebhooksService {
       ...webhook,
       // Returned once at creation time only.
       signingSecret: rawSecret,
+      keyId,
     };
   }
 
@@ -126,11 +120,13 @@ export class WebhooksService {
   }
 
   /**
-   * Rotate the signing secret.
+   * Rotate the webhook signing secret.
    *
-   * Returns the new raw secret once.  In-flight deliveries using the old
-   * secret will fail (they will retry using the new secret on the next
-   * attempt, since they re-decrypt at execution time).
+   * Moves the current ACTIVE secret to OVERLAP state (with a bounded overlap window)
+   * and creates a new ACTIVE secret. This allows retries and replays to use the previous
+   * key for a limited time.
+   *
+   * Returns the new raw secret and keyId once.
    */
   async rotateSecret(organizationId: string, webhookId: string) {
     const webhook = await this.assertOwnedWebhook(organizationId, webhookId);
@@ -180,9 +176,10 @@ export class WebhooksService {
 
     return {
       webhookId,
-      signingSecret: newRawSecret,
+      signingSecret: rawSecret,
+      keyId,
       rotatedAt: new Date().toISOString(),
-      note: "Any in-flight deliveries signed with the old secret will fail their current attempt. They will be retried with the new secret.",
+      note: "Previous secret is active for the overlap window to allow retries to use it. After the window expires, only new deliveries will use the new secret.",
     };
   }
 

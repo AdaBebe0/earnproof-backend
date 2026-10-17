@@ -28,6 +28,7 @@ import {
   WebhookTestEnvelope,
 } from "./webhook-event.types";
 import { WebhookSigningService } from "./webhook-signing.service";
+import { WebhookSecretVersioningService } from "./webhook-secret-versioning.service";
 import {
   SsrfBlockedError,
   assertSafeWebhookDestination,
@@ -538,7 +539,6 @@ export class WebhookDeliveryService implements OnModuleInit {
           select: {
             id: true,
             url: true,
-            secretEncrypted: true,
             status: true,
             mtlsRequired: true,
             organization: { select: { archivedAt: true } },
@@ -595,7 +595,6 @@ export class WebhookDeliveryService implements OnModuleInit {
     }
 
     const url = delivery.webhook.url;
-    const secretEncrypted = delivery.webhook.secretEncrypted;
 
     // Decrypt signing secret — never stored in plain text or in delivery logs.
     let signingSecret: string;
@@ -619,7 +618,13 @@ export class WebhookDeliveryService implements OnModuleInit {
     const body = delivery.payloadBody ?? JSON.stringify(delivery.payload);
     const timestamp = Math.floor(Date.now() / 1000);
 
-    const signature = this.signing.sign(signingSecret, timestamp, delivery.eventId, body);
+    const signature = this.signing.sign(
+      signingSecret,
+      timestamp,
+      delivery.eventId,
+      signedKeyId,
+      body,
+    );
 
     const schemaVersion = delivery.schemaVersion ?? "1";
     const headers: Record<string, string> = {
@@ -642,7 +647,7 @@ export class WebhookDeliveryService implements OnModuleInit {
     }
 
     let statusCode: number | undefined;
-    let responseBody: string | undefined;
+    let responseBody: Prisma.InputJsonValue | undefined;
     let durationMs: number | undefined;
     let success = false;
     let failureReason: string | undefined;
@@ -680,11 +685,9 @@ export class WebhookDeliveryService implements OnModuleInit {
       durationMs = Date.now() - start;
       statusCode = response.status;
 
-      // Truncate response body to prevent large payloads in logs.
-      const rawText = redactSensitiveResponse(await response.text());
-      responseBody = rawText.length > MAX_RESPONSE_BODY_BYTES
-        ? rawText.slice(0, MAX_RESPONSE_BODY_BYTES) + "…[truncated]"
-        : rawText;
+      // Process response body: normalize encoding, redact secrets, compute hash, truncate.
+      const safeResponse = processWebhookResponse(await response.text());
+      responseBody = safeResponse as unknown as Prisma.InputJsonValue;
 
       success = response.ok;
       if (!success) {
@@ -728,6 +731,7 @@ export class WebhookDeliveryService implements OnModuleInit {
           responseBody,
           durationMs,
           deliveredAt: new Date(),
+          signedKeyId,
         },
       });
 
@@ -735,7 +739,7 @@ export class WebhookDeliveryService implements OnModuleInit {
       await this.circuitBreaker.recordSuccess(delivery.webhookId);
 
       this.logger.log(
-        `Delivery ${deliveryId} succeeded (attempt ${delivery.attempt}, ${durationMs}ms, HTTP ${statusCode})`,
+        `Delivery ${deliveryId} succeeded (attempt ${delivery.attempt}, keyId=${signedKeyId}, ${durationMs}ms, HTTP ${statusCode})`,
       );
       return;
     }
@@ -775,6 +779,7 @@ export class WebhookDeliveryService implements OnModuleInit {
         durationMs,
         failureReason,
         deliveredAt: new Date(),
+        signedKeyId,
       },
     });
 
@@ -789,13 +794,14 @@ export class WebhookDeliveryService implements OnModuleInit {
         attempt: nextAttempt,
         status: WebhookDeliveryStatus.PENDING,
         replayOf: delivery.replayOf, // carry through if this is a replay
+        signedKeyId, // preserve the key version for the retry
         nextRetryAt,
       },
       select: { id: true },
     });
 
     this.logger.log(
-      `Delivery ${deliveryId} failed (attempt ${delivery.attempt}); retrying as ${retryDelivery.id} in ${delay}ms`,
+      `Delivery ${deliveryId} failed (attempt ${delivery.attempt}, keyId=${signedKeyId}); retrying as ${retryDelivery.id} in ${delay}ms`,
     );
 
     // Record failure in circuit breaker for retryable failures

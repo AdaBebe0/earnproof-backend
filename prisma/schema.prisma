@@ -169,6 +169,20 @@ enum AuthEventType {
   ACCOUNT_INACTIVE
 }
 
+enum EncryptionKeyRewrapStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+enum EncryptionKeyRetirementStatus {
+  PENDING
+  GUARDING
+  SAFE_TO_RETIRE
+  FAILED
+}
+
 enum ApiKeyScope {
   // Proof verification and reading
   PROOF_READ
@@ -1171,6 +1185,12 @@ model ApiKeyScopeAssignment {
   @@unique([apiKeyId, scope])
 }
 
+enum WebhookSecretState {
+  ACTIVE
+  OVERLAP
+  RETIRED
+}
+
 model Webhook {
   id                 String                     @id @default(cuid())
   organizationId     String
@@ -1190,6 +1210,33 @@ model Webhook {
   circuitBreaker     WebhookCircuit?
 
   @@index([organizationId, status])
+}
+
+/**
+ * Versioned signing secrets for a webhook.
+ *
+ * Enables controlled rotation with overlap windows:
+ * - ACTIVE: Primary signing key; all new deliveries use this
+ * - OVERLAP: Can be used by retries and replays; for window when both keys accepted
+ * - RETIRED: No longer used; kept for audit trail
+ *
+ * keyId is a non-secret identifier returned in signature headers for key identification.
+ */
+model WebhookSecretVersion {
+  id                  String                @id @default(cuid())
+  webhookId           String
+  webhook             Webhook               @relation(fields: [webhookId], references: [id], onDelete: Cascade)
+  keyId               String                // Non-secret identifier for this key version
+  secretEncrypted     String                // AES-256-GCM encrypted signing secret
+  state               WebhookSecretState    @default(ACTIVE)
+  activatedAt         DateTime              @default(now())
+  overlapExpiresAt    DateTime?             // When OVERLAP state expires; becomes RETIRED if set and passes
+  createdAt           DateTime              @default(now())
+  updatedAt           DateTime              @updatedAt
+
+  @@unique([webhookId, keyId])
+  @@index([webhookId, state])
+  @@index([webhookId, activatedAt])
 }
 
 enum WebhookDeliveryStatus {
