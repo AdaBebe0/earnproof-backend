@@ -274,6 +274,25 @@ enum WebhookCircuitState {
   HALF_OPEN
 }
 
+/// Closed taxonomy of why a credential was quarantined.
+/// Safe to expose publicly in verification API responses.
+enum CredentialQuarantineReasonCode {
+  MALFORMED
+  UNKNOWN_KEY
+  POLICY_CONFLICT
+  TRUST_NOT_ESTABLISHED
+  SUSPICIOUS
+}
+
+/// State machine for credential quarantine lifecycle.
+/// QUARANTINED → RELEASED | REJECTED | EXPIRED (terminal states)
+enum CredentialQuarantineState {
+  QUARANTINED
+  RELEASED
+  REJECTED
+  EXPIRED
+}
+
 model User {
   id                      String                 @id @default(cuid())
   walletAddress           String                 @unique
@@ -2793,4 +2812,130 @@ model ContractVersion {
   @@unique([network, contractId, schemaVersion])
   @@index([network, contractId, isCurrent])
   @@index([network, isCurrent])
+}
+
+// ---------------------------------------------------------------------------
+// Credential Quarantine and Release (Issue #324)
+// ---------------------------------------------------------------------------
+// Isolate malformed, unknown-key, policy-conflicting, or suspicious imported
+// credentials before they can be used in normal verification. Provides a safe
+// path to release, reject, or expire them.
+
+/// Quarantined credential record: bounded metadata only, never raw credential content.
+model CredentialQuarantine {
+  // Identity & Scope
+  id                        String                           @id @default(cuid())
+  organizationId            String
+  organization              Organization                     @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  tenantId                  String  // Denormalized for tenant queries
+
+  // Quarantine Reason & State
+  reason                    CredentialQuarantineReasonCode
+  state                     CredentialQuarantineState        @default(QUARANTINED)
+
+  // Bounded Metadata (safe allowlist only; never raw credential)
+  contentHash               String                          // SHA-256(canonical credential)
+  contentSize               Int                             // Byte size of original credential
+  schemaType                String                          @db.VarChar(100)  // "EarnProofMinimumIncomeCredential"
+  schemaVersion             String                          @db.VarChar(64)   // "earnproof.minimum-income.v1"
+
+  // Issuer metadata (from credential, not live lookup)
+  issuerIdentifier          String                          @db.VarChar(255)  // Issuer name or DID (safe to log)
+  issuerPolicyVersion       Int?                                              // Issuer policy version at intake time
+
+  // Credential metadata (from parsed credential, verified safe)
+  credentialProofType       String?                         @db.VarChar(64)   // "MINIMUM_INCOME", "RECURRING_INCOME", etc.
+  credentialExpiresAt       DateTime?                                         // expiresAt from credential claim
+  credentialIssuedAt        DateTime?                                         // issuedAt from credential claim
+
+  // Key metadata (if trust pin was involved)
+  keyId                     String?                         @db.VarChar(255)  // Key identifier from proof block
+  keyType                   String?                         @db.VarChar(64)   // "Ed25519" or "HMAC-SHA256"
+  network                   String?                         @db.VarChar(64)   // "public" or "testnet" (from Ed25519 proofs)
+
+  // Evidence & Freshness
+  evidenceRefreshedAt       DateTime?                                         // When trust evidence was last fetched
+  evidenceFreshUntil        DateTime?                                         // When evidence is no longer usable for release
+  evidenceRefreshReason     String?                         @db.VarChar(255)  // Optional note on refresh
+
+  // Release Decision Metadata (filled when state != QUARANTINED)
+  decidedByUserId           String?
+  decidedBy                 User?                           @relation(fields: [decidedByUserId], references: [id], onDelete: SetNull, name: "quarantine_decidedBy")
+  decidedAt                 DateTime?                                         // When the decision was made
+  decisionReason            String?                         @db.VarChar(1024) // Free-form reason for rejection/release
+
+  // Audit & Concurrency
+  importedByUserId          String
+  importedBy                User                            @relation(fields: [importedByUserId], references: [id], onDelete: Restrict, name: "quarantine_importedBy")
+  importedAt                DateTime                        @default(now())
+
+  expiresAt                 DateTime                                          // Absolute deadline for quarantine (auto-expire to EXPIRED)
+  revision                  Int                             @default(1)       // Optimistic concurrency control
+
+  auditTrail                CredentialQuarantineAudit[]
+
+  updatedAt                 DateTime                        @updatedAt
+  createdAt                 DateTime                        @default(now())
+
+  // Indexes
+  @@index([organizationId, state])
+  @@index([organizationId, createdAt])
+  @@index([organizationId, expiresAt, state])
+  @@index([contentHash])  // For deduplication check
+  @@index([state, expiresAt])  // For expiry job
+  @@index([decidedByUserId])
+  
+  // Unique constraint: prevent duplicate active quarantines for same credential per org
+  @@unique([organizationId, contentHash], name: "quarantine_org_hash_active", map: "CredentialQuarantine_org_hash_state_unique")
+}
+
+/// Immutable audit trail for credential quarantine state changes and actions.
+model CredentialQuarantineAudit {
+  id                        String                          @id @default(cuid())
+  quarantineId              String
+  quarantine                CredentialQuarantine            @relation(fields: [quarantineId], references: [id], onDelete: Restrict)
+  organizationId            String
+  organization              Organization                    @relation(fields: [organizationId], references: [id], onDelete: Restrict, name: "quarantine_audit_org")
+
+  // Event
+  event                     String                          @db.VarChar(64)   // "QUARANTINED", "RELEASED", "REJECTED", "EXPIRED", "EVIDENCE_REFRESHED"
+  actor                     String
+  actorUser                 User                            @relation(fields: [actor], references: [id], onDelete: Restrict, name: "quarantine_audit_actor")
+  actorRole                 UserRole
+
+  // Event Details
+  previousState             CredentialQuarantineState?
+  newState                  CredentialQuarantineState?
+  changeReason              String?                         @db.VarChar(512)   // Why the state changed
+
+  // Evidence refresh details (if event = EVIDENCE_REFRESHED)
+  evidenceResult            String?                         @db.VarChar(255)   // "FRESH", "STALE", "FETCH_FAILED", "VALIDATION_PASSED", etc.
+
+  // Approval linkage (if event = RELEASED or REJECTED)
+  approvalRequestId         String?                                            // Link to approval request (if four-eyes used)
+
+  createdAt                 DateTime                        @default(now())
+
+  // Indexes
+  @@index([quarantineId, createdAt])
+  @@index([organizationId, event, createdAt])
+  @@index([actor, createdAt])
+  @@index([event])
+}
+
+// Add relationships to User and Organization models
+model Organization {
+  // ... existing fields ...
+  credentialQuarantines     CredentialQuarantine[]
+  quarantineAudit           CredentialQuarantineAudit[]     @relation("quarantine_audit_org")
+  // ... rest of existing fields ...
+}
+
+// Add relationships to User model
+model User {
+  // ... existing fields ...
+  quarantinesImported       CredentialQuarantine[]          @relation("quarantine_importedBy")
+  quarantinesDecided        CredentialQuarantine[]          @relation("quarantine_decidedBy")
+  quarantineAuditEntries    CredentialQuarantineAudit[]     @relation("quarantine_audit_actor")
+  // ... rest of existing fields ...
 }
