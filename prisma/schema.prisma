@@ -75,6 +75,15 @@ enum VerificationOutcome {
   ISSUER_WARNING
 }
 
+/// Approval state of a purpose declaration. A declaration must be APPROVED
+/// and not expired or revoked to pass verification enforcement.
+enum PurposeDeclarationApprovalState {
+  PENDING
+  APPROVED
+  REVOKED
+  EXPIRED
+}
+
 /// Lifecycle of an issuer address rotation. The database adopts the new
 /// address only on CONFIRMED, after the contract is observed to hold it.
 enum IssuerAddressRotationStatus {
@@ -322,6 +331,9 @@ model User {
   proofExpirationReminderPreference ProofExpirationReminderPreference?
   proofExpirationReminderDeliveries ProofExpirationReminderDelivery[]
   sessionRiskEvents       SessionRiskEvent[]
+  declarationsApproved    PurposeDeclaration[]  @relation("declaration_approvedBy")
+  declarationsRevoked     PurposeDeclaration[]  @relation("declaration_revokedBy")
+  auditEntries            DeclarationAuditEntry[]
 
   @@index([walletHash])
   @@index([status])
@@ -453,6 +465,9 @@ model Organization {
   domainEventsOutbox       DomainEventOutbox[]
   bulkAdminJobs        BulkAdminJob[]
   securityNotifications SecurityNotification[]
+  purposeDefinitions   PurposeDefinition[]
+  purposeDeclarations  PurposeDeclaration[]
+  verificationPolicies VerificationPolicy[]
 
   @@index([status])
   @@index([archivedAt])
@@ -1008,10 +1023,16 @@ model VerificationEvent {
   result              VerificationResult
   ipHash              String?
   userAgentHash       String?
+  /// Purpose declaration that was validated for this verification (if required by policy).
+  declarationId       String?
+  declaration         PurposeDeclaration? @relation(fields: [declarationId], references: [id], onDelete: SetNull, name: "verification_declaration")
+  /// Version of the declaration at verification time (for audit trail).
+  declarationVersion  Int?
   createdAt           DateTime           @default(now())
 
   @@index([proofId, createdAt])
   @@index([result])
+  @@index([declarationId])
 }
 
 model VerificationEventLog {
@@ -2923,19 +2944,171 @@ model CredentialQuarantineAudit {
   @@index([event])
 }
 
-// Add relationships to User and Organization models
-model Organization {
-  // ... existing fields ...
-  credentialQuarantines     CredentialQuarantine[]
-  quarantineAudit           CredentialQuarantineAudit[]     @relation("quarantine_audit_org")
-  // ... rest of existing fields ...
+
+// ---------------------------------------------------------------------------
+// Purpose Declarations (Issue #325)
+// ---------------------------------------------------------------------------
+
+/// A purpose is a restriction and an accountability record that limits
+/// disclosure scope. It never grants access by itself. Organizations must
+/// have approved purpose declarations bound to disclosure scope, verifier
+/// context, expiry, and audit evidence, before verification runs under
+/// policies configured to require them.
+///
+/// Purpose definitions are versioned: v1, v2, etc. Versions are immutable
+/// once any declaration references them. A new version is created if changes
+/// are needed.
+model PurposeDefinition {
+  id                String              @id @default(cuid())
+  organizationId    String
+  organization      Organization        @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  
+  /// Stable purpose identifier within the organization (e.g., "income_verification").
+  /// Combined with organizationId and version, uniquely identifies a purpose version.
+  purposeKey        String              @db.VarChar(128)
+  
+  /// Version counter: 1, 2, 3, etc. Immutable once declared.
+  version           Int
+  
+  /// Human-readable description of what this purpose authorizes (bounded to 500 chars).
+  /// E.g., "Verify employment income for loan application"
+  description       String              @db.VarChar(500)
+  
+  /// Disclosure scope this purpose is limited to (JSON).
+  /// E.g., { "proofTypes": ["AGGREGATE_EARNINGS"], "maxAmount": 100000 }
+  disclosureScope   Json
+  
+  /// Lifecycle markers
+  createdAt         DateTime            @default(now())
+  deactivatedAt     DateTime?           /// When this version was superseded or retired
+  
+  declarations      PurposeDeclaration[]
+  
+  @@unique([organizationId, purposeKey, version])
+  @@index([organizationId, createdAt])
 }
 
-// Add relationships to User model
-model User {
-  // ... existing fields ...
-  quarantinesImported       CredentialQuarantine[]          @relation("quarantine_importedBy")
-  quarantinesDecided        CredentialQuarantine[]          @relation("quarantine_decidedBy")
-  quarantineAuditEntries    CredentialQuarantineAudit[]     @relation("quarantine_audit_actor")
-  // ... rest of existing fields ...
+/// A declaration binds an organization and verifier to a purpose definition,
+/// with approval state, expiry, and audit evidence. A declaration is valid
+/// only if: approved, not revoked, not expired, bound to the same org and
+/// verifier context as the request, and its disclosure scope is a subset of
+/// the policy's allowed scope.
+model PurposeDeclaration {
+  id                    String                             @id @default(cuid())
+  organizationId        String
+  organization          Organization                       @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  
+  /// Foreign key to the purpose definition version.
+  purposeDefinitionId   String
+  purposeDefinition     PurposeDefinition                  @relation(fields: [purposeDefinitionId], references: [id], onDelete: Restrict)
+  
+  /// Verifier context: organization that will perform verifications under this purpose.
+  /// Always equal to organizationId for now; permits future multi-tenant scenarios.
+  verifierOrganizationId String
+  
+  /// Approval state: PENDING, APPROVED, REVOKED, or EXPIRED (derived from expiresAt).
+  approvalState         PurposeDeclarationApprovalState  @default(PENDING)
+  
+  /// Approval timestamp and approver. Must be an ADMIN or OWNER of the organization,
+  /// and NOT the requester (independent approval). Null if state is PENDING.
+  approvedAt            DateTime?
+  approvedById          String?
+  approvedBy            User?                             @relation(fields: [approvedById], references: [id], onDelete: SetNull, name: "declaration_approvedBy")
+  
+  /// Revocation timestamp and revoker. Takes effect immediately for new verifications.
+  revokedAt             DateTime?
+  revokedById           String?
+  revokedBy             User?                             @relation(fields: [revokedById], references: [id], onDelete: SetNull, name: "declaration_revokedBy")
+  
+  /// Expiry timestamp. A declaration is invalid if now() >= expiresAt.
+  /// Boundary rule: evaluates once at request start and recorded in audit entry.
+  expiresAt             DateTime
+  
+  /// Optimistic concurrency version counter. Incremented on every state change
+  /// (approve, revoke). Ensures simultaneous approve/revoke produce exactly one winner.
+  revision              Int                               @default(1)
+  
+  /// Audit: creation context
+  createdAt             DateTime                          @default(now())
+  updatedAt             DateTime                          @updatedAt
+  
+  /// Audit trail of this declaration's lifecycle (approvals, revocations, etc.)
+  auditEntries          DeclarationAuditEntry[]
+  
+  /// Verification events that used this declaration
+  verificationEvents    VerificationEvent[]               @relation("verification_declaration")
+  
+  @@unique([organizationId, purposeDefinitionId, verifierOrganizationId])
+  @@index([organizationId, approvalState])
+  @@index([organizationId, expiresAt])
+  @@index([organizationId, approvalState, expiresAt])
+  @@index([verifierOrganizationId])
+}
+
+/// Immutable audit trail of declaration lifecycle events: creation, approval,
+/// revocation, expiry. Enables forensics and compliance.
+model DeclarationAuditEntry {
+  id                  String              @id @default(cuid())
+  declarationId       String
+  declaration         PurposeDeclaration  @relation(fields: [declarationId], references: [id], onDelete: Restrict)
+  organizationId      String
+  
+  /// Event type: CREATED, APPROVED, REVOKED, EXPIRED
+  event               String              @db.VarChar(32)
+  
+  /// Actor: user ID who performed the action (or "SYSTEM" for automated expiry)
+  actorUserId         String?
+  actor               User?               @relation(fields: [actorUserId], references: [id], onDelete: SetNull)
+  
+  /// Previous and new approval state
+  previousState       PurposeDeclarationApprovalState?
+  newState            PurposeDeclarationApprovalState?
+  
+  /// Reason for the action (e.g., "Loan application approved", "Duplicate purpose")
+  reason              String?             @db.VarChar(500)
+  
+  /// Request fingerprint (idempotency): hash of (event, actor, reason) to detect
+  /// replayed approval/revoke requests. Same request = same fingerprint = idempotent.
+  requestFingerprint  String?
+  
+  /// Metadata (JSON): version at time of event, scope applied, outcome, etc.
+  metadata            Json?
+  
+  createdAt           DateTime            @default(now())
+  
+  @@index([declarationId, createdAt])
+  @@index([organizationId, event, createdAt])
+  @@index([actorUserId])
+}
+
+/// Verification policies can require a valid purpose declaration before
+/// verification runs. This flag controls whether a policy requires purpose
+/// enforcement. Policies without this flag behave exactly as before.
+model VerificationPolicy {
+  id                              String              @id @default(cuid())
+  organizationId                  String
+  organization                    Organization        @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  
+  /// Policy name (e.g., "loan_income_verification")
+  name                            String              @db.VarChar(128)
+  
+  /// If TRUE, all verifications under this policy must have a valid,
+  /// approved purpose declaration matching the organization and verifier.
+  /// If FALSE (default), purpose enforcement is not required; existing
+  /// behavior is preserved (backward compatible).
+  requiresPurposeDeclaration      Boolean             @default(false)
+  
+  /// Policy version or revision for versioning
+  version                         Int                 @default(1)
+  
+  /// Policy configuration (JSON): proof types, scope, etc.
+  config                          Json?
+  
+  status                          ResourceStatus      @default(ACTIVE)
+  
+  createdAt                       DateTime            @default(now())
+  updatedAt                       DateTime            @updatedAt
+  
+  @@unique([organizationId, name])
+  @@index([organizationId, status])
 }

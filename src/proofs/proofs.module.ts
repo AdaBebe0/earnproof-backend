@@ -20,6 +20,9 @@ import { ProofExpirationReminderService } from "./proof-expiration-reminder.serv
 import { ProofExpirationReminderController } from "./proof-expiration-reminder.controller";
 import { ProofCapacityPreflightService } from "./proof-capacity-preflight.service";
 import { BoundedRefreshService } from "./bounded-refresh.service";
+import { PurposeDeclarationsService } from "./purpose-declarations.service";
+import { PurposeEnforcementService } from "./purpose-enforcement.service";
+import { PurposeDeclarationsController } from "./purpose-declarations.controller";
 
 @Module({
   imports: [
@@ -31,7 +34,7 @@ import { BoundedRefreshService } from "./bounded-refresh.service";
     QuotasModule,
     HealthModule,
   ],
-  controllers: [ProofsController, ProofExpirationReminderController],
+  controllers: [ProofsController, ProofExpirationReminderController, RevocationCheckpointController, PurposeDeclarationsController],
   providers: [
     ContractAnchoringService,
     CredentialVerificationKeyService,
@@ -44,10 +47,14 @@ import { BoundedRefreshService } from "./bounded-refresh.service";
     ProofExpirationReminderService,
     ProofCapacityPreflightService,
     BoundedRefreshService,
+    PurposeDeclarationsService,
+    PurposeEnforcementService,
   ],
   exports: [
     ContractAnchoringService,
     CredentialVerificationKeyService,
+    PurposeDeclarationsService,
+    PurposeEnforcementService,
     ProofSharingService,
     ProofReconciliationService,
     ProofExpirationReminderService,
