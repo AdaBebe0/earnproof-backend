@@ -1220,6 +1220,7 @@ model Webhook {
   clientCertificates WebhookClientCertificate[]
   circuitBreaker     WebhookCircuit?
   secretVersions     WebhookSecretVersion[]
+  tlsProbes          WebhookTlsProbe[]
 
   @@index([organizationId, status])
 }
@@ -3273,4 +3274,45 @@ model AuditLegalHold {
 
   @@index([status, expiresAt])
   @@index([organizationId, status])
+}
+
+// ---------------------------------------------------------------------------
+// Webhook endpoint TLS posture (#315)
+// ---------------------------------------------------------------------------
+
+enum WebhookTlsProbeOutcome {
+  HEALTHY
+  EXPIRING_SOON
+  EXPIRED
+  NOT_YET_VALID
+  HOSTNAME_MISMATCH
+  UNTRUSTED
+  WEAK_PROTOCOL
+  HANDSHAKE_FAILED
+  DESTINATION_BLOCKED
+  UNREACHABLE
+  TIMEOUT
+}
+
+/// One TLS handshake probe of a webhook endpoint. Bounded per webhook; holds
+/// only the outcome category and public certificate facts, never the resolved
+/// address or a raw error message.
+model WebhookTlsProbe {
+  id                     String                 @id @default(cuid())
+  webhookId              String
+  webhook                Webhook                @relation(fields: [webhookId], references: [id], onDelete: Cascade)
+  outcome                WebhookTlsProbeOutcome
+  /// Negotiated protocol, e.g. "TLSv1.3". Null when no handshake completed.
+  protocol               String?                @db.VarChar(16)
+  certificateNotBefore   DateTime?
+  certificateNotAfter    DateTime?
+  /// Colon-separated SHA-256 fingerprint of the leaf certificate.
+  certificateFingerprint String?                @db.VarChar(95)
+  /// True when this probe raised an alert (the outcome changed to a non-healthy one).
+  alerted                Boolean                @default(false)
+  durationMs             Int
+  probedAt               DateTime
+
+  @@index([webhookId, probedAt])
+  @@index([outcome, probedAt])
 }

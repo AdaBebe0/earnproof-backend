@@ -11,10 +11,16 @@ import { WebhooksController } from "./webhooks.controller";
 import { WebhooksService } from "./webhooks.service";
 import { PredicateEvaluatorService } from "./services/predicate-evaluator.service";
 import { PredicatePreviewService } from "./services/predicate-preview.service";
+import { WebhookTlsPostureController } from "./tls-posture/webhook-tls-posture.controller";
+import { WebhookTlsPostureService } from "./tls-posture/webhook-tls-posture.service";
 
 @Module({
   imports: [AuthModule, QuotasModule],
-  controllers: [WebhooksController, WebhookClientCertificatesController],
+  controllers: [
+    WebhooksController,
+    WebhookClientCertificatesController,
+    WebhookTlsPostureController,
+  ],
   providers: [
     WebhooksService,
     WebhookDeliveryService,
@@ -24,6 +30,7 @@ import { PredicatePreviewService } from "./services/predicate-preview.service";
     WebhookDeadLetterService,
     PredicateEvaluatorService,
     PredicatePreviewService,
+    WebhookTlsPostureService,
   ],
   exports: [
     WebhookDeliveryService,
@@ -32,6 +39,7 @@ import { PredicatePreviewService } from "./services/predicate-preview.service";
     WebhooksService,
     PredicateEvaluatorService,
     PredicatePreviewService,
+    WebhookTlsPostureService,
   ],
 })
 export class WebhooksModule {}
