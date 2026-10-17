@@ -17,6 +17,7 @@ import { CredentialsModule } from "./credentials/credentials.module";
 import { DatabaseModule } from "./database/database.module";
 import { DisputesModule } from "./disputes/disputes.module";
 import { HealthModule } from "./health/health.module";
+import { IntegrationsModule } from "./integrations/integrations.module";
 import { HttpMetricsInterceptor } from "./common/interceptors/http-metrics.interceptor";
 import { IdempotentInterceptor } from "./common/interceptors/idempotent.interceptor";
 import { ObservabilityModule } from "./common/observability/observability.module";
@@ -60,6 +61,7 @@ import { NotificationsModule } from "./notifications/notifications.module";
     RateLimitModule,
     DisputesModule,
     HealthModule,
+    IntegrationsModule,
     OrganizationsModule,
     DataResidencyModule,
     IssuersModule,
