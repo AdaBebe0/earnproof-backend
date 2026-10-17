@@ -75,6 +75,15 @@ enum VerificationOutcome {
   ISSUER_WARNING
 }
 
+/// Approval state of a purpose declaration. A declaration must be APPROVED
+/// and not expired or revoked to pass verification enforcement.
+enum PurposeDeclarationApprovalState {
+  PENDING
+  APPROVED
+  REVOKED
+  EXPIRED
+}
+
 /// Lifecycle of an issuer address rotation. The database adopts the new
 /// address only on CONFIRMED, after the contract is observed to hold it.
 enum IssuerAddressRotationStatus {
@@ -288,6 +297,25 @@ enum WebhookCircuitState {
   HALF_OPEN
 }
 
+/// Closed taxonomy of why a credential was quarantined.
+/// Safe to expose publicly in verification API responses.
+enum CredentialQuarantineReasonCode {
+  MALFORMED
+  UNKNOWN_KEY
+  POLICY_CONFLICT
+  TRUST_NOT_ESTABLISHED
+  SUSPICIOUS
+}
+
+/// State machine for credential quarantine lifecycle.
+/// QUARANTINED → RELEASED | REJECTED | EXPIRED (terminal states)
+enum CredentialQuarantineState {
+  QUARANTINED
+  RELEASED
+  REJECTED
+  EXPIRED
+}
+
 model User {
   id                      String                 @id @default(cuid())
   walletAddress           String                 @unique
@@ -317,6 +345,9 @@ model User {
   proofExpirationReminderPreference ProofExpirationReminderPreference?
   proofExpirationReminderDeliveries ProofExpirationReminderDelivery[]
   sessionRiskEvents       SessionRiskEvent[]
+  declarationsApproved    PurposeDeclaration[]  @relation("declaration_approvedBy")
+  declarationsRevoked     PurposeDeclaration[]  @relation("declaration_revokedBy")
+  auditEntries            DeclarationAuditEntry[]
 
   @@index([walletHash])
   @@index([status])
@@ -448,6 +479,9 @@ model Organization {
   domainEventsOutbox       DomainEventOutbox[]
   bulkAdminJobs        BulkAdminJob[]
   securityNotifications SecurityNotification[]
+  purposeDefinitions   PurposeDefinition[]
+  purposeDeclarations  PurposeDeclaration[]
+  verificationPolicies VerificationPolicy[]
 
   @@index([status])
   @@index([archivedAt])
@@ -1003,10 +1037,16 @@ model VerificationEvent {
   result              VerificationResult
   ipHash              String?
   userAgentHash       String?
+  /// Purpose declaration that was validated for this verification (if required by policy).
+  declarationId       String?
+  declaration         PurposeDeclaration? @relation(fields: [declarationId], references: [id], onDelete: SetNull, name: "verification_declaration")
+  /// Version of the declaration at verification time (for audit trail).
+  declarationVersion  Int?
   createdAt           DateTime           @default(now())
 
   @@index([proofId, createdAt])
   @@index([result])
+  @@index([declarationId])
 }
 
 model VerificationEventLog {
@@ -1158,6 +1198,7 @@ model Webhook {
   url                String
   secretEncrypted    String
   events             Json
+  predicate          Json?                      // Optional PredicateV1 for bounded event filtering
   status             ResourceStatus             @default(ACTIVE)
   mtlsRequired       Boolean                    @default(false)
   payloadVersion     String                     @default("1")
@@ -1205,31 +1246,32 @@ enum WebhookDeliveryStatus {
 }
 
 model WebhookDelivery {
-  id               String                @id @default(cuid())
-  webhookId        String
-  webhook          Webhook               @relation(fields: [webhookId], references: [id])
-  eventType        String
-  eventId          String
-  payload          Json
-  schemaVersion    String                @default("1")
-  payloadBody      String                @default("")
-  attempt          Int                   @default(1)
-  status           WebhookDeliveryStatus @default(PENDING)
-  statusCode       Int?
-  responseBody     String?
-  durationMs       Int?
-  failureReason    String?
-  replayOf         String?
-  replayedBy       String?
-  replayKey        String?               @unique
-  deliveredAt      DateTime?
-  nextRetryAt      DateTime?
-  deadLetteredAt   DateTime?
-  deadLetterReason String?
-  redrivenAt       DateTime?
-  redrivenBy       String?
-  redriveReason    String?
-  createdAt        DateTime              @default(now())
+  id                String                @id @default(cuid())
+  webhookId         String
+  webhook           Webhook               @relation(fields: [webhookId], references: [id])
+  eventType         String
+  eventId           String
+  payload           Json
+  schemaVersion     String                @default("1")
+  payloadBody       String                @default("")
+  predicateSnapshot Json?                 // Snapshot of predicate at delivery time (null if no predicate)
+  attempt           Int                   @default(1)
+  status            WebhookDeliveryStatus @default(PENDING)
+  statusCode        Int?
+  responseBody      String?
+  durationMs        Int?
+  failureReason     String?
+  replayOf          String?
+  replayedBy        String?
+  replayKey         String?               @unique
+  deliveredAt       DateTime?
+  nextRetryAt       DateTime?
+  deadLetteredAt    DateTime?
+  deadLetterReason  String?
+  redrivenAt        DateTime?
+  redrivenBy        String?
+  redriveReason     String?
+  createdAt         DateTime              @default(now())
 
   @@index([webhookId, createdAt])
   @@index([eventId])
@@ -2838,4 +2880,282 @@ model ContractVersion {
   @@unique([network, contractId, schemaVersion])
   @@index([network, contractId, isCurrent])
   @@index([network, isCurrent])
+}
+
+// ---------------------------------------------------------------------------
+// Credential Quarantine and Release (Issue #324)
+// ---------------------------------------------------------------------------
+// Isolate malformed, unknown-key, policy-conflicting, or suspicious imported
+// credentials before they can be used in normal verification. Provides a safe
+// path to release, reject, or expire them.
+
+/// Quarantined credential record: bounded metadata only, never raw credential content.
+model CredentialQuarantine {
+  // Identity & Scope
+  id                        String                           @id @default(cuid())
+  organizationId            String
+  organization              Organization                     @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  tenantId                  String  // Denormalized for tenant queries
+
+  // Quarantine Reason & State
+  reason                    CredentialQuarantineReasonCode
+  state                     CredentialQuarantineState        @default(QUARANTINED)
+
+  // Bounded Metadata (safe allowlist only; never raw credential)
+  contentHash               String                          // SHA-256(canonical credential)
+  contentSize               Int                             // Byte size of original credential
+  schemaType                String                          @db.VarChar(100)  // "EarnProofMinimumIncomeCredential"
+  schemaVersion             String                          @db.VarChar(64)   // "earnproof.minimum-income.v1"
+
+  // Issuer metadata (from credential, not live lookup)
+  issuerIdentifier          String                          @db.VarChar(255)  // Issuer name or DID (safe to log)
+  issuerPolicyVersion       Int?                                              // Issuer policy version at intake time
+
+  // Credential metadata (from parsed credential, verified safe)
+  credentialProofType       String?                         @db.VarChar(64)   // "MINIMUM_INCOME", "RECURRING_INCOME", etc.
+  credentialExpiresAt       DateTime?                                         // expiresAt from credential claim
+  credentialIssuedAt        DateTime?                                         // issuedAt from credential claim
+
+  // Key metadata (if trust pin was involved)
+  keyId                     String?                         @db.VarChar(255)  // Key identifier from proof block
+  keyType                   String?                         @db.VarChar(64)   // "Ed25519" or "HMAC-SHA256"
+  network                   String?                         @db.VarChar(64)   // "public" or "testnet" (from Ed25519 proofs)
+
+  // Evidence & Freshness
+  evidenceRefreshedAt       DateTime?                                         // When trust evidence was last fetched
+  evidenceFreshUntil        DateTime?                                         // When evidence is no longer usable for release
+  evidenceRefreshReason     String?                         @db.VarChar(255)  // Optional note on refresh
+
+  // Release Decision Metadata (filled when state != QUARANTINED)
+  decidedByUserId           String?
+  decidedBy                 User?                           @relation(fields: [decidedByUserId], references: [id], onDelete: SetNull, name: "quarantine_decidedBy")
+  decidedAt                 DateTime?                                         // When the decision was made
+  decisionReason            String?                         @db.VarChar(1024) // Free-form reason for rejection/release
+
+  // Audit & Concurrency
+  importedByUserId          String
+  importedBy                User                            @relation(fields: [importedByUserId], references: [id], onDelete: Restrict, name: "quarantine_importedBy")
+  importedAt                DateTime                        @default(now())
+
+  expiresAt                 DateTime                                          // Absolute deadline for quarantine (auto-expire to EXPIRED)
+  revision                  Int                             @default(1)       // Optimistic concurrency control
+
+  auditTrail                CredentialQuarantineAudit[]
+
+  updatedAt                 DateTime                        @updatedAt
+  createdAt                 DateTime                        @default(now())
+
+  // Indexes
+  @@index([organizationId, state])
+  @@index([organizationId, createdAt])
+  @@index([organizationId, expiresAt, state])
+  @@index([contentHash])  // For deduplication check
+  @@index([state, expiresAt])  // For expiry job
+  @@index([decidedByUserId])
+  
+  // Unique constraint: prevent duplicate active quarantines for same credential per org
+  @@unique([organizationId, contentHash], name: "quarantine_org_hash_active", map: "CredentialQuarantine_org_hash_state_unique")
+}
+
+/// Immutable audit trail for credential quarantine state changes and actions.
+model CredentialQuarantineAudit {
+  id                        String                          @id @default(cuid())
+  quarantineId              String
+  quarantine                CredentialQuarantine            @relation(fields: [quarantineId], references: [id], onDelete: Restrict)
+  organizationId            String
+  organization              Organization                    @relation(fields: [organizationId], references: [id], onDelete: Restrict, name: "quarantine_audit_org")
+
+  // Event
+  event                     String                          @db.VarChar(64)   // "QUARANTINED", "RELEASED", "REJECTED", "EXPIRED", "EVIDENCE_REFRESHED"
+  actor                     String
+  actorUser                 User                            @relation(fields: [actor], references: [id], onDelete: Restrict, name: "quarantine_audit_actor")
+  actorRole                 UserRole
+
+  // Event Details
+  previousState             CredentialQuarantineState?
+  newState                  CredentialQuarantineState?
+  changeReason              String?                         @db.VarChar(512)   // Why the state changed
+
+  // Evidence refresh details (if event = EVIDENCE_REFRESHED)
+  evidenceResult            String?                         @db.VarChar(255)   // "FRESH", "STALE", "FETCH_FAILED", "VALIDATION_PASSED", etc.
+
+  // Approval linkage (if event = RELEASED or REJECTED)
+  approvalRequestId         String?                                            // Link to approval request (if four-eyes used)
+
+  createdAt                 DateTime                        @default(now())
+
+  // Indexes
+  @@index([quarantineId, createdAt])
+  @@index([organizationId, event, createdAt])
+  @@index([actor, createdAt])
+  @@index([event])
+}
+
+
+// ---------------------------------------------------------------------------
+// Purpose Declarations (Issue #325)
+// ---------------------------------------------------------------------------
+
+/// A purpose is a restriction and an accountability record that limits
+/// disclosure scope. It never grants access by itself. Organizations must
+/// have approved purpose declarations bound to disclosure scope, verifier
+/// context, expiry, and audit evidence, before verification runs under
+/// policies configured to require them.
+///
+/// Purpose definitions are versioned: v1, v2, etc. Versions are immutable
+/// once any declaration references them. A new version is created if changes
+/// are needed.
+model PurposeDefinition {
+  id                String              @id @default(cuid())
+  organizationId    String
+  organization      Organization        @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  
+  /// Stable purpose identifier within the organization (e.g., "income_verification").
+  /// Combined with organizationId and version, uniquely identifies a purpose version.
+  purposeKey        String              @db.VarChar(128)
+  
+  /// Version counter: 1, 2, 3, etc. Immutable once declared.
+  version           Int
+  
+  /// Human-readable description of what this purpose authorizes (bounded to 500 chars).
+  /// E.g., "Verify employment income for loan application"
+  description       String              @db.VarChar(500)
+  
+  /// Disclosure scope this purpose is limited to (JSON).
+  /// E.g., { "proofTypes": ["AGGREGATE_EARNINGS"], "maxAmount": 100000 }
+  disclosureScope   Json
+  
+  /// Lifecycle markers
+  createdAt         DateTime            @default(now())
+  deactivatedAt     DateTime?           /// When this version was superseded or retired
+  
+  declarations      PurposeDeclaration[]
+  
+  @@unique([organizationId, purposeKey, version])
+  @@index([organizationId, createdAt])
+}
+
+/// A declaration binds an organization and verifier to a purpose definition,
+/// with approval state, expiry, and audit evidence. A declaration is valid
+/// only if: approved, not revoked, not expired, bound to the same org and
+/// verifier context as the request, and its disclosure scope is a subset of
+/// the policy's allowed scope.
+model PurposeDeclaration {
+  id                    String                             @id @default(cuid())
+  organizationId        String
+  organization          Organization                       @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  
+  /// Foreign key to the purpose definition version.
+  purposeDefinitionId   String
+  purposeDefinition     PurposeDefinition                  @relation(fields: [purposeDefinitionId], references: [id], onDelete: Restrict)
+  
+  /// Verifier context: organization that will perform verifications under this purpose.
+  /// Always equal to organizationId for now; permits future multi-tenant scenarios.
+  verifierOrganizationId String
+  
+  /// Approval state: PENDING, APPROVED, REVOKED, or EXPIRED (derived from expiresAt).
+  approvalState         PurposeDeclarationApprovalState  @default(PENDING)
+  
+  /// Approval timestamp and approver. Must be an ADMIN or OWNER of the organization,
+  /// and NOT the requester (independent approval). Null if state is PENDING.
+  approvedAt            DateTime?
+  approvedById          String?
+  approvedBy            User?                             @relation(fields: [approvedById], references: [id], onDelete: SetNull, name: "declaration_approvedBy")
+  
+  /// Revocation timestamp and revoker. Takes effect immediately for new verifications.
+  revokedAt             DateTime?
+  revokedById           String?
+  revokedBy             User?                             @relation(fields: [revokedById], references: [id], onDelete: SetNull, name: "declaration_revokedBy")
+  
+  /// Expiry timestamp. A declaration is invalid if now() >= expiresAt.
+  /// Boundary rule: evaluates once at request start and recorded in audit entry.
+  expiresAt             DateTime
+  
+  /// Optimistic concurrency version counter. Incremented on every state change
+  /// (approve, revoke). Ensures simultaneous approve/revoke produce exactly one winner.
+  revision              Int                               @default(1)
+  
+  /// Audit: creation context
+  createdAt             DateTime                          @default(now())
+  updatedAt             DateTime                          @updatedAt
+  
+  /// Audit trail of this declaration's lifecycle (approvals, revocations, etc.)
+  auditEntries          DeclarationAuditEntry[]
+  
+  /// Verification events that used this declaration
+  verificationEvents    VerificationEvent[]               @relation("verification_declaration")
+  
+  @@unique([organizationId, purposeDefinitionId, verifierOrganizationId])
+  @@index([organizationId, approvalState])
+  @@index([organizationId, expiresAt])
+  @@index([organizationId, approvalState, expiresAt])
+  @@index([verifierOrganizationId])
+}
+
+/// Immutable audit trail of declaration lifecycle events: creation, approval,
+/// revocation, expiry. Enables forensics and compliance.
+model DeclarationAuditEntry {
+  id                  String              @id @default(cuid())
+  declarationId       String
+  declaration         PurposeDeclaration  @relation(fields: [declarationId], references: [id], onDelete: Restrict)
+  organizationId      String
+  
+  /// Event type: CREATED, APPROVED, REVOKED, EXPIRED
+  event               String              @db.VarChar(32)
+  
+  /// Actor: user ID who performed the action (or "SYSTEM" for automated expiry)
+  actorUserId         String?
+  actor               User?               @relation(fields: [actorUserId], references: [id], onDelete: SetNull)
+  
+  /// Previous and new approval state
+  previousState       PurposeDeclarationApprovalState?
+  newState            PurposeDeclarationApprovalState?
+  
+  /// Reason for the action (e.g., "Loan application approved", "Duplicate purpose")
+  reason              String?             @db.VarChar(500)
+  
+  /// Request fingerprint (idempotency): hash of (event, actor, reason) to detect
+  /// replayed approval/revoke requests. Same request = same fingerprint = idempotent.
+  requestFingerprint  String?
+  
+  /// Metadata (JSON): version at time of event, scope applied, outcome, etc.
+  metadata            Json?
+  
+  createdAt           DateTime            @default(now())
+  
+  @@index([declarationId, createdAt])
+  @@index([organizationId, event, createdAt])
+  @@index([actorUserId])
+}
+
+/// Verification policies can require a valid purpose declaration before
+/// verification runs. This flag controls whether a policy requires purpose
+/// enforcement. Policies without this flag behave exactly as before.
+model VerificationPolicy {
+  id                              String              @id @default(cuid())
+  organizationId                  String
+  organization                    Organization        @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  
+  /// Policy name (e.g., "loan_income_verification")
+  name                            String              @db.VarChar(128)
+  
+  /// If TRUE, all verifications under this policy must have a valid,
+  /// approved purpose declaration matching the organization and verifier.
+  /// If FALSE (default), purpose enforcement is not required; existing
+  /// behavior is preserved (backward compatible).
+  requiresPurposeDeclaration      Boolean             @default(false)
+  
+  /// Policy version or revision for versioning
+  version                         Int                 @default(1)
+  
+  /// Policy configuration (JSON): proof types, scope, etc.
+  config                          Json?
+  
+  status                          ResourceStatus      @default(ACTIVE)
+  
+  createdAt                       DateTime            @default(now())
+  updatedAt                       DateTime            @updatedAt
+  
+  @@unique([organizationId, name])
+  @@index([organizationId, status])
 }

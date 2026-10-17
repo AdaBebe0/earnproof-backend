@@ -13,6 +13,7 @@ import { UpdateWebhookEventsDto } from "./dto/update-webhook-events.dto";
 import { OrganizationQuotaService } from "../quotas/organization-quota.service";
 import { WebhookDeliveryService } from "./webhook-delivery.service";
 import { WebhookCircuitBreakerService } from "./webhook-circuit-breaker.service";
+import { PredicatePreviewService } from "./services/predicate-preview.service";
 import { CURRENT_WEBHOOK_PAYLOAD_VERSION } from "./webhook-event.types";
 
 /** Signing secret length in bytes (produces a 64-char hex string). */
@@ -27,6 +28,7 @@ export class WebhooksService {
     configService: ConfigService,
     private readonly quotas: OrganizationQuotaService,
     private readonly secretRetrievalReceiptService: SecretRetrievalReceiptService,
+    private readonly predicatePreviewService: PredicatePreviewService,
   ) {
     this.paymentEncryptionKeyring = new PaymentEncryptionKeyringService(
       configService,
@@ -410,5 +412,34 @@ export class WebhooksService {
     if (webhook.organizationId !== organizationId) {
       throw new ForbiddenException("Webhook does not belong to this organisation");
     }
+  }
+
+  /** Expose decrypt for testing secret rotation. */
+  revealSecret(secretEncrypted: string): string {
+    return this.paymentEncryptionKeyring.decrypt(secretEncrypted);
+  }
+
+  /**
+   * Preview a predicate against a sample event.
+   *
+   * Tests whether a predicate matches a given event without creating a delivery
+   * or modifying any state. Returns the match result and budget usage.
+   *
+   * Authorization: caller must have an active organization (already checked by controller).
+   * No webhook-specific permission needed; this is a read-only test endpoint.
+   *
+   * @param organizationId Tenant context (for audit/rate limiting)
+   * @param predicateRaw Raw predicate object (must be validated by class-validator)
+   * @param eventRaw Raw event object (must be validated by class-validator)
+   * @returns Match result with budget usage
+   */
+  async previewPredicate(
+    organizationId: string,
+    predicateRaw: any,
+    eventRaw: any,
+  ): Promise<{ match: boolean; reason?: string; visitedNodes: number }> {
+    // predicateRaw and eventRaw are validated by class-validator in the DTO
+    // layer before reaching this point, so we trust their structure.
+    return this.predicatePreviewService.preview(predicateRaw, eventRaw);
   }
 }

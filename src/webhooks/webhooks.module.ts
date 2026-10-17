@@ -9,6 +9,8 @@ import { WebhookDeliveryService } from "./webhook-delivery.service";
 import { WebhookSigningService } from "./webhook-signing.service";
 import { WebhooksController } from "./webhooks.controller";
 import { WebhooksService } from "./webhooks.service";
+import { PredicateEvaluatorService } from "./services/predicate-evaluator.service";
+import { PredicatePreviewService } from "./services/predicate-preview.service";
 
 @Module({
   imports: [AuthModule, QuotasModule],
@@ -20,12 +22,16 @@ import { WebhooksService } from "./webhooks.service";
     WebhookClientCertificateService,
     WebhookCircuitBreakerService,
     WebhookDeadLetterService,
+    PredicateEvaluatorService,
+    PredicatePreviewService,
   ],
   exports: [
     WebhookDeliveryService,
     WebhookClientCertificateService,
     WebhookCircuitBreakerService,
     WebhooksService,
+    PredicateEvaluatorService,
+    PredicatePreviewService,
   ],
 })
 export class WebhooksModule {}
