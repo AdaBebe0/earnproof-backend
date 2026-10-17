@@ -33,6 +33,8 @@ import {
   assertSafeWebhookDestination,
 } from "./webhook-ssrf-guard";
 import { WebhookCircuitBreakerService } from "./webhook-circuit-breaker.service";
+import { PredicateEvaluatorService } from "./services/predicate-evaluator.service";
+import { Predicate } from "./predicate.types";
 
 /** Thrown when a webhook requires mTLS but has no currently valid client certificate. */
 class MtlsCertificateUnavailableError extends Error {
@@ -105,31 +107,36 @@ export class WebhookDeliveryService implements OnModuleInit {
 
   private readonly clientCertificates: WebhookClientCertificateService;
   private readonly circuitBreaker: WebhookCircuitBreakerService;
+  private readonly predicateEvaluator: PredicateEvaluatorService;
 
   constructor(
     prisma: PrismaService,
     signing: WebhookSigningService,
     clientCertificates: WebhookClientCertificateService,
     circuitBreaker: WebhookCircuitBreakerService,
+    predicateEvaluator: PredicateEvaluatorService,
     configService: ConfigService,
   );
   constructor(
     prisma: PrismaService,
     signing: WebhookSigningService,
     clientCertificates: WebhookClientCertificateService,
+    predicateEvaluator: PredicateEvaluatorService,
     configService: ConfigService,
   );
   constructor(
     prisma: PrismaService,
     signing: WebhookSigningService,
+    predicateEvaluator: PredicateEvaluatorService,
     configService: ConfigService,
   );
   constructor(
     private readonly prisma: PrismaService,
     private readonly signing: WebhookSigningService,
-    arg3?: WebhookClientCertificateService | ConfigService,
-    arg4?: WebhookCircuitBreakerService | ConfigService,
-    arg5?: ConfigService,
+    arg3?: WebhookClientCertificateService | PredicateEvaluatorService | ConfigService,
+    arg4?: WebhookCircuitBreakerService | PredicateEvaluatorService | ConfigService,
+    arg5?: PredicateEvaluatorService | ConfigService,
+    arg6?: ConfigService,
   ) {
     const defaultCircuitBreaker: WebhookCircuitBreakerService = {
       canAttemptDelivery: async () => true,
@@ -142,30 +149,42 @@ export class WebhookDeliveryService implements OnModuleInit {
       selectActiveCertificate: async () => null,
     } as unknown as WebhookClientCertificateService;
 
+    const defaultPredicateEvaluator: PredicateEvaluatorService = {
+      evaluate: () => ({ match: true, visited: 0 }),
+      deriveContext: () => ({ resource: "", outcome: "", schemaVersion: "" }),
+    } as unknown as PredicateEvaluatorService;
+
     const isConfig = (obj: unknown): obj is ConfigService =>
       Boolean(obj && typeof (obj as any).get === "function");
 
     let resolvedConfig: ConfigService;
+    let resolvedClientCertificates = defaultClientCertificates;
+    let resolvedCircuitBreaker = defaultCircuitBreaker;
+    let resolvedPredicateEvaluator = defaultPredicateEvaluator;
     if (arg5 && isConfig(arg5)) {
       this.clientCertificates =
         (arg3 as WebhookClientCertificateService) ?? defaultClientCertificates;
       this.circuitBreaker =
         (arg4 as WebhookCircuitBreakerService) ?? defaultCircuitBreaker;
+      this.predicateEvaluator = arg6 as PredicateEvaluatorService ?? defaultPredicateEvaluator;
       resolvedConfig = arg5;
     } else if (arg4 && isConfig(arg4)) {
       this.clientCertificates =
         (arg3 as WebhookClientCertificateService) ?? defaultClientCertificates;
       this.circuitBreaker = defaultCircuitBreaker;
+      this.predicateEvaluator = (arg5 as unknown as PredicateEvaluatorService) ?? defaultPredicateEvaluator;
       resolvedConfig = arg4;
     } else if (arg3 && isConfig(arg3)) {
       this.clientCertificates = defaultClientCertificates;
       this.circuitBreaker = defaultCircuitBreaker;
+      this.predicateEvaluator = arg4 as PredicateEvaluatorService ?? defaultPredicateEvaluator;
       resolvedConfig = arg3;
     } else {
       this.clientCertificates =
         (arg3 as WebhookClientCertificateService) ?? defaultClientCertificates;
       this.circuitBreaker =
         (arg4 as WebhookCircuitBreakerService) ?? defaultCircuitBreaker;
+      this.predicateEvaluator = (arg5 as PredicateEvaluatorService) ?? defaultPredicateEvaluator;
       resolvedConfig = new ConfigService();
     }
 
@@ -301,6 +320,7 @@ export class WebhookDeliveryService implements OnModuleInit {
       select: {
         id: true,
         events: true,
+        predicate: true,
         payloadVersion: true,
       },
     });
@@ -311,6 +331,33 @@ export class WebhookDeliveryService implements OnModuleInit {
     for (const hook of webhooks) {
       const subscribedEvents = this.parseEvents(hook.events);
       if (!subscribedEvents.includes(domainEvent.event)) continue;
+
+      // Evaluate predicate if present
+      if (hook.predicate) {
+        const context = this.predicateEvaluator.deriveContext(
+          domainEvent.event,
+          hook.payloadVersion,
+        );
+        const predicateResult = this.predicateEvaluator.evaluate(
+          hook.predicate as Predicate,
+          context,
+        );
+
+        // Fail closed: if predicate evaluation fails or budget is exceeded, skip delivery
+        if (!predicateResult.match) {
+          this.logger.debug(
+            `Webhook ${hook.id}: predicate did not match ${domainEvent.event} (reason: ${predicateResult.reason ?? "no_match"})`,
+          );
+          continue;
+        }
+
+        // Log if budget was close to exhaustion (potential DoS)
+        if (predicateResult.visited >= 200) {
+          this.logger.warn(
+            `Webhook ${hook.id}: predicate evaluation used ${predicateResult.visited} budget units (near limit)`,
+          );
+        }
+      }
 
       let serialized: ReturnType<typeof serializeWebhookEvent>;
       try {
@@ -338,6 +385,7 @@ export class WebhookDeliveryService implements OnModuleInit {
           payload: serialized.envelope as unknown as Prisma.InputJsonValue,
           schemaVersion: serialized.schemaVersion,
           payloadBody: serialized.body,
+          predicateSnapshot: hook.predicate as unknown as Prisma.InputJsonValue,
           attempt: 1,
           status: WebhookDeliveryStatus.PENDING,
         },

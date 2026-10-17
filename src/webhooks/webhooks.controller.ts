@@ -37,6 +37,7 @@ import {
   RedriveDeadLetterDto,
   RedriveDeadLettersBatchDto,
 } from "./dto/dead-letter.dto";
+import { PredicatePreviewRequestDto, PredicatePreviewResponseDto } from "./dto/predicate.dto";
 import { UpdateWebhookEventsDto } from "./dto/update-webhook-events.dto";
 import { UpdateWebhookCircuitConfigDto } from "./dto/webhook-circuit-config.dto";
 import { WebhookCircuitStatsDto } from "./dto/webhook-circuit-stats.dto";
@@ -653,6 +654,68 @@ export class WebhooksController {
     this.requirePrivilegedRole(user, "send webhook test deliveries");
     const orgId = await this.requireOrgId(user);
     return this.webhooksService.sendTestDelivery(orgId, id);
+  }
+
+  /**
+   * Preview a predicate against a sample event.
+   *
+   * Test whether a bounded predicate matches a given event, without creating
+   * a delivery or modifying any state. Returns whether the predicate matched,
+   * the reason if it didn't, and the number of nodes visited during evaluation.
+   *
+   * Useful for validation during predicate design: ensures the predicate
+   * behaves as expected before attaching it to a subscription.
+   *
+   * POST /api/v1/webhooks/preview-predicate
+   */
+  @Post("preview-predicate")
+  @UseGuards(AuthGuard)
+  @ApiBearerToken()
+  @Throttle({ default: { limit: 100, ttl: 60_000 } })
+  @ApiOperation({
+    operationId: "previewPredicate",
+    summary: "Preview a bounded webhook predicate",
+    description:
+      "Test a predicate against a sample event to see if it matches. " +
+      "No deliveries are created. Useful for validation during predicate design. " +
+      "Same authorization and rate limits as other webhook endpoints.",
+  })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: "Predicate evaluation completed successfully.",
+    type: () => ({
+      match: { type: "boolean" },
+      reason: { type: "string", nullable: true },
+      visitedNodes: { type: "integer" },
+    }),
+  })
+  @ApiResponse({
+    status: HttpStatus.BAD_REQUEST,
+    description:
+      "Invalid predicate or sample event (validation error, unknown version, malformed structure, etc.).",
+    type: ApiErrorDto,
+  })
+  @ApiForbiddenResponse({
+    description:
+      "The caller is not authenticated or has no active organisation.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.TOO_MANY_REQUESTS,
+    description: "Rate limit exceeded.",
+    type: ApiErrorDto,
+  })
+  async previewPredicate(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() dto: {
+      predicate: any;
+      event: { resource: string; outcome: string; schemaVersion: string };
+    },
+  ): Promise<{ match: boolean; reason?: string; visitedNodes: number }> {
+    const orgId = await this.requireOrgId(user);
+    // Authorization check: ensure user's org context (already done by requireOrgId)
+    // No webhook-specific check needed; this is a read-only preview endpoint
+    return this.webhooksService.previewPredicate(orgId, dto.predicate, dto.event);
   }
 
   // ---------------------------------------------------------------------------

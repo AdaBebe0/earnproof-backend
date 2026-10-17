@@ -1138,6 +1138,7 @@ model Webhook {
   url                String
   secretEncrypted    String
   events             Json
+  predicate          Json?                      // Optional PredicateV1 for bounded event filtering
   status             ResourceStatus             @default(ACTIVE)
   mtlsRequired       Boolean                    @default(false)
   payloadVersion     String                     @default("1")
@@ -1158,31 +1159,32 @@ enum WebhookDeliveryStatus {
 }
 
 model WebhookDelivery {
-  id               String                @id @default(cuid())
-  webhookId        String
-  webhook          Webhook               @relation(fields: [webhookId], references: [id])
-  eventType        String
-  eventId          String
-  payload          Json
-  schemaVersion    String                @default("1")
-  payloadBody      String                @default("")
-  attempt          Int                   @default(1)
-  status           WebhookDeliveryStatus @default(PENDING)
-  statusCode       Int?
-  responseBody     String?
-  durationMs       Int?
-  failureReason    String?
-  replayOf         String?
-  replayedBy       String?
-  replayKey        String?               @unique
-  deliveredAt      DateTime?
-  nextRetryAt      DateTime?
-  deadLetteredAt   DateTime?
-  deadLetterReason String?
-  redrivenAt       DateTime?
-  redrivenBy       String?
-  redriveReason    String?
-  createdAt        DateTime              @default(now())
+  id                String                @id @default(cuid())
+  webhookId         String
+  webhook           Webhook               @relation(fields: [webhookId], references: [id])
+  eventType         String
+  eventId           String
+  payload           Json
+  schemaVersion     String                @default("1")
+  payloadBody       String                @default("")
+  predicateSnapshot Json?                 // Snapshot of predicate at delivery time (null if no predicate)
+  attempt           Int                   @default(1)
+  status            WebhookDeliveryStatus @default(PENDING)
+  statusCode        Int?
+  responseBody      String?
+  durationMs        Int?
+  failureReason     String?
+  replayOf          String?
+  replayedBy        String?
+  replayKey         String?               @unique
+  deliveredAt       DateTime?
+  nextRetryAt       DateTime?
+  deadLetteredAt    DateTime?
+  deadLetterReason  String?
+  redrivenAt        DateTime?
+  redrivenBy        String?
+  redriveReason     String?
+  createdAt         DateTime              @default(now())
 
   @@index([webhookId, createdAt])
   @@index([eventId])
