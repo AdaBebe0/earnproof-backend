@@ -489,6 +489,7 @@ model Organization {
   credentialQuarantines CredentialQuarantine[]
   credentialQuarantineAudits CredentialQuarantineAudit[] @relation("quarantine_audit_org")
   roleApprovalPolicies OrganizationRoleApprovalPolicy[]
+  auditLegalHolds      AuditLegalHold[]
 
   @@index([status])
   @@index([archivedAt])
@@ -3206,5 +3207,70 @@ model OrganizationRoleApprovalPolicy {
   createdAt                        DateTime                 @default(now())
 
   @@unique([organizationId, version])
+  @@index([organizationId, status])
+}
+
+// ---------------------------------------------------------------------------
+// Audit retention legal holds (#311)
+// ---------------------------------------------------------------------------
+
+enum AuditLegalHoldScope {
+  ORGANIZATION
+  PLATFORM
+}
+
+enum AuditLegalHoldAuthority {
+  COURT_ORDER
+  REGULATOR_REQUEST
+  LITIGATION_COUNSEL
+  INTERNAL_INVESTIGATION
+}
+
+enum AuditLegalHoldStatus {
+  PENDING_APPROVAL
+  ACTIVE
+  RELEASE_PENDING
+  RELEASED
+  REJECTED
+}
+
+/// Suspends retention cleanup for audit records in a bounded time range.
+///
+/// Deliberately carries no case narrative: the reason is stored only as a
+/// SHA-256 commitment the requester computed, so the record proves which
+/// reason was cited without disclosing it. Every hold expires; renewal is a
+/// new hold with its own approval.
+model AuditLegalHold {
+  id                   String                  @id @default(cuid())
+  scope                AuditLegalHoldScope
+  /// Required for ORGANIZATION scope, null for PLATFORM scope.
+  organizationId       String?
+  organization         Organization?           @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  authority            AuditLegalHoldAuthority
+  /// Lowercase hex SHA-256 commitment to the hold reason.
+  reasonCommitment     String                  @db.Char(64)
+  /// Inclusive bounds on AuditLog.createdAt covered by the hold.
+  rangeStart           DateTime
+  rangeEnd             DateTime
+  status               AuditLegalHoldStatus    @default(PENDING_APPROVAL)
+  /// Optimistic-concurrency revision, incremented by every transition.
+  revision             Int                     @default(0)
+  requestedById        String
+  /// A pending hold protects records until this instant, then lapses.
+  approvalDeadline     DateTime
+  approvedById         String?
+  approvedAt           DateTime?
+  rejectedById         String?
+  rejectedAt           DateTime?
+  releaseRequestedById String?
+  releaseRequestedAt   DateTime?
+  releasedById         String?
+  releasedAt           DateTime?
+  /// The hold stops protecting records at this instant (exclusive).
+  expiresAt            DateTime
+  createdAt            DateTime                @default(now())
+  updatedAt            DateTime                @updatedAt
+
+  @@index([status, expiresAt])
   @@index([organizationId, status])
 }
