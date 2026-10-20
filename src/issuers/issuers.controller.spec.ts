@@ -237,8 +237,8 @@ describe("IssuersController", () => {
       const response = {
         items: [mockPublicIssuer],
         total: 1,
-        page: 1,
         limit: 20,
+        pageInfo: { hasMore: false, nextCursor: null },
       };
 
       jest.spyOn(service, "listIssuersPublic").mockResolvedValue(response);
@@ -257,8 +257,8 @@ describe("IssuersController", () => {
       const response = {
         items: [mockIssuer],
         total: 1,
-        page: 1,
         limit: 20,
+        pageInfo: { hasMore: false, nextCursor: null },
       };
 
       jest.spyOn(service, "listIssuers").mockResolvedValue(response);
