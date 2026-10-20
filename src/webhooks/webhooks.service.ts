@@ -10,6 +10,8 @@ import { PrismaService } from "../database/prisma.service";
 import { ConflictException } from "../common/exceptions/domain.exceptions";
 import { CreateWebhookDto } from "./dto/create-webhook.dto";
 import { UpdateWebhookEventsDto } from "./dto/update-webhook-events.dto";
+import { UpdateWebhookUrlDto } from "./dto/update-webhook-url.dto";
+import { VerifyWebhookDto } from "./dto/verify-webhook.dto";
 import { OrganizationQuotaService } from "../quotas/organization-quota.service";
 import { WebhookDeliveryService } from "./webhook-delivery.service";
 import { WebhookCircuitBreakerService } from "./webhook-circuit-breaker.service";
@@ -25,6 +27,7 @@ export class WebhooksService {
     private readonly prisma: PrismaService,
     private readonly deliveryService: WebhookDeliveryService,
     private readonly circuitBreaker: WebhookCircuitBreakerService,
+    private readonly verificationService: WebhookVerificationService,
     configService: ConfigService,
     private readonly quotas: OrganizationQuotaService,
     private readonly secretRetrievalReceiptService: SecretRetrievalReceiptService,
@@ -37,6 +40,10 @@ export class WebhooksService {
 
   /**
    * Create a webhook endpoint for the given organisation.
+   *
+   * The endpoint starts `PENDING`: no real event deliveries go out until the
+   * destination's ownership is verified (see `verify`). A verification
+   * challenge is issued and sent immediately.
    *
    * Returns the raw signing secret ONCE — it is never retrievable again.
    * The caller must store it securely.
@@ -71,6 +78,8 @@ export class WebhooksService {
 
     // Initialize circuit breaker for new webhook (outside transaction for idempotency)
     await this.circuitBreaker.initializeCircuit(webhook.id);
+
+    await this.verificationService.issueChallenge(webhook.id, dto.url, rawSecret);
 
     return {
       ...webhook,
@@ -409,6 +418,23 @@ export class WebhooksService {
   // ---------------------------------------------------------------------------
   // Helpers
   // ---------------------------------------------------------------------------
+
+  /** Like `assertOwnedWebhook`, but also returns `url` and `secretEncrypted`. */
+  private async assertOwnedWebhookFull(organizationId: string, webhookId: string) {
+    const webhook = await this.prisma.webhook.findUnique({
+      where: { id: webhookId },
+      select: {
+        id: true,
+        organizationId: true,
+        url: true,
+        secretEncrypted: true,
+        status: true,
+        revision: true,
+      },
+    });
+    this.assertOwnership(webhook, organizationId, webhookId);
+    return webhook!;
+  }
 
   private async assertOwnedWebhook(organizationId: string, webhookId: string) {
     const webhook = await this.prisma.webhook.findUnique({

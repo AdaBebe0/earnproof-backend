@@ -42,6 +42,8 @@ import { UpdateWebhookEventsDto } from "./dto/update-webhook-events.dto";
 import { UpdateWebhookCircuitConfigDto } from "./dto/webhook-circuit-config.dto";
 import { WebhookCircuitStatsDto } from "./dto/webhook-circuit-stats.dto";
 import { WebhookTestDeliveryResponseDto } from "./dto/webhook-test-delivery-response.dto";
+import { UpdateWebhookUrlDto } from "./dto/update-webhook-url.dto";
+import { VerifyWebhookDto } from "./dto/verify-webhook.dto";
 import { WebhooksService } from "./webhooks.service";
 import { WebhookCircuitBreakerService } from "./webhook-circuit-breaker.service";
 import { WebhookDeadLetterService } from "./webhook-dead-letter.service";
@@ -168,7 +170,9 @@ export class WebhooksController {
     description:
       "Registers an HTTPS endpoint for the caller's organisation and returns its " +
       "signing secret. The secret is shown exactly once: store it before leaving " +
-      "the response, and rotate the endpoint if it is lost.",
+      "the response, and rotate the endpoint if it is lost. The endpoint starts " +
+      "PENDING: a verification challenge is sent to the destination immediately, " +
+      "and no real event deliveries go out until it is acknowledged via `verify`.",
   })
   @ApiResponse({
     status: HttpStatus.CREATED,
@@ -179,7 +183,7 @@ export class WebhooksController {
         id: "ckv8v6h2b0002qzrm7t4k9xza",
         url: "https://example.com/webhooks/earnproof",
         events: ["proof.created", "proof.verified"],
-        status: "ACTIVE",
+        status: "PENDING",
         createdAt: "2026-08-24T12:00:00.000Z",
         signingSecret:
           "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
@@ -307,6 +311,138 @@ export class WebhooksController {
   ) {
     const orgId = await this.requireOrgId(user);
     return this.webhooksService.updateEvents(orgId, id, dto);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Destination verification
+  // ---------------------------------------------------------------------------
+
+  @Patch(":id/url")
+  @ApiOperation({
+    summary: "Change the destination URL",
+    description:
+      "Updates the endpoint's destination. The endpoint reverts to PENDING and " +
+      "a fresh verification challenge is sent to the new URL — verification of " +
+      "the previous destination no longer authorises deliveries.",
+  })
+  @ApiParam({
+    name: "id",
+    description: "Webhook endpoint identifier.",
+    example: "ckv8v6h2b0002qzrm7t4k9xza",
+  })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: "Destination updated; endpoint is PENDING re-verification.",
+    schema: {
+      example: {
+        id: "ckv8v6h2b0002qzrm7t4k9xza",
+        url: "https://example.com/webhooks/earnproof-v2",
+        events: ["proof.created", "proof.verified"],
+        status: "PENDING",
+        updatedAt: "2026-08-24T13:05:00.000Z",
+      },
+    },
+  })
+  @ApiResponse({
+    status: HttpStatus.BAD_REQUEST,
+    description: "The URL is not a safe HTTPS destination.",
+    type: ApiErrorDto,
+  })
+  @ApiNotFoundResponse({
+    description: "No such endpoint in the caller's organisation.",
+    type: ApiErrorDto,
+  })
+  async updateUrl(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("id") id: string,
+    @Body() dto: UpdateWebhookUrlDto,
+  ) {
+    const orgId = await this.requireOrgId(user);
+    return this.webhooksService.updateUrl(orgId, id, dto);
+  }
+
+  @Post(":id/resend-verification")
+  @ApiOperation({
+    summary: "Re-send the destination verification challenge",
+    description:
+      "Issues and sends a new challenge for a PENDING endpoint, invalidating " +
+      "any still-outstanding previous challenge. Use this if the original " +
+      "challenge expired or was never received.",
+  })
+  @ApiParam({
+    name: "id",
+    description: "Webhook endpoint identifier.",
+    example: "ckv8v6h2b0002qzrm7t4k9xza",
+  })
+  @ApiResponse({
+    status: HttpStatus.CREATED,
+    description: "A new challenge was issued and sent.",
+    schema: {
+      example: {
+        webhookId: "ckv8v6h2b0002qzrm7t4k9xza",
+        status: "PENDING",
+        expiresAt: "2026-08-24T13:10:00.000Z",
+      },
+    },
+  })
+  @ApiResponse({
+    status: HttpStatus.BAD_REQUEST,
+    description: "The endpoint is not awaiting verification.",
+    type: ApiErrorDto,
+  })
+  @ApiNotFoundResponse({
+    description: "No such endpoint in the caller's organisation.",
+    type: ApiErrorDto,
+  })
+  async resendVerification(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("id") id: string,
+  ) {
+    const orgId = await this.requireOrgId(user);
+    return this.webhooksService.resendVerification(orgId, id);
+  }
+
+  @Post(":id/verify")
+  @ApiOperation({
+    summary: "Acknowledge the destination verification challenge",
+    description:
+      "Submits the token delivered in the `webhook.verification` challenge " +
+      "payload. On success the endpoint becomes ACTIVE and real event " +
+      "deliveries begin. The token is single-use: a second submission (replay) " +
+      "is rejected the same way as an unknown or expired one.",
+  })
+  @ApiParam({
+    name: "id",
+    description: "Webhook endpoint identifier.",
+    example: "ckv8v6h2b0002qzrm7t4k9xza",
+  })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: "Verified; the endpoint is now ACTIVE.",
+    schema: {
+      example: {
+        id: "ckv8v6h2b0002qzrm7t4k9xza",
+        status: "ACTIVE",
+        updatedAt: "2026-08-24T13:12:00.000Z",
+      },
+    },
+  })
+  @ApiResponse({
+    status: HttpStatus.BAD_REQUEST,
+    description: "The token is unknown, expired, or already used.",
+    type: ApiErrorDto,
+  })
+  @ApiNotFoundResponse({
+    description: "No such endpoint in the caller's organisation.",
+    type: ApiErrorDto,
+  })
+  async verify(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("id") id: string,
+    @Body() dto: VerifyWebhookDto,
+  ) {
+    const orgId = await this.requireOrgId(user);
+    return this.webhooksService.verify(orgId, id, dto);
   }
 
   @Post(":id/rotate-secret")
