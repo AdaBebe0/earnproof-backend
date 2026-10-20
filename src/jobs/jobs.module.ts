@@ -23,6 +23,8 @@ import { ProofExpirationReconcilerService } from "./proof-expiration-reconciler.
 import { ProofSharingCleanupJob } from "./proof-sharing-cleanup.job";
 import { RetentionCleanupService } from "./retention/retention-cleanup.service";
 import { RetentionJob } from "./retention/retention.job";
+import { RevocationPropagationController } from "./revocation-propagation.controller";
+import { RevocationPropagationReconcilerService } from "./revocation-propagation-reconciler.service";
 import { WebhookCertificateExpiryJob } from "./webhook-certificate-expiry.job";
 import { WebhookTlsProbeJob } from "./webhook-tls-probe.job";
 import { DomainEventOutboxWorkerService } from "./domain-event-outbox-worker.service";
@@ -39,6 +41,7 @@ import { BulkAdminController } from "./bulk-admin/bulk-admin.controller";
     WebhooksModule,
     ApiKeysModule,
   ],
+  controllers: [JobExecutionController, RevocationPropagationController],
   controllers: [JobExecutionController, BulkAdminController],
   providers: [
     ContractAnchoringService,
@@ -60,6 +63,7 @@ import { BulkAdminController } from "./bulk-admin/bulk-admin.controller";
     JobExecutionService,
     JobExecutionMaintenanceJob,
     AttestationReconcilerService,
+    RevocationPropagationReconcilerService,
     BulkAdminService,
   ],
   exports: [
@@ -74,6 +78,7 @@ import { BulkAdminController } from "./bulk-admin/bulk-admin.controller";
     IssuerReconciliationService,
     RetentionCleanupService,
     JobExecutionService,
+    RevocationPropagationReconcilerService,
     BulkAdminService,
   ],
 })

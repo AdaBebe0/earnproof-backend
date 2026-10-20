@@ -37,6 +37,7 @@ import { WebhookTlsPostureService } from "./tls-posture/webhook-tls-posture.serv
     WebhookDeliveryService,
     WebhookClientCertificateService,
     WebhookCircuitBreakerService,
+    WebhookDeadLetterService,
     WebhooksService,
     PredicateEvaluatorService,
     PredicatePreviewService,
