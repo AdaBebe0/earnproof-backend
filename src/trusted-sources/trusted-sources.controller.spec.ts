@@ -166,14 +166,20 @@ describe("TrustedSourcesController (HTTP)", () => {
 
   describe("GET /trusted-sources", () => {
     it("returns 200 with the user's trusted sources", async () => {
-      service.listTrustedSources.mockResolvedValue([TRUSTED_SOURCE]);
+      service.listTrustedSources.mockResolvedValue({
+        data: [TRUSTED_SOURCE],
+        pageInfo: { hasMore: false, nextCursor: null },
+      });
 
       const res = await request(app.getHttpServer()).get(
         "/api/v1/trusted-sources",
       );
 
       expect(res.status).toBe(200);
-      expect(res.body).toEqual([TRUSTED_SOURCE]);
+      expect(res.body).toEqual({
+        data: [TRUSTED_SOURCE],
+        pageInfo: { hasMore: false, nextCursor: null },
+      });
       expect(service.listTrustedSources).toHaveBeenCalledWith(
         AUTHENTICATED_SESSION,
         expect.objectContaining({}),
@@ -181,7 +187,10 @@ describe("TrustedSourcesController (HTTP)", () => {
     });
 
     it("passes query filters through to the service", async () => {
-      service.listTrustedSources.mockResolvedValue([]);
+      service.listTrustedSources.mockResolvedValue({
+        data: [],
+        pageInfo: { hasMore: false, nextCursor: null },
+      });
 
       await request(app.getHttpServer())
         .get("/api/v1/trusted-sources")

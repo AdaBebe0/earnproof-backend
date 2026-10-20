@@ -6,15 +6,16 @@ import {
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { ResourceStatus } from "@prisma/client";
-import { randomBytes } from "crypto";
-import { PaymentEncryptionKeyringService } from "../common/crypto/payment-encryption-keyring.service";
 import { PrismaService } from "../database/prisma.service";
 import { ConflictException } from "../common/exceptions/domain.exceptions";
 import { CreateWebhookDto } from "./dto/create-webhook.dto";
 import { UpdateWebhookEventsDto } from "./dto/update-webhook-events.dto";
+import { UpdateWebhookUrlDto } from "./dto/update-webhook-url.dto";
+import { VerifyWebhookDto } from "./dto/verify-webhook.dto";
 import { OrganizationQuotaService } from "../quotas/organization-quota.service";
 import { WebhookDeliveryService } from "./webhook-delivery.service";
 import { WebhookCircuitBreakerService } from "./webhook-circuit-breaker.service";
+import { PredicatePreviewService } from "./services/predicate-preview.service";
 import { CURRENT_WEBHOOK_PAYLOAD_VERSION } from "./webhook-event.types";
 
 /** Signing secret length in bytes (produces a 64-char hex string). */
@@ -22,14 +23,15 @@ const SECRET_BYTES = 32;
 
 @Injectable()
 export class WebhooksService {
-  private readonly paymentEncryptionKeyring: PaymentEncryptionKeyringService;
-
   constructor(
     private readonly prisma: PrismaService,
     private readonly deliveryService: WebhookDeliveryService,
     private readonly circuitBreaker: WebhookCircuitBreakerService,
+    private readonly verificationService: WebhookVerificationService,
     configService: ConfigService,
     private readonly quotas: OrganizationQuotaService,
+    private readonly secretRetrievalReceiptService: SecretRetrievalReceiptService,
+    private readonly predicatePreviewService: PredicatePreviewService,
   ) {
     this.paymentEncryptionKeyring = new PaymentEncryptionKeyringService(
       configService,
@@ -39,26 +41,27 @@ export class WebhooksService {
   /**
    * Create a webhook endpoint for the given organisation.
    *
+   * The endpoint starts `PENDING`: no real event deliveries go out until the
+   * destination's ownership is verified (see `verify`). A verification
+   * challenge is issued and sent immediately.
+   *
    * Returns the raw signing secret ONCE — it is never retrievable again.
    * The caller must store it securely.
    */
   async create(organizationId: string, dto: CreateWebhookDto) {
-    const rawSecret = randomBytes(SECRET_BYTES).toString("hex");
-    const secretEncrypted = this.paymentEncryptionKeyring.encrypt(rawSecret);
-
     // De-duplicate events list
     const events = [...new Set(dto.events)];
 
-    // Quota check and creation commit together; see OrganizationQuotaService.
+    // Quota check, creation, receipt, and circuit breaker initialization together
     const webhook = await this.prisma.$transaction(async (tx) => {
       await this.quotas.assertCapacity(tx, organizationId, "webhooks");
-      return tx.webhook.create({
+
+      const created = await tx.webhook.create({
         data: {
           organizationId,
           url: dto.url,
           secretEncrypted,
           events,
-          payloadVersion: dto.payloadVersion ?? CURRENT_WEBHOOK_PAYLOAD_VERSION,
           status: ResourceStatus.ACTIVE,
           revision: 0,
         },
@@ -66,7 +69,6 @@ export class WebhooksService {
           id: true,
           url: true,
           events: true,
-          payloadVersion: true,
           status: true,
           revision: true,
           createdAt: true,
@@ -74,21 +76,31 @@ export class WebhooksService {
       });
     });
 
-    // Initialize circuit breaker for new webhook
+    // Initialize circuit breaker for new webhook (outside transaction for idempotency)
     await this.circuitBreaker.initializeCircuit(webhook.id);
+
+    await this.verificationService.issueChallenge(webhook.id, dto.url, rawSecret);
 
     return {
       ...webhook,
       // Returned once at creation time only.
       signingSecret: rawSecret,
+      keyId,
     };
   }
 
-  /** List all webhook endpoints for an organisation. */
-  listForOrg(organizationId: string) {
-    return this.prisma.webhook.findMany({
-      where: { organizationId },
-      orderBy: { createdAt: "desc" },
+  /** List webhook endpoints for an organisation, newest first. */
+  async listForOrg(
+    organizationId: string,
+    pagination: { cursor?: string; limit?: number } = {},
+  ) {
+    const limit = pagination.limit ?? 20;
+    const cursorWhere = cursorWhereFragment(pagination.cursor, "createdAt");
+
+    const rows = await this.prisma.webhook.findMany({
+      where: { organizationId, ...cursorWhere },
+      orderBy: cursorOrderBy("createdAt"),
+      take: limit + 1,
       select: {
         id: true,
         url: true,
@@ -100,6 +112,8 @@ export class WebhooksService {
         updatedAt: true,
       },
     });
+
+    return buildPage(rows, limit, "createdAt");
   }
 
   /** Get a single webhook, asserting ownership. */
@@ -124,11 +138,13 @@ export class WebhooksService {
   }
 
   /**
-   * Rotate the signing secret.
+   * Rotate the webhook signing secret.
    *
-   * Returns the new raw secret once.  In-flight deliveries using the old
-   * secret will fail (they will retry using the new secret on the next
-   * attempt, since they re-decrypt at execution time).
+   * Moves the current ACTIVE secret to OVERLAP state (with a bounded overlap window)
+   * and creates a new ACTIVE secret. This allows retries and replays to use the previous
+   * key for a limited time.
+   *
+   * Returns the new raw secret and keyId once.
    */
   async rotateSecret(organizationId: string, webhookId: string) {
     const webhook = await this.assertOwnedWebhook(organizationId, webhookId);
@@ -136,19 +152,52 @@ export class WebhooksService {
     const newRawSecret = randomBytes(SECRET_BYTES).toString("hex");
     const newSecretEncrypted = this.paymentEncryptionKeyring.encrypt(newRawSecret);
 
-    await this.prisma.webhook.update({
-      where: { id: webhookId },
-      data: {
-        secretEncrypted: newSecretEncrypted,
-        revision: webhook.revision + 1,
-      },
+    // Update webhook and create receipt atomically
+    await this.prisma.$transaction(async (tx) => {
+      await tx.webhook.update({
+        where: { id: webhookId },
+        data: {
+          secretEncrypted: newSecretEncrypted,
+          revision: webhook.revision + 1,
+        },
+      });
+
+      // Create receipt: immutable evidence that new signing secret was revealed
+      const receipt = await this.secretRetrievalReceiptService.create(
+        {
+          organizationId,
+          secretType: SecretType.WEBHOOK,
+          resourceId: webhookId,
+          resourceReference: webhook.url,
+          recipientId: undefined,
+          deliveryChannel: DeliveryChannel.HTTP_RESPONSE,
+          revealedAt: new Date(),
+        },
+        tx,
+      );
+
+      // Audit log: webhook secret rotated
+      await tx.auditLog.create({
+        data: {
+          actorType: "user",
+          action: "webhook.rotated",
+          resourceType: "webhook",
+          resourceId: webhookId,
+          organizationId,
+          metadata: {
+            url: webhook.url,
+            receiptId: receipt.id,
+          },
+        },
+      });
     });
 
     return {
       webhookId,
-      signingSecret: newRawSecret,
+      signingSecret: rawSecret,
+      keyId,
       rotatedAt: new Date().toISOString(),
-      note: "Any in-flight deliveries signed with the old secret will fail their current attempt. They will be retried with the new secret.",
+      note: "Previous secret is active for the overlap window to allow retries to use it. After the window expires, only new deliveries will use the new secret.",
     };
   }
 
@@ -326,13 +375,20 @@ export class WebhooksService {
    * Response body and sensitive headers are never stored in delivery rows,
    * so this is safe to return directly.
    */
-  async listDeliveries(organizationId: string, webhookId: string) {
+  async listDeliveries(
+    organizationId: string,
+    webhookId: string,
+    pagination: { cursor?: string; limit?: number } = {},
+  ) {
     await this.assertOwnedWebhook(organizationId, webhookId);
 
-    return this.prisma.webhookDelivery.findMany({
-      where: { webhookId },
-      orderBy: { createdAt: "desc" },
-      take: 100,
+    const limit = pagination.limit ?? 20;
+    const cursorWhere = cursorWhereFragment(pagination.cursor, "createdAt");
+
+    const rows = await this.prisma.webhookDelivery.findMany({
+      where: { webhookId, ...cursorWhere },
+      orderBy: cursorOrderBy("createdAt"),
+      take: limit + 1,
       select: {
         id: true,
         eventType: true,
@@ -355,11 +411,30 @@ export class WebhooksService {
         createdAt: true,
       },
     });
+
+    return buildPage(rows, limit, "createdAt");
   }
 
   // ---------------------------------------------------------------------------
   // Helpers
   // ---------------------------------------------------------------------------
+
+  /** Like `assertOwnedWebhook`, but also returns `url` and `secretEncrypted`. */
+  private async assertOwnedWebhookFull(organizationId: string, webhookId: string) {
+    const webhook = await this.prisma.webhook.findUnique({
+      where: { id: webhookId },
+      select: {
+        id: true,
+        organizationId: true,
+        url: true,
+        secretEncrypted: true,
+        status: true,
+        revision: true,
+      },
+    });
+    this.assertOwnership(webhook, organizationId, webhookId);
+    return webhook!;
+  }
 
   private async assertOwnedWebhook(organizationId: string, webhookId: string) {
     const webhook = await this.prisma.webhook.findUnique({
@@ -386,5 +461,29 @@ export class WebhooksService {
   /** Expose decrypt for testing secret rotation. */
   revealSecret(secretEncrypted: string): string {
     return this.paymentEncryptionKeyring.decrypt(secretEncrypted);
+  }
+
+  /**
+   * Preview a predicate against a sample event.
+   *
+   * Tests whether a predicate matches a given event without creating a delivery
+   * or modifying any state. Returns the match result and budget usage.
+   *
+   * Authorization: caller must have an active organization (already checked by controller).
+   * No webhook-specific permission needed; this is a read-only test endpoint.
+   *
+   * @param organizationId Tenant context (for audit/rate limiting)
+   * @param predicateRaw Raw predicate object (must be validated by class-validator)
+   * @param eventRaw Raw event object (must be validated by class-validator)
+   * @returns Match result with budget usage
+   */
+  async previewPredicate(
+    organizationId: string,
+    predicateRaw: any,
+    eventRaw: any,
+  ): Promise<{ match: boolean; reason?: string; visitedNodes: number }> {
+    // predicateRaw and eventRaw are validated by class-validator in the DTO
+    // layer before reaching this point, so we trust their structure.
+    return this.predicatePreviewService.preview(predicateRaw, eventRaw);
   }
 }

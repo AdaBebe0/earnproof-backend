@@ -28,11 +28,14 @@ import {
   WebhookTestEnvelope,
 } from "./webhook-event.types";
 import { WebhookSigningService } from "./webhook-signing.service";
+import { WebhookSecretVersioningService } from "./webhook-secret-versioning.service";
 import {
   SsrfBlockedError,
   assertSafeWebhookDestination,
 } from "./webhook-ssrf-guard";
 import { WebhookCircuitBreakerService } from "./webhook-circuit-breaker.service";
+import { PredicateEvaluatorService } from "./services/predicate-evaluator.service";
+import { Predicate } from "./predicate.types";
 
 /** Thrown when a webhook requires mTLS but has no currently valid client certificate. */
 class MtlsCertificateUnavailableError extends Error {
@@ -105,31 +108,36 @@ export class WebhookDeliveryService implements OnModuleInit {
 
   private readonly clientCertificates: WebhookClientCertificateService;
   private readonly circuitBreaker: WebhookCircuitBreakerService;
+  private readonly predicateEvaluator: PredicateEvaluatorService;
 
   constructor(
     prisma: PrismaService,
     signing: WebhookSigningService,
     clientCertificates: WebhookClientCertificateService,
     circuitBreaker: WebhookCircuitBreakerService,
+    predicateEvaluator: PredicateEvaluatorService,
     configService: ConfigService,
   );
   constructor(
     prisma: PrismaService,
     signing: WebhookSigningService,
     clientCertificates: WebhookClientCertificateService,
+    predicateEvaluator: PredicateEvaluatorService,
     configService: ConfigService,
   );
   constructor(
     prisma: PrismaService,
     signing: WebhookSigningService,
+    predicateEvaluator: PredicateEvaluatorService,
     configService: ConfigService,
   );
   constructor(
     private readonly prisma: PrismaService,
     private readonly signing: WebhookSigningService,
-    arg3?: WebhookClientCertificateService | ConfigService,
-    arg4?: WebhookCircuitBreakerService | ConfigService,
-    arg5?: ConfigService,
+    arg3?: WebhookClientCertificateService | PredicateEvaluatorService | ConfigService,
+    arg4?: WebhookCircuitBreakerService | PredicateEvaluatorService | ConfigService,
+    arg5?: PredicateEvaluatorService | ConfigService,
+    arg6?: ConfigService,
   ) {
     const defaultCircuitBreaker: WebhookCircuitBreakerService = {
       canAttemptDelivery: async () => true,
@@ -142,30 +150,42 @@ export class WebhookDeliveryService implements OnModuleInit {
       selectActiveCertificate: async () => null,
     } as unknown as WebhookClientCertificateService;
 
+    const defaultPredicateEvaluator: PredicateEvaluatorService = {
+      evaluate: () => ({ match: true, visited: 0 }),
+      deriveContext: () => ({ resource: "", outcome: "", schemaVersion: "" }),
+    } as unknown as PredicateEvaluatorService;
+
     const isConfig = (obj: unknown): obj is ConfigService =>
       Boolean(obj && typeof (obj as any).get === "function");
 
     let resolvedConfig: ConfigService;
+    let resolvedClientCertificates = defaultClientCertificates;
+    let resolvedCircuitBreaker = defaultCircuitBreaker;
+    let resolvedPredicateEvaluator = defaultPredicateEvaluator;
     if (arg5 && isConfig(arg5)) {
       this.clientCertificates =
         (arg3 as WebhookClientCertificateService) ?? defaultClientCertificates;
       this.circuitBreaker =
         (arg4 as WebhookCircuitBreakerService) ?? defaultCircuitBreaker;
+      this.predicateEvaluator = arg6 as PredicateEvaluatorService ?? defaultPredicateEvaluator;
       resolvedConfig = arg5;
     } else if (arg4 && isConfig(arg4)) {
       this.clientCertificates =
         (arg3 as WebhookClientCertificateService) ?? defaultClientCertificates;
       this.circuitBreaker = defaultCircuitBreaker;
+      this.predicateEvaluator = (arg5 as unknown as PredicateEvaluatorService) ?? defaultPredicateEvaluator;
       resolvedConfig = arg4;
     } else if (arg3 && isConfig(arg3)) {
       this.clientCertificates = defaultClientCertificates;
       this.circuitBreaker = defaultCircuitBreaker;
+      this.predicateEvaluator = arg4 as PredicateEvaluatorService ?? defaultPredicateEvaluator;
       resolvedConfig = arg3;
     } else {
       this.clientCertificates =
         (arg3 as WebhookClientCertificateService) ?? defaultClientCertificates;
       this.circuitBreaker =
         (arg4 as WebhookCircuitBreakerService) ?? defaultCircuitBreaker;
+      this.predicateEvaluator = (arg5 as PredicateEvaluatorService) ?? defaultPredicateEvaluator;
       resolvedConfig = new ConfigService();
     }
 
@@ -301,6 +321,7 @@ export class WebhookDeliveryService implements OnModuleInit {
       select: {
         id: true,
         events: true,
+        predicate: true,
         payloadVersion: true,
       },
     });
@@ -311,6 +332,33 @@ export class WebhookDeliveryService implements OnModuleInit {
     for (const hook of webhooks) {
       const subscribedEvents = this.parseEvents(hook.events);
       if (!subscribedEvents.includes(domainEvent.event)) continue;
+
+      // Evaluate predicate if present
+      if (hook.predicate) {
+        const context = this.predicateEvaluator.deriveContext(
+          domainEvent.event,
+          hook.payloadVersion,
+        );
+        const predicateResult = this.predicateEvaluator.evaluate(
+          hook.predicate as Predicate,
+          context,
+        );
+
+        // Fail closed: if predicate evaluation fails or budget is exceeded, skip delivery
+        if (!predicateResult.match) {
+          this.logger.debug(
+            `Webhook ${hook.id}: predicate did not match ${domainEvent.event} (reason: ${predicateResult.reason ?? "no_match"})`,
+          );
+          continue;
+        }
+
+        // Log if budget was close to exhaustion (potential DoS)
+        if (predicateResult.visited >= 200) {
+          this.logger.warn(
+            `Webhook ${hook.id}: predicate evaluation used ${predicateResult.visited} budget units (near limit)`,
+          );
+        }
+      }
 
       let serialized: ReturnType<typeof serializeWebhookEvent>;
       try {
@@ -338,6 +386,7 @@ export class WebhookDeliveryService implements OnModuleInit {
           payload: serialized.envelope as unknown as Prisma.InputJsonValue,
           schemaVersion: serialized.schemaVersion,
           payloadBody: serialized.body,
+          predicateSnapshot: hook.predicate as unknown as Prisma.InputJsonValue,
           attempt: 1,
           status: WebhookDeliveryStatus.PENDING,
         },
@@ -490,7 +539,6 @@ export class WebhookDeliveryService implements OnModuleInit {
           select: {
             id: true,
             url: true,
-            secretEncrypted: true,
             status: true,
             mtlsRequired: true,
             organization: { select: { archivedAt: true } },
@@ -547,7 +595,6 @@ export class WebhookDeliveryService implements OnModuleInit {
     }
 
     const url = delivery.webhook.url;
-    const secretEncrypted = delivery.webhook.secretEncrypted;
 
     // Decrypt signing secret — never stored in plain text or in delivery logs.
     let signingSecret: string;
@@ -571,7 +618,13 @@ export class WebhookDeliveryService implements OnModuleInit {
     const body = delivery.payloadBody ?? JSON.stringify(delivery.payload);
     const timestamp = Math.floor(Date.now() / 1000);
 
-    const signature = this.signing.sign(signingSecret, timestamp, delivery.eventId, body);
+    const signature = this.signing.sign(
+      signingSecret,
+      timestamp,
+      delivery.eventId,
+      signedKeyId,
+      body,
+    );
 
     const schemaVersion = delivery.schemaVersion ?? "1";
     const headers: Record<string, string> = {
@@ -594,7 +647,7 @@ export class WebhookDeliveryService implements OnModuleInit {
     }
 
     let statusCode: number | undefined;
-    let responseBody: string | undefined;
+    let responseBody: Prisma.InputJsonValue | undefined;
     let durationMs: number | undefined;
     let success = false;
     let failureReason: string | undefined;
@@ -632,11 +685,9 @@ export class WebhookDeliveryService implements OnModuleInit {
       durationMs = Date.now() - start;
       statusCode = response.status;
 
-      // Truncate response body to prevent large payloads in logs.
-      const rawText = redactSensitiveResponse(await response.text());
-      responseBody = rawText.length > MAX_RESPONSE_BODY_BYTES
-        ? rawText.slice(0, MAX_RESPONSE_BODY_BYTES) + "…[truncated]"
-        : rawText;
+      // Process response body: normalize encoding, redact secrets, compute hash, truncate.
+      const safeResponse = processWebhookResponse(await response.text());
+      responseBody = safeResponse as unknown as Prisma.InputJsonValue;
 
       success = response.ok;
       if (!success) {
@@ -680,6 +731,7 @@ export class WebhookDeliveryService implements OnModuleInit {
           responseBody,
           durationMs,
           deliveredAt: new Date(),
+          signedKeyId,
         },
       });
 
@@ -687,7 +739,7 @@ export class WebhookDeliveryService implements OnModuleInit {
       await this.circuitBreaker.recordSuccess(delivery.webhookId);
 
       this.logger.log(
-        `Delivery ${deliveryId} succeeded (attempt ${delivery.attempt}, ${durationMs}ms, HTTP ${statusCode})`,
+        `Delivery ${deliveryId} succeeded (attempt ${delivery.attempt}, keyId=${signedKeyId}, ${durationMs}ms, HTTP ${statusCode})`,
       );
       return;
     }
@@ -727,6 +779,7 @@ export class WebhookDeliveryService implements OnModuleInit {
         durationMs,
         failureReason,
         deliveredAt: new Date(),
+        signedKeyId,
       },
     });
 
@@ -741,13 +794,14 @@ export class WebhookDeliveryService implements OnModuleInit {
         attempt: nextAttempt,
         status: WebhookDeliveryStatus.PENDING,
         replayOf: delivery.replayOf, // carry through if this is a replay
+        signedKeyId, // preserve the key version for the retry
         nextRetryAt,
       },
       select: { id: true },
     });
 
     this.logger.log(
-      `Delivery ${deliveryId} failed (attempt ${delivery.attempt}); retrying as ${retryDelivery.id} in ${delay}ms`,
+      `Delivery ${deliveryId} failed (attempt ${delivery.attempt}, keyId=${signedKeyId}); retrying as ${retryDelivery.id} in ${delay}ms`,
     );
 
     // Record failure in circuit breaker for retryable failures

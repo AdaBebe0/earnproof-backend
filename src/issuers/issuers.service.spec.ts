@@ -452,23 +452,36 @@ describe("IssuersService", () => {
       expect(JSON.stringify(result)).not.toContain("internalNotes");
     });
 
-    it("should paginate results", async () => {
-      jest.spyOn(prisma.issuer, "findMany").mockResolvedValue([mockIssuer]);
+    it("returns a deterministic page with cursor-based pagination", async () => {
+      const rows = Array.from({ length: 11 }, (_, i) => ({
+        ...mockIssuer,
+        id: `issuer-${i}`,
+        createdAt: new Date(`2026-01-${String(i + 1).padStart(2, "0")}`),
+      })).reverse();
+      jest.spyOn(prisma.issuer, "findMany").mockResolvedValue(rows);
       jest.spyOn(prisma.issuer, "count").mockResolvedValue(50);
 
-      const result = await service.listIssuersPublic({
-        page: 2,
-        limit: 10,
-      });
+      const result = await service.listIssuersPublic({ limit: 10 });
 
-      expect(result.page).toBe(2);
       expect(result.limit).toBe(10);
+      expect(result.items).toHaveLength(10);
+      expect(result.pageInfo.hasMore).toBe(true);
+      expect(result.pageInfo.nextCursor).not.toBeNull();
       expect(prisma.issuer.findMany).toHaveBeenCalledWith(
         expect.objectContaining({
-          skip: 10,
-          take: 10,
+          take: 11,
+          orderBy: [{ createdAt: "desc" }, { id: "desc" }],
         }),
       );
+    });
+
+    it("rejects an invalid cursor without querying the database", async () => {
+      const findMany = jest.spyOn(prisma.issuer, "findMany");
+
+      await expect(
+        service.listIssuersPublic({ cursor: "not-a-valid-cursor" }),
+      ).rejects.toThrow(BadRequestException);
+      expect(findMany).not.toHaveBeenCalled();
     });
   });
 
