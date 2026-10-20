@@ -1,4 +1,8 @@
-import { ForbiddenException, NotFoundException } from "@nestjs/common";
+import {
+  BadRequestException,
+  ForbiddenException,
+  NotFoundException,
+} from "@nestjs/common";
 import { ResourceStatus } from "@prisma/client";
 import { encryptProtectedAmount } from "../common/crypto/protected-amount";
 import { WebhookDeliveryService } from "./webhook-delivery.service";
@@ -374,7 +378,12 @@ describe("WebhooksService", () => {
         },
         webhookDelivery: {
           findMany: jest.fn().mockResolvedValue([
-            { id: "d1", eventType: "proof.created", status: "SUCCESS" },
+            {
+              id: "d1",
+              eventType: "proof.created",
+              status: "SUCCESS",
+              createdAt: new Date("2026-08-24T12:30:00.000Z"),
+            },
           ]),
         },
       };
@@ -387,11 +396,72 @@ describe("WebhooksService", () => {
       );
 
       const result = await service.listDeliveries("org_1", "webhook_1");
-      expect(result).toHaveLength(1);
+      expect(result.data).toHaveLength(1);
+      expect(result.pageInfo).toEqual({ hasMore: false, nextCursor: null });
       // Secrets must not be present
       const resultJson = JSON.stringify(result);
       expect(resultJson).not.toContain("secretEncrypted");
       expect(resultJson).not.toContain("secretHash");
+    });
+
+    it("rejects a malformed cursor without querying the database", async () => {
+      const prisma = {
+        webhook: {
+          findUnique: jest.fn().mockResolvedValue({
+            id: "webhook_1",
+            organizationId: "org_1",
+            status: ResourceStatus.ACTIVE,
+          }),
+        },
+        webhookDelivery: { findMany: jest.fn() },
+      };
+
+      const service = new WebhooksService(
+        prisma as never,
+        makeDeliveryService(),
+        makeConfig() as never,
+      );
+
+      await expect(
+        service.listDeliveries("org_1", "webhook_1", { cursor: "garbage" }),
+      ).rejects.toThrow(BadRequestException);
+      expect(prisma.webhookDelivery.findMany).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("listForOrg", () => {
+    it("returns a deterministic page of webhooks for the organisation", async () => {
+      const prisma = {
+        webhook: {
+          findMany: jest.fn().mockResolvedValue([
+            {
+              id: "wh_1",
+              url: "https://example.com/hook",
+              events: ["proof.created"],
+              status: ResourceStatus.ACTIVE,
+              createdAt: new Date("2026-08-24T12:00:00.000Z"),
+              updatedAt: new Date("2026-08-24T12:00:00.000Z"),
+            },
+          ]),
+        },
+      };
+
+      const service = new WebhooksService(
+        prisma as never,
+        makeDeliveryService(),
+        makeConfig() as never,
+      );
+
+      const result = await service.listForOrg("org_1");
+
+      expect(result.data).toHaveLength(1);
+      expect(result.pageInfo).toEqual({ hasMore: false, nextCursor: null });
+      expect(prisma.webhook.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { organizationId: "org_1" },
+          orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        }),
+      );
     });
   });
 });

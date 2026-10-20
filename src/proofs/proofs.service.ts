@@ -40,6 +40,11 @@ import { CredentialVerificationKeyService } from "../common/crypto/credential-ve
 import { sha256 } from "../common/crypto/hash";
 import { PaymentEncryptionKeyringService } from "../common/crypto/payment-encryption-keyring.service";
 import { ApiErrorCode } from "../common/dto/api-error.dto";
+import {
+  buildPage,
+  cursorOrderBy,
+  cursorWhereFragment,
+} from "../common/pagination/keyset-paginate";
 import { PrismaService } from "../database/prisma.service";
 import { OrganizationQuotaService } from "../quotas/organization-quota.service";
 import { WebhookDeliveryService } from "../webhooks/webhook-delivery.service";
@@ -992,6 +997,7 @@ export class ProofsService {
     }
 
     const limit = input.limit ?? 20;
+    const cursorWhere = cursorWhereFragment(input.cursor, "createdAt");
     const where: Prisma.ProofWhereInput = {
       userId,
       proofType: input.type,
@@ -999,15 +1005,16 @@ export class ProofsService {
       assetCode: input.assetCode,
       createdAt:
         issuedFrom || issuedTo ? { gte: issuedFrom, lte: issuedTo } : undefined,
+      ...(cursorWhere as Prisma.ProofWhereInput),
     };
     const proofs = await this.prisma.proof.findMany({
       where,
-      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      orderBy: cursorOrderBy("createdAt"),
       take: limit + 1,
       ...(cursorId ? { cursor: { id: cursorId }, skip: 1 } : undefined),
     });
-    const hasMore = proofs.length > limit;
-    const page = hasMore ? proofs.slice(0, limit) : proofs;
+
+    const { data, pageInfo } = buildPage(proofs, limit, "createdAt");
 
     // Sign the next cursor token if there are more items
     const nextCursor = hasMore

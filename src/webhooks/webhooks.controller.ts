@@ -202,28 +202,35 @@ export class WebhooksController {
   @ApiOperation({
     summary: "List webhook endpoints for your organisation",
     description:
-      "Returns every endpoint registered by the caller's organisation. Signing " +
-      "secrets are never included.",
+      "Returns a cursor-paginated, deterministically ordered page of endpoints " +
+      "registered by the caller's organisation. Signing secrets are never included. " +
+      "Pass `pageInfo.nextCursor` from a response as the next request's `cursor`.",
   })
   @ApiResponse({
     status: HttpStatus.OK,
-    description: "Endpoints owned by the caller's organisation.",
+    description: "Endpoints owned by the caller's organisation, plus pagination metadata.",
     schema: {
-      example: [
-        {
-          id: "ckv8v6h2b0002qzrm7t4k9xza",
-          url: "https://example.com/webhooks/earnproof",
-          events: ["proof.created", "proof.verified"],
-          status: "ACTIVE",
-          createdAt: "2026-08-24T12:00:00.000Z",
-          updatedAt: "2026-08-24T12:00:00.000Z",
-        },
-      ],
+      example: {
+        data: [
+          {
+            id: "ckv8v6h2b0002qzrm7t4k9xza",
+            url: "https://example.com/webhooks/earnproof",
+            events: ["proof.created", "proof.verified"],
+            status: "ACTIVE",
+            createdAt: "2026-08-24T12:00:00.000Z",
+            updatedAt: "2026-08-24T12:00:00.000Z",
+          },
+        ],
+        pageInfo: { hasMore: false, nextCursor: null },
+      },
     },
   })
-  async list(@CurrentUser() user: AuthenticatedUser) {
+  async list(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query() query: ListWebhooksDto,
+  ) {
     const orgId = await this.requireOrgId(user);
-    return this.webhooksService.listForOrg(orgId);
+    return this.webhooksService.listForOrg(orgId, query);
   }
 
   @Get(":id")
@@ -482,9 +489,13 @@ export class WebhooksController {
     description: "No such endpoint in the caller's organisation.",
     type: ApiErrorDto,
   })
-  async listDeliveries(@CurrentUser() user: AuthenticatedUser, @Param("id") id: string) {
+  async listDeliveries(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("id") id: string,
+    @Query() query: ListWebhookDeliveriesDto,
+  ) {
     const orgId = await this.requireOrgId(user);
-    return this.webhooksService.listDeliveries(orgId, id);
+    return this.webhooksService.listDeliveries(orgId, id, query);
   }
 
   // ---------------------------------------------------------------------------

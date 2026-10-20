@@ -80,11 +80,18 @@ export class WebhooksService {
     };
   }
 
-  /** List all webhook endpoints for an organisation. */
-  listForOrg(organizationId: string) {
-    return this.prisma.webhook.findMany({
-      where: { organizationId },
-      orderBy: { createdAt: "desc" },
+  /** List webhook endpoints for an organisation, newest first. */
+  async listForOrg(
+    organizationId: string,
+    pagination: { cursor?: string; limit?: number } = {},
+  ) {
+    const limit = pagination.limit ?? 20;
+    const cursorWhere = cursorWhereFragment(pagination.cursor, "createdAt");
+
+    const rows = await this.prisma.webhook.findMany({
+      where: { organizationId, ...cursorWhere },
+      orderBy: cursorOrderBy("createdAt"),
+      take: limit + 1,
       select: {
         id: true,
         url: true,
@@ -96,6 +103,8 @@ export class WebhooksService {
         updatedAt: true,
       },
     });
+
+    return buildPage(rows, limit, "createdAt");
   }
 
   /** Get a single webhook, asserting ownership. */
@@ -357,13 +366,20 @@ export class WebhooksService {
    * Response body and sensitive headers are never stored in delivery rows,
    * so this is safe to return directly.
    */
-  async listDeliveries(organizationId: string, webhookId: string) {
+  async listDeliveries(
+    organizationId: string,
+    webhookId: string,
+    pagination: { cursor?: string; limit?: number } = {},
+  ) {
     await this.assertOwnedWebhook(organizationId, webhookId);
 
-    return this.prisma.webhookDelivery.findMany({
-      where: { webhookId },
-      orderBy: { createdAt: "desc" },
-      take: 100,
+    const limit = pagination.limit ?? 20;
+    const cursorWhere = cursorWhereFragment(pagination.cursor, "createdAt");
+
+    const rows = await this.prisma.webhookDelivery.findMany({
+      where: { webhookId, ...cursorWhere },
+      orderBy: cursorOrderBy("createdAt"),
+      take: limit + 1,
       select: {
         id: true,
         eventType: true,
@@ -386,6 +402,8 @@ export class WebhooksService {
         createdAt: true,
       },
     });
+
+    return buildPage(rows, limit, "createdAt");
   }
 
   // ---------------------------------------------------------------------------

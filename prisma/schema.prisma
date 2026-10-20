@@ -591,6 +591,8 @@ model Issuer {
 
   @@index([organizationId])
   @@index([status])
+  @@index([organizationId, createdAt, id])
+  @@index([status, createdAt, id])
 }
 
 /// A requested change of an issuer's Stellar address, reconciled against the
@@ -764,6 +766,7 @@ model Payment {
   @@unique([network, stellarTransactionHash, operationIndex], name: "payment_network_tx_op")
   @@index([userId, occurredAt])
   @@index([userId, ledgerSequence])
+  @@index([userId, occurredAt, id])
   @@index([sourceAddress])
   @@index([sourceAddressLookup])
   @@index([assetCode, assetIssuer])
@@ -843,6 +846,7 @@ model TrustedSource {
 
   @@unique([userId, sourceAddress])
   @@index([issuerId])
+  @@index([userId, createdAt, id])
 }
 
 model Proof {
@@ -1185,6 +1189,7 @@ model ApiKey {
 
   @@index([organizationId, status])
   @@index([prefix])
+  @@index([organizationId, createdAt, id])
 }
 
 model ApiKeyScopeAssignment {
@@ -1223,6 +1228,7 @@ model Webhook {
   tlsProbes          WebhookTlsProbe[]
 
   @@index([organizationId, status])
+  @@index([organizationId, createdAt, id])
 }
 
 /**
@@ -1287,6 +1293,7 @@ model WebhookDelivery {
   createdAt         DateTime              @default(now())
 
   @@index([webhookId, createdAt])
+  @@index([webhookId, createdAt, id])
   @@index([eventId])
   @@index([status, nextRetryAt])
   @@index([deadLetteredAt])
