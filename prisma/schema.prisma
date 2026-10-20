@@ -343,6 +343,9 @@ model User {
   consentRecords          ConsentRecord[]
   paymentCheckpointHealthSnapshots PaymentCheckpointHealthSnapshot[]
   proofExpirationReminderPreference ProofExpirationReminderPreference?
+  quarantineDecisions     CredentialQuarantine[]      @relation("quarantine_decidedBy")
+  quarantineImports       CredentialQuarantine[]      @relation("quarantine_importedBy")
+  quarantineAuditEvents   CredentialQuarantineAudit[] @relation("quarantine_audit_actor")
   proofExpirationReminderDeliveries ProofExpirationReminderDelivery[]
   sessionRiskEvents       SessionRiskEvent[]
   declarationsApproved    PurposeDeclaration[]  @relation("declaration_approvedBy")
@@ -482,6 +485,11 @@ model Organization {
   purposeDefinitions   PurposeDefinition[]
   purposeDeclarations  PurposeDeclaration[]
   verificationPolicies VerificationPolicy[]
+  credentialVerificationKeyTrustPins CredentialVerificationKeyTrustPin[]
+  credentialQuarantines CredentialQuarantine[]
+  credentialQuarantineAudits CredentialQuarantineAudit[] @relation("quarantine_audit_org")
+  roleApprovalPolicies OrganizationRoleApprovalPolicy[]
+  auditLegalHolds      AuditLegalHold[]
 
   @@index([status])
   @@index([archivedAt])
@@ -579,6 +587,7 @@ model Issuer {
   policyCommitments       IssuerPolicyCommitment[]
   invoiceSettlements      ProofInvoiceSettlement[]
   signingKeys             IssuerSigningKey[]
+  credentialVerificationKeyTrustPins CredentialVerificationKeyTrustPin[]
 
   @@index([organizationId])
   @@index([status])
@@ -898,6 +907,7 @@ model Proof {
   anchoringIntents        AnchoringIntent[]
   shareTokens             ProofShareToken[]
   invoiceSettlement       ProofInvoiceSettlement?
+  verificationProvenance  VerificationProvenance[]
   sharingEvents           ProofSharingEvent[]
   disclosureReceipts      DisclosureReceipt[]
   disputes                ProofDispute[]
@@ -1080,6 +1090,7 @@ model VerificationProvenance {
   id          String                          @id @default(cuid())
   proofId     String
   proof       Proof                           @relation(fields: [proofId], references: [id], onDelete: Cascade)
+  sourceRecords VerificationProvenanceSource[]
   /// Versioned decision schema (e.g., "earnproof.verification.provenance.v1")
   /// Allows evolution of decision structure over time.
   schemaVersion String
@@ -1208,6 +1219,8 @@ model Webhook {
   deliveries         WebhookDelivery[]
   clientCertificates WebhookClientCertificate[]
   circuitBreaker     WebhookCircuit?
+  secretVersions     WebhookSecretVersion[]
+  tlsProbes          WebhookTlsProbe[]
 
   @@index([organizationId, status])
 }
@@ -2532,6 +2545,8 @@ model ProofExpirationReminderDelivery {
   @@unique([proofId, windowHours])
   @@index([status, scheduledFor])
   @@index([userId, status])
+}
+
 enum TransactionConfirmationStatus {
   SUBMITTED
   PENDING
@@ -3158,4 +3173,146 @@ model VerificationPolicy {
   
   @@unique([organizationId, name])
   @@index([organizationId, status])
+}
+
+// ---------------------------------------------------------------------------
+// Organization role approval policies (#298)
+// ---------------------------------------------------------------------------
+
+enum RoleApprovalPolicyStatus {
+  ACTIVE
+  SUPERSEDED
+}
+
+/// A versioned dual-control policy for organization role changes. Versions are
+/// never edited in place: an update supersedes the ACTIVE version and creates
+/// the next one, so history is append-only. An organization with no row is
+/// governed by the platform default policy, reported as version 0.
+model OrganizationRoleApprovalPolicy {
+  id                               String                   @id @default(cuid())
+  organizationId                   String
+  organization                     Organization             @relation(fields: [organizationId], references: [id])
+  version                          Int
+  status                           RoleApprovalPolicyStatus @default(ACTIVE)
+  /// JSON array of OrganizationMemberRole values whose grant or removal
+  /// requires approval. Always a superset of the platform-protected roles.
+  protectedRoles                   Json
+  /// JSON array of OrganizationMemberRole values allowed to approve.
+  approverRoles                    Json
+  requiredApprovals                Int
+  approvalExpiryMinutes            Int
+  /// When true, a change that grants or removes OWNER needs an OWNER approver.
+  ownerChangesRequireOwnerApproval Boolean
+  supersedesId                     String?                  @unique
+  createdById                      String
+  createdAt                        DateTime                 @default(now())
+
+  @@unique([organizationId, version])
+  @@index([organizationId, status])
+}
+
+// ---------------------------------------------------------------------------
+// Audit retention legal holds (#311)
+// ---------------------------------------------------------------------------
+
+enum AuditLegalHoldScope {
+  ORGANIZATION
+  PLATFORM
+}
+
+enum AuditLegalHoldAuthority {
+  COURT_ORDER
+  REGULATOR_REQUEST
+  LITIGATION_COUNSEL
+  INTERNAL_INVESTIGATION
+}
+
+enum AuditLegalHoldStatus {
+  PENDING_APPROVAL
+  ACTIVE
+  RELEASE_PENDING
+  RELEASED
+  REJECTED
+}
+
+/// Suspends retention cleanup for audit records in a bounded time range.
+///
+/// Deliberately carries no case narrative: the reason is stored only as a
+/// SHA-256 commitment the requester computed, so the record proves which
+/// reason was cited without disclosing it. Every hold expires; renewal is a
+/// new hold with its own approval.
+model AuditLegalHold {
+  id                   String                  @id @default(cuid())
+  scope                AuditLegalHoldScope
+  /// Required for ORGANIZATION scope, null for PLATFORM scope.
+  organizationId       String?
+  organization         Organization?           @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  authority            AuditLegalHoldAuthority
+  /// Lowercase hex SHA-256 commitment to the hold reason.
+  reasonCommitment     String                  @db.Char(64)
+  /// Inclusive bounds on AuditLog.createdAt covered by the hold.
+  rangeStart           DateTime
+  rangeEnd             DateTime
+  status               AuditLegalHoldStatus    @default(PENDING_APPROVAL)
+  /// Optimistic-concurrency revision, incremented by every transition.
+  revision             Int                     @default(0)
+  requestedById        String
+  /// A pending hold protects records until this instant, then lapses.
+  approvalDeadline     DateTime
+  approvedById         String?
+  approvedAt           DateTime?
+  rejectedById         String?
+  rejectedAt           DateTime?
+  releaseRequestedById String?
+  releaseRequestedAt   DateTime?
+  releasedById         String?
+  releasedAt           DateTime?
+  /// The hold stops protecting records at this instant (exclusive).
+  expiresAt            DateTime
+  createdAt            DateTime                @default(now())
+  updatedAt            DateTime                @updatedAt
+
+  @@index([status, expiresAt])
+  @@index([organizationId, status])
+}
+
+// ---------------------------------------------------------------------------
+// Webhook endpoint TLS posture (#315)
+// ---------------------------------------------------------------------------
+
+enum WebhookTlsProbeOutcome {
+  HEALTHY
+  EXPIRING_SOON
+  EXPIRED
+  NOT_YET_VALID
+  HOSTNAME_MISMATCH
+  UNTRUSTED
+  WEAK_PROTOCOL
+  HANDSHAKE_FAILED
+  DESTINATION_BLOCKED
+  UNREACHABLE
+  TIMEOUT
+}
+
+/// One TLS handshake probe of a webhook endpoint. Bounded per webhook; holds
+/// only the outcome category and public certificate facts, never the resolved
+/// address or a raw error message.
+model WebhookTlsProbe {
+  id                     String                 @id @default(cuid())
+  webhookId              String
+  webhook                Webhook                @relation(fields: [webhookId], references: [id], onDelete: Cascade)
+  outcome                WebhookTlsProbeOutcome
+  /// Negotiated protocol, e.g. "TLSv1.3". Null when no handshake completed.
+  protocol               String?                @db.VarChar(16)
+  certificateNotBefore   DateTime?
+  certificateNotAfter    DateTime?
+  /// Colon-separated SHA-256 fingerprint of the leaf certificate.
+  certificateFingerprint String?                @db.VarChar(95)
+  /// True when this probe raised an alert (the outcome changed to a non-healthy one).
+  alerted                Boolean                @default(false)
+  durationMs             Int
+  probedAt               DateTime
+
+  @@index([webhookId, probedAt])
+  @@index([outcome, probedAt])
 }

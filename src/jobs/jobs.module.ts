@@ -24,6 +24,7 @@ import { ProofSharingCleanupJob } from "./proof-sharing-cleanup.job";
 import { RetentionCleanupService } from "./retention/retention-cleanup.service";
 import { RetentionJob } from "./retention/retention.job";
 import { WebhookCertificateExpiryJob } from "./webhook-certificate-expiry.job";
+import { WebhookTlsProbeJob } from "./webhook-tls-probe.job";
 import { DomainEventOutboxWorkerService } from "./domain-event-outbox-worker.service";
 import { BulkAdminService } from "./bulk-admin/bulk-admin.service";
 import { BulkAdminController } from "./bulk-admin/bulk-admin.controller";
@@ -55,6 +56,7 @@ import { BulkAdminController } from "./bulk-admin/bulk-admin.controller";
     RetentionJob,
     ApprovalExpiryJob,
     WebhookCertificateExpiryJob,
+    WebhookTlsProbeJob,
     JobExecutionService,
     JobExecutionMaintenanceJob,
     AttestationReconcilerService,

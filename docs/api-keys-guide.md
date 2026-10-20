@@ -789,5 +789,6 @@ curl -X POST "$API_BASE/proofs/proof_xyz/verify" \
 - **Review scopes** — Plan which scopes each of your integrations needs
 - **Set up monitoring** — Implement alerts for 403 or 401 errors
 - **Test in staging** — Always test API key integrations in a staging environment before production
+- **Debug request signing** — Use the [signature diagnostics endpoint](request-signature-diagnostics.md) with synthetic requests
 
 For questions or support, contact the EarnProof team.
