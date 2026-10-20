@@ -25,6 +25,13 @@ user or organization is answered as `404`, identical to an absent resource.
 | `GET/POST/DELETE /api-keys*`, rotate/revoke | bearer organization creator or ADMIN | organization-scoped query | 401/403/404 |
 | `GET /integrations/auth-context` | API key + `ORG_READ` | key organization selected by `X-Organization-Id` | 401 invalid/cross-org, 403 scope |
 | `GET /health/diagnostics` | API key + `ORG_ADMIN` | key organization | 401/403 |
+| `POST /integrations/signature-diagnostics` | API key + `ORG_READ`, 10/min | key organization; nonces consumed in the key's namespace | 400/401/403/429 |
+| `GET /organizations/:id/role-approval-policy`, `GET .../history` | bearer ACTIVE member or ADMIN | path organization | 401/403/404 |
+| `POST /organizations/:id/role-approval-policy/preview` | bearer organization ADMIN/OWNER or ADMIN | path organization | 400/401/403/404 |
+| `PUT /organizations/:id/role-approval-policy` | bearer organization OWNER or ADMIN | path organization; `expectedVersion` must be active | 400/401/403/404/409 |
+| `GET /organizations/:id/webhooks/tls-posture`, `GET .../:webhookId/tls-posture` | bearer ACTIVE member or ADMIN | webhook in path organization, else 404 | 401/403/404 |
+| `POST /organizations/:id/webhooks/:webhookId/tls-posture/probe` | bearer organization ADMIN/OWNER or ADMIN | webhook in path organization, else 404; 60 s cooldown | 401/403/404/409/429 |
+| `GET/POST /admin/audit-legal-holds*` | bearer `ADMIN` | global admin; every decision needs a second administrator | 400/401/403/404/409 |
 
 Account status transitions are `PENDING→ACTIVE|SUSPENDED|REVOKED`,
 `ACTIVE→SUSPENDED|REVOKED` and `SUSPENDED→ACTIVE|REVOKED`; `REVOKED` is

@@ -37,10 +37,7 @@ import {
   RedriveDeadLetterDto,
   RedriveDeadLettersBatchDto,
 } from "./dto/dead-letter.dto";
-import {
-  ListWebhookDeliveriesDto,
-  ListWebhooksDto,
-} from "./dto/list-webhooks.dto";
+import { PredicatePreviewRequestDto, PredicatePreviewResponseDto } from "./dto/predicate.dto";
 import { UpdateWebhookEventsDto } from "./dto/update-webhook-events.dto";
 import { UpdateWebhookCircuitConfigDto } from "./dto/webhook-circuit-config.dto";
 import { WebhookCircuitStatsDto } from "./dto/webhook-circuit-stats.dto";
@@ -446,10 +443,12 @@ export class WebhooksController {
   @ApiOperation({
     summary: "List delivery records for a webhook endpoint",
     description:
-      "A cursor-paginated, deterministically ordered page of delivery attempts, newest " +
-      "first. Request bodies and signing headers are never stored, so nothing here can " +
-      "leak a secret. Pass `pageInfo.nextCursor` from a response as the next request's " +
-      "`cursor`.",
+      "The 100 most recent delivery attempts, newest first. Request bodies and " +
+      "signing headers are never stored, so nothing here can leak a secret. " +
+      "Response bodies are stored as a safe JSON structure with truncation and redaction: " +
+      "truncatedBody (first 1024 bytes), contentHash (SHA-256), wasTruncated (boolean), " +
+      "hadEncodingIssue (boolean). Sensitive patterns (api_key, password, token, etc.) " +
+      "are redacted before storage.",
   })
   @ApiParam({
     name: "id",
@@ -458,29 +457,32 @@ export class WebhooksController {
   })
   @ApiResponse({
     status: HttpStatus.OK,
-    description: "Recent delivery attempts, plus pagination metadata.",
+    description: "Recent delivery attempts with safe response bodies.",
     schema: {
-      example: {
-        data: [
-          {
-            id: "ckv8v6h2b0003qzrm4d8n2plq",
-            eventType: "proof.created",
-            eventId: "evt_01hxk8s3n7q9v2m4c6d8e0f2g4",
-            attempt: 1,
-            status: "DELIVERED",
-            statusCode: 200,
-            responseBody: '{"ok":true}',
-            durationMs: 142,
-            failureReason: null,
-            replayOf: null,
-            replayedBy: null,
-            deliveredAt: "2026-08-24T12:30:01.000Z",
-            nextRetryAt: null,
-            createdAt: "2026-08-24T12:30:00.000Z",
+      example: [
+        {
+          id: "ckv8v6h2b0003qzrm4d8n2plq",
+          eventType: "proof.created",
+          eventId: "evt_01hxk8s3n7q9v2m4c6d8e0f2g4",
+          attempt: 1,
+          status: "SUCCESS",
+          statusCode: 200,
+          responseBody: {
+            truncatedBody: '{"ok":true}',
+            contentHash:
+              "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+            wasTruncated: false,
+            hadEncodingIssue: false,
           },
-        ],
-        pageInfo: { hasMore: false, nextCursor: null },
-      },
+          durationMs: 142,
+          failureReason: null,
+          replayOf: null,
+          replayedBy: null,
+          deliveredAt: "2026-08-24T12:30:01.000Z",
+          nextRetryAt: null,
+          createdAt: "2026-08-24T12:30:00.000Z",
+        },
+      ],
     },
   })
   @ApiNotFoundResponse({
@@ -673,6 +675,68 @@ export class WebhooksController {
     this.requirePrivilegedRole(user, "send webhook test deliveries");
     const orgId = await this.requireOrgId(user);
     return this.webhooksService.sendTestDelivery(orgId, id);
+  }
+
+  /**
+   * Preview a predicate against a sample event.
+   *
+   * Test whether a bounded predicate matches a given event, without creating
+   * a delivery or modifying any state. Returns whether the predicate matched,
+   * the reason if it didn't, and the number of nodes visited during evaluation.
+   *
+   * Useful for validation during predicate design: ensures the predicate
+   * behaves as expected before attaching it to a subscription.
+   *
+   * POST /api/v1/webhooks/preview-predicate
+   */
+  @Post("preview-predicate")
+  @UseGuards(AuthGuard)
+  @ApiBearerToken()
+  @Throttle({ default: { limit: 100, ttl: 60_000 } })
+  @ApiOperation({
+    operationId: "previewPredicate",
+    summary: "Preview a bounded webhook predicate",
+    description:
+      "Test a predicate against a sample event to see if it matches. " +
+      "No deliveries are created. Useful for validation during predicate design. " +
+      "Same authorization and rate limits as other webhook endpoints.",
+  })
+  @ApiResponse({
+    status: HttpStatus.OK,
+    description: "Predicate evaluation completed successfully.",
+    type: () => ({
+      match: { type: "boolean" },
+      reason: { type: "string", nullable: true },
+      visitedNodes: { type: "integer" },
+    }),
+  })
+  @ApiResponse({
+    status: HttpStatus.BAD_REQUEST,
+    description:
+      "Invalid predicate or sample event (validation error, unknown version, malformed structure, etc.).",
+    type: ApiErrorDto,
+  })
+  @ApiForbiddenResponse({
+    description:
+      "The caller is not authenticated or has no active organisation.",
+    type: ApiErrorDto,
+  })
+  @ApiResponse({
+    status: HttpStatus.TOO_MANY_REQUESTS,
+    description: "Rate limit exceeded.",
+    type: ApiErrorDto,
+  })
+  async previewPredicate(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() dto: {
+      predicate: any;
+      event: { resource: string; outcome: string; schemaVersion: string };
+    },
+  ): Promise<{ match: boolean; reason?: string; visitedNodes: number }> {
+    const orgId = await this.requireOrgId(user);
+    // Authorization check: ensure user's org context (already done by requireOrgId)
+    // No webhook-specific check needed; this is a read-only preview endpoint
+    return this.webhooksService.previewPredicate(orgId, dto.predicate, dto.event);
   }
 
   // ---------------------------------------------------------------------------

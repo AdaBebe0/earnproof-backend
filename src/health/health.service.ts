@@ -1,6 +1,7 @@
 import { Injectable, Logger, Optional } from "@nestjs/common";
 
 import { ContractDriftService } from "./contract-drift.service";
+import { ContractSuccessorService } from "../contracts/contract-successor.service";
 import { ConfigService } from "@nestjs/config";
 import { PrismaService } from "../database/prisma.service";
 import { CircuitBreakerRegistry } from "../common/resilience/circuit-breaker.registry";
@@ -9,6 +10,7 @@ import {
   DeploymentMetadataService,
   DeploymentMetadataState,
 } from "./deployment-metadata.service";
+import { HealthHysteresisService } from "./health-hysteresis.service";
 import {
   DependencyKind,
   DependencyResult,
@@ -16,6 +18,7 @@ import {
   DependencyStatusValue,
   ReadinessResult,
 } from "./health.types";
+import { CircuitBreakerRegistry } from "../common/resilience/circuit-breaker-registry";
 
 /**
  * Default probe timeout.
@@ -69,6 +72,7 @@ export class HealthService {
 
   private readonly circuits?: CircuitBreakerRegistry;
   private readonly contractDrift?: ContractDriftService;
+  private readonly contractSuccessor?: ContractSuccessorService;
   private readonly migrationLease?: MigrationLeaseService;
 
   constructor(
@@ -84,6 +88,8 @@ export class HealthService {
         this.circuits = item;
       } else if (typeof item.checkContractState === "function" || item.isBlocked !== undefined) {
         this.contractDrift = item;
+      } else if (typeof item.assessReadiness === "function" || item.canMigrate !== undefined) {
+        this.contractSuccessor = item;
       } else if (typeof item.acquire === "function" || typeof item.release === "function") {
         this.migrationLease = item;
       }
@@ -212,6 +218,9 @@ export class HealthService {
       this.probeCached("contract_anchoring", DependencyKind.OPTIONAL, () =>
         Promise.resolve(this.probeContractAnchoring()),
       ),
+      this.probeCached("contract_successor_readiness", DependencyKind.OPTIONAL, () =>
+        this.probeContractSuccessor(),
+      ),
       this.probeCached("webhook_delivery", DependencyKind.OPTIONAL, () =>
         this.probeWebhookDelivery(),
       ),
@@ -236,6 +245,9 @@ export class HealthService {
   /**
    * Serve a probe from cache when fresh, otherwise probe — coalescing concurrent
    * callers onto a single in-flight probe.
+   *
+   * After a fresh probe, hysteresis is applied to record the result in the
+   * incident state machine (if configured).
    */
   private async probeCached(
     name: string,
@@ -264,6 +276,8 @@ export class HealthService {
     const pending = probe()
       .then((result) => {
         this.cache.set(name, { result, storedAt: Date.now() });
+        // Apply hysteresis after a fresh probe
+        this.applyHysteresisAsync(name, result);
         return result;
       })
       .finally(() => {
@@ -274,6 +288,25 @@ export class HealthService {
 
     const result = await pending;
     return { ...result, kind };
+  }
+
+  /**
+   * Apply hysteresis asynchronously (fire-and-forget).
+   * @private
+   */
+  private applyHysteresisAsync(
+    dependencyName: string,
+    result: DependencyResult,
+  ): void {
+    if (!this.hysteresis) {
+      return;
+    }
+
+    this.hysteresis.applyHysteresis(dependencyName, result).catch((error) => {
+      this.logger.error(
+        `Failed to apply hysteresis for ${dependencyName}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    });
   }
 
   /** Probe the primary database with a trivial query. */
@@ -639,6 +672,56 @@ export class HealthService {
     );
 
     return "probe_failed";
+  }
+
+  /**
+   * Probe contract successor readiness.
+   * Reports the readiness of any configured successor contract.
+   * Optional probe — only surfaces if successor service is available.
+   */
+  private async probeContractSuccessor(): Promise<DependencyResult> {
+    if (!this.contractSuccessor) {
+      return {
+        name: "contract_successor_readiness",
+        kind: DependencyKind.OPTIONAL,
+        status: DependencyStatus.DISABLED,
+      };
+    }
+
+    try {
+      const network = this.config.get<string>("stellar.network") ?? "testnet";
+      const contractId = this.config.get<string>(
+        "contractAnchoring.proofRegistryContractId",
+      );
+      const expectedVersion =
+        this.config.get<number>("contractAnchoring.schemaVersion") ?? 1;
+
+      if (!contractId) {
+        return {
+          name: "contract_successor_readiness",
+          kind: DependencyKind.OPTIONAL,
+          status: DependencyStatus.NOT_CONFIGURED,
+          reason: "successor_contract_id_not_configured",
+        };
+      }
+
+      const ready = await this.contractSuccessor.canMigrate({
+        network,
+        contractId,
+        expectedVersion,
+      });
+
+      return {
+        name: "contract_successor_readiness",
+        kind: DependencyKind.OPTIONAL,
+        status: ready ? DependencyStatus.OK : DependencyStatus.DEGRADED,
+        reason: ready ? undefined : "successor_not_ready_for_migration",
+      };
+    } catch (error) {
+      throw new ProbeFailure("successor_assessment_failed", {
+        degraded: true,
+      });
+    }
   }
 
   private probeTimeoutMs(): number {

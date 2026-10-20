@@ -4,6 +4,7 @@ import {
   ForbiddenException,
   Inject,
   Injectable,
+  Logger,
   NotFoundException,
   Optional,
   UnprocessableEntityException,
@@ -29,6 +30,9 @@ import {
 import { createHmac, randomUUID } from "crypto";
 import { VerificationEventService } from "../audit/verification-event.service";
 import { AuthenticatedUser } from "../auth/auth.types";
+import { VerificationProvenanceService } from "./verification-provenance.service";
+import { ProvenanceDecisionBuilder } from "./provenance-decision-builder";
+import { VERIFICATION_PROVENANCE_SCHEMA_VERSION } from "./provenance.types";
 import { canonicalAssetId } from "../common/assets/asset-identifier";
 import { canonicalize } from "../common/crypto/canonicalize";
 import { CredentialSigningKeyringService } from "../common/crypto/credential-signing-keyring.service";
@@ -46,6 +50,7 @@ import { OrganizationQuotaService } from "../quotas/organization-quota.service";
 import { WebhookDeliveryService } from "../webhooks/webhook-delivery.service";
 import { WebhookEventSource } from "../webhooks/webhook-event.types";
 import { AttestationsService } from "../attestations/attestations.service";
+import { IssuerPolicyCommitmentsService } from "../issuers/issuer-policy-commitments.service";
 import {
   AggregateEarningsCalculator,
 } from "./aggregate-earnings.calculator";
@@ -99,6 +104,8 @@ import {
 import { ListProofsDto } from "./dto/list-proofs.dto";
 import { RevokeProofDto } from "./dto/revoke-proof.dto";
 import { RenewProofDto } from "./dto/renew-proof.dto";
+import { SignedCursorService } from "../common/pagination/signed-cursor.service";
+import { computeFilterIdFromDto } from "../common/pagination/filter-id";
 import {
   evaluateRenewalEligibility,
   evaluateSupersessionCompatibility,
@@ -373,6 +380,7 @@ function isUniqueViolation(error: unknown): boolean {
 
 @Injectable()
 export class ProofsService {
+  private readonly logger = new Logger(ProofsService.name);
   private readonly signingKeyring: CredentialSigningKeyringService;
   private readonly paymentEncryptionKeyring: PaymentEncryptionKeyringService;
   private readonly stellarNetwork: string;
@@ -380,9 +388,11 @@ export class ProofsService {
   private readonly anchoringRequired: boolean;
   private readonly aggregateEarnings: AggregateEarningsCalculator;
   private readonly prisma: PrismaService;
+  private readonly signedCursorService: SignedCursorService;
   private readonly verificationEventService: VerificationEventService;
   private readonly quotas: OrganizationQuotaService;
   private readonly attestationsService: AttestationsService;
+  private readonly issuerPolicyCommitmentsService: IssuerPolicyCommitmentsService;
   private readonly contractAnchoringService?: ContractAnchoringService;
   private readonly webhookDeliveryService?: WebhookDeliveryService;
   private readonly credentialVerificationKeyService?: CredentialVerificationKeyService;
@@ -390,6 +400,7 @@ export class ProofsService {
 
   constructor(
     prisma: PrismaService,
+    signedCursorService: SignedCursorService,
     configService: ConfigService,
     @Optional() @Inject(VerificationEventService) p3?: any,
     @Optional() @Inject(OrganizationQuotaService) p4?: any,
@@ -398,13 +409,16 @@ export class ProofsService {
     @Optional() @Inject(WebhookDeliveryService) p7?: any,
     @Optional() @Inject(CredentialVerificationKeyService) p8?: any,
     @Optional() @Inject(ProofVerificationAbuseService) p9?: any,
+    @Optional() @Inject(IssuerPolicyCommitmentsService) p10?: any,
   ) {
     this.prisma = prisma;
-    const rest: any[] = [p3, p4, p5, p6, p7, p8, p9].filter((x) => x !== undefined && x !== null);
+    this.signedCursorService = signedCursorService;
+    const rest: any[] = [p3, p4, p5, p6, p7, p8, p9, p10].filter((x) => x !== undefined && x !== null);
     
     let eventService = { recordEvent: async () => {} } as any;
     let quotaService = { consumeForUser: async () => {}, checkQuota: async () => true } as any;
     let attestationService = { getValidAttestationsForSubject: async () => [], isAttestationValid: async () => true } as any;
+    let issuerPolicyCommitmentsService = { captureOrReuse: async () => ({}) } as any;
 
     for (const item of rest) {
       const candidate = item as any;
@@ -414,6 +428,8 @@ export class ProofsService {
         quotaService = candidate;
       } else if (typeof candidate.getValidAttestationsForSubject === "function" || typeof candidate.isAttestationValid === "function") {
         attestationService = candidate;
+      } else if (typeof candidate.captureOrReuse === "function" || typeof candidate.getCurrentCommitment === "function") {
+        issuerPolicyCommitmentsService = candidate;
       } else if (
         typeof candidate.anchor === "function" ||
         typeof candidate.enqueueIntent === "function" ||
@@ -431,6 +447,7 @@ export class ProofsService {
     this.verificationEventService = eventService;
     this.quotas = quotaService;
     this.attestationsService = attestationService;
+    this.issuerPolicyCommitmentsService = issuerPolicyCommitmentsService;
 
     this.signingKeyring = new CredentialSigningKeyringService(configService);
     this.paymentEncryptionKeyring = new PaymentEncryptionKeyringService(
@@ -952,6 +969,33 @@ export class ProofsService {
       throw new BadRequestException("issuedFrom must be before issuedTo");
     }
 
+    // Compute filter ID from query parameters (binds cursor to specific filters)
+    const filterId = computeFilterIdFromDto(input, [
+      "type",
+      "status",
+      "assetCode",
+      "issuedFrom",
+      "issuedTo",
+    ]);
+
+    // Validate and decode cursor if provided
+    let cursorId: string | undefined;
+    if (input.cursor) {
+      const verifyResult = this.signedCursorService.verify({
+        token: input.cursor,
+        tenantId: userId,
+        filterId,
+      });
+
+      if (!verifyResult.ok) {
+        throw new BadRequestException(
+          `Invalid pagination cursor: ${verifyResult.reason}. Please restart pagination.`
+        );
+      }
+
+      cursorId = verifyResult.data.cursorId;
+    }
+
     const limit = input.limit ?? 20;
     const cursorWhere = cursorWhereFragment(input.cursor, "createdAt");
     const where: Prisma.ProofWhereInput = {
@@ -967,13 +1011,26 @@ export class ProofsService {
       where,
       orderBy: cursorOrderBy("createdAt"),
       take: limit + 1,
+      ...(cursorId ? { cursor: { id: cursorId }, skip: 1 } : undefined),
     });
 
     const { data, pageInfo } = buildPage(proofs, limit, "createdAt");
 
+    // Sign the next cursor token if there are more items
+    const nextCursor = hasMore
+      ? this.signedCursorService.sign({
+          cursorId: page[page.length - 1]?.id ?? "",
+          tenantId: userId,
+          filterId,
+        })
+      : null;
+
     return {
-      data: data.map((proof) => this.toHistoryItem(proof)),
-      pageInfo,
+      data: page.map((proof) => this.toHistoryItem(proof)),
+      pageInfo: {
+        hasMore,
+        nextCursor,
+      },
     };
   }
 
@@ -2826,6 +2883,22 @@ export class ProofsService {
         },
       });
     }
+
+    // Record verification provenance asynchronously (fail-open).
+    // Captures complete lineage of credential, backend, contract, and Stellar
+    // observations that contributed to this decision. Never blocks verification.
+    this.recordVerificationProvenance(
+      proof.id,
+      proof.status,
+      result,
+      signedCredential,
+      contractStatus,
+    ).catch((error) => {
+      // Provenance recording is advisory; verification continues unblocked
+      this.logger.debug(
+        `Failed to record provenance for proof ${proof.id}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    });
 
     this.emitWebhook(proof.userId, {
       event: "proof.verified",
