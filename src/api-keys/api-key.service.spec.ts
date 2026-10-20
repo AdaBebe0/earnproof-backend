@@ -747,7 +747,7 @@ describe("ApiKeyService", () => {
         },
       ]);
 
-      const keys = await service.listKeysForOrganization("org_123");
+      const { data: keys } = await service.listKeysForOrganization("org_123");
 
       expect(keys).toHaveLength(1);
       expect(keys[0].id).toBe("key_1");
@@ -986,7 +986,9 @@ describe("ApiKeyService", () => {
         },
       ]);
 
-      const listedKeys = await service.listKeysForOrganization("org_123");
+      const { data: listedKeys } = await service.listKeysForOrganization(
+        "org_123",
+      );
 
       // The listed key should never contain the secret
       expect(JSON.stringify(listedKeys)).not.toContain(displayedSecret);
