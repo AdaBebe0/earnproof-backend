@@ -152,6 +152,23 @@ export const configuration = () => ({
     proofRegistryContractId: process.env.PROOF_REGISTRY_CONTRACT_ID,
     issuerAddress: process.env.EARNPROOF_ISSUER_ADDRESS,
     schemaVersion: Number(process.env.EARNPROOF_SCHEMA_VERSION ?? 1),
+    // Fee ceilings and surge policy for contract submissions (stroops).
+    // Validated at startup by env.validation; see src/config/fee-policy.ts.
+    fee: {
+      estimateEnabled: process.env.CONTRACT_FEE_ESTIMATE_ENABLED !== "false",
+      baseFeeStroops: Number(process.env.CONTRACT_FEE_BASE_STROOPS ?? 100),
+      maxFeeStroops: Number(process.env.CONTRACT_FEE_MAX_STROOPS ?? 100_000),
+      surgeThresholdStroops: Number(
+        process.env.CONTRACT_FEE_SURGE_THRESHOLD_STROOPS ?? 1_000,
+      ),
+      surgeMultiplier: Number(process.env.CONTRACT_FEE_SURGE_MULTIPLIER ?? 2),
+      refusalThresholdStroops: Number(
+        process.env.CONTRACT_FEE_REFUSAL_THRESHOLD_STROOPS ?? 1_000_000,
+      ),
+      estimateMaxAgeMs: Number(
+        process.env.CONTRACT_FEE_ESTIMATE_MAX_AGE_MS ?? 60_000,
+      ),
+    },
     // Per-network, per-operation circuit breaker around contract invocation.
     // Slightly more tolerant than Horizon's: a contract call is heavier and its
     // transient failures noisier, so the circuit waits for more of them and

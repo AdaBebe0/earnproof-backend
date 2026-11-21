@@ -1,3 +1,4 @@
+import { validateFeePolicy } from "./fee-policy";
 import { z } from "zod";
 import { DEPLOYMENT_MANIFEST_MAX_BYTES } from "./deployment-manifest";
 
@@ -374,6 +375,15 @@ const envSchema = z.object({
     .enum(["true", "false"])
     .optional()
     .default("false"),
+
+  /** Fee policy for contract submissions, in stroops (see src/config/fee-policy.ts). */
+  CONTRACT_FEE_ESTIMATE_ENABLED: z.enum(["true", "false"]).optional().default("true"),
+  CONTRACT_FEE_BASE_STROOPS: z.coerce.number().optional().default(100),
+  CONTRACT_FEE_MAX_STROOPS: z.coerce.number().optional().default(100_000),
+  CONTRACT_FEE_SURGE_THRESHOLD_STROOPS: z.coerce.number().optional().default(1_000),
+  CONTRACT_FEE_SURGE_MULTIPLIER: z.coerce.number().optional().default(2),
+  CONTRACT_FEE_REFUSAL_THRESHOLD_STROOPS: z.coerce.number().optional().default(1_000_000),
+  CONTRACT_FEE_ESTIMATE_MAX_AGE_MS: z.coerce.number().optional().default(60_000),
 
   /** Path to Stellar CLI executable */
   STELLAR_CLI_PATH: optionalString(z.string().min(1)),
@@ -1007,6 +1017,21 @@ export function validateEnv(config: Record<string, unknown>) {
       "Invalid environment: PROOF_SHARE_TOKEN_DEFAULT_TTL_MINUTES must not exceed PROOF_SHARE_TOKEN_MAX_TTL_MINUTES",
     );
   }
+  // An invalid fee policy must fail at startup, never at first submission.
+  const feeErrors = validateFeePolicy({
+    baseFeeStroops: parsed.data.CONTRACT_FEE_BASE_STROOPS,
+    maxFeeStroops: parsed.data.CONTRACT_FEE_MAX_STROOPS,
+    surgeThresholdStroops: parsed.data.CONTRACT_FEE_SURGE_THRESHOLD_STROOPS,
+    surgeMultiplier: parsed.data.CONTRACT_FEE_SURGE_MULTIPLIER,
+    refusalThresholdStroops: parsed.data.CONTRACT_FEE_REFUSAL_THRESHOLD_STROOPS,
+    estimateMaxAgeMs: parsed.data.CONTRACT_FEE_ESTIMATE_MAX_AGE_MS,
+  });
+  if (feeErrors.length > 0) {
+    throw new Error(
+      `Invalid environment: invalid contract fee policy: ${feeErrors.join("; ")}`,
+    );
+  }
+
   // Check cross-variable invariants after individual field validation
   checkCrossVariableInvariants(parsed.data);
 

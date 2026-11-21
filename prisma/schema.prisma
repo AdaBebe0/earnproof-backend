@@ -149,6 +149,9 @@ enum QuarantineReasonCode {
   /// Flagged by the reconciler for a state disagreement it cannot repair
   /// automatically.
   MANUAL_REVIEW
+  /// The source account sequence stayed out of sync after bounded
+  /// reconciliation; no safe automatic retry exists.
+  SEQUENCE_DIVERGENCE
 }
 
 /// An operator's disposition of a quarantined intent. PENDING means no
