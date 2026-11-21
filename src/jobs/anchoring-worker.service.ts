@@ -17,7 +17,10 @@ import {
   AnchorProofInput,
   ContractAnchoringService,
 } from "../proofs/contract-anchoring.service";
-import { isPermanentContractError } from "../proofs/contract-error";
+import {
+  isPermanentContractError,
+  isSequenceConflict,
+} from "../proofs/contract-error";
 
 /**
  * Upper bound on how long shutdown waits for an in-flight poll cycle to
@@ -40,6 +43,14 @@ const MAX_ATTEMPTS = 10;
  * Each retry doubles the delay up to BACKOFF_CAP_MS.
  */
 const BACKOFF_BASE_MS = 30_000;
+
+/**
+ * Retry delay after a sequence conflict (`tx_bad_seq`). The node answered and
+ * the fix is simply to rebuild against the current sequence, so this is far
+ * shorter than the transport backoff, which exists to protect a struggling
+ * dependency. It still consumes an attempt, so it stays bounded.
+ */
+const SEQUENCE_CONFLICT_RETRY_MS = 5_000;
 
 /** Maximum backoff ceiling (1 hour). */
 const BACKOFF_CAP_MS = 60 * 60_000;
@@ -96,7 +107,10 @@ function isPoisonInput(message: string): boolean {
   return POISON_INPUT_PATTERNS.some((pattern) => pattern.test(message));
 }
 
-function computeNextRetryAt(attemptCount: number): Date {
+function computeNextRetryAt(attemptCount: number, message = ""): Date {
+  if (isSequenceConflict(message)) {
+    return new Date(Date.now() + SEQUENCE_CONFLICT_RETRY_MS);
+  }
   const delayMs = Math.min(
     BACKOFF_BASE_MS * Math.pow(2, attemptCount - 1),
     BACKOFF_CAP_MS,
@@ -436,13 +450,18 @@ export class AnchoringWorkerService implements OnApplicationShutdown {
         const result = await this.anchoring.anchorProof(anchorInput);
 
         if (!result.anchored) {
-          if (result.reason === "circuit_open") {
-            await this.releaseUnclaimed(id, operation, proofId);
+          if (
+            result.reason === "circuit_open" ||
+            result.reason === "sequence_busy"
+          ) {
+            await this.releaseUnclaimed(id, operation, proofId, result.reason);
             return;
           }
           // anchorProof returned anchored:false without throwing — treat as
-          // transient unless the reason is "disabled" (config issue, permanent).
-          const isFatal = result.reason === "disabled";
+          // transient unless the reason is "disabled" (config issue) or the
+          // preflight found a deterministic rejection (permanent).
+          const isFatal =
+            result.reason === "disabled" || result.failureKind === "permanent";
           throw Object.assign(
             new Error(result.error ?? `Anchoring ${result.reason}`),
             { permanent: isFatal },
@@ -454,11 +473,15 @@ export class AnchoringWorkerService implements OnApplicationShutdown {
         const result = await this.anchoring.revokeProof(proofId);
 
         if (!result.anchored) {
-          if (result.reason === "circuit_open") {
-            await this.releaseUnclaimed(id, operation, proofId);
+          if (
+            result.reason === "circuit_open" ||
+            result.reason === "sequence_busy"
+          ) {
+            await this.releaseUnclaimed(id, operation, proofId, result.reason);
             return;
           }
-          const isFatal = result.reason === "disabled";
+          const isFatal =
+            result.reason === "disabled" || result.failureKind === "permanent";
           throw Object.assign(
             new Error(result.error ?? `Revocation ${result.reason}`),
             { permanent: isFatal },
@@ -546,7 +569,7 @@ export class AnchoringWorkerService implements OnApplicationShutdown {
           `Intent ${id} QUARANTINED (${quarantineReasonCode}): ${operation} for proof ${proofId} — ${safeError}`,
         );
       } else {
-        const nextRetryAt = computeNextRetryAt(newAttemptCount);
+        const nextRetryAt = computeNextRetryAt(newAttemptCount, message);
         await this.prisma.anchoringIntent.update({
           where: { id },
           data: {
@@ -579,6 +602,7 @@ export class AnchoringWorkerService implements OnApplicationShutdown {
     id: string,
     operation: AnchoringOperation,
     proofId: string,
+    cause: "circuit_open" | "sequence_busy" = "circuit_open",
   ): Promise<void> {
     await this.prisma.anchoringIntent.update({
       where: { id },
@@ -588,7 +612,7 @@ export class AnchoringWorkerService implements OnApplicationShutdown {
       },
     });
     this.logger.warn(
-      `Intent ${id} released unclaimed (circuit open): ${operation} for proof ${proofId}`,
+      `Intent ${id} released unclaimed (${cause}): ${operation} for proof ${proofId}`,
     );
   }
 }
