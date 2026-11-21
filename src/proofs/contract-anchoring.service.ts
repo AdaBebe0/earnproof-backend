@@ -12,6 +12,13 @@ import {
   CircuitState,
 } from "../common/resilience/circuit-breaker";
 import { classifyContractError } from "./contract-error";
+import {
+  DEFAULT_FEE_POLICY,
+  FeePolicy,
+  assertValidFeePolicy,
+  decideFee,
+} from "../config/fee-policy";
+import { FeeEstimator, HorizonFeeEstimator } from "../stellar/fee-estimator";
 import { SorobanRpcResponseError } from "../common/validation/soroban-rpc.schemas";
 
 const execFileAsync = promisify(execFile);
@@ -41,7 +48,7 @@ export type AnchorProofResult =
        * the worker should hold it for a later probe rather than count an
        * attempt against it.
        */
-      reason: "disabled" | "failed" | "circuit_open";
+      reason: "disabled" | "failed" | "circuit_open" | "fee_refused";
       error?: string;
     };
 
@@ -69,6 +76,8 @@ export class ContractAnchoringService {
   private readonly issuerAddress: string | undefined;
   private readonly schemaVersion: number;
   private readonly registry?: CircuitBreakerRegistry;
+  private readonly feePolicy: FeePolicy;
+  private readonly feeEstimator: FeeEstimator;
   private readonly breakerOptions: {
     failureThreshold?: number;
     openDurationMs?: number;
@@ -84,6 +93,8 @@ export class ContractAnchoringService {
      * under a per-network, per-operation circuit breaker (issue #203).
      */
     @Optional() registry?: CircuitBreakerRegistry,
+    /** Injected by tests; production reads Horizon `/fee_stats`. */
+    @Optional() feeEstimator?: FeeEstimator,
   ) {
     this.enabled = configService.get<boolean>("contractAnchoring.enabled") ?? false;
     this.required = configService.get<boolean>("contractAnchoring.required") ?? false;
@@ -100,6 +111,19 @@ export class ContractAnchoringService {
     this.schemaVersion =
       configService.get<number>("contractAnchoring.schemaVersion") ?? 1;
     this.registry = registry;
+    this.feePolicy = this.loadFeePolicy(configService);
+    // Live estimation is opt-in by configuration (on in the production
+    // config); without it the policy runs on its base fee, never a hidden call.
+    const estimateEnabled =
+      configService.get<boolean>("contractAnchoring.fee.estimateEnabled") ?? false;
+    this.feeEstimator =
+      feeEstimator ??
+      (estimateEnabled
+        ? new HorizonFeeEstimator(
+            configService.get<string>("stellar.horizonUrl") ??
+              "https://horizon-testnet.stellar.org",
+          )
+        : { getEstimate: async () => null });
     this.breakerOptions = {
       failureThreshold: configService.get<number>(
         "contractAnchoring.circuitBreaker.failureThreshold",
@@ -114,6 +138,43 @@ export class ContractAnchoringService {
         "contractAnchoring.circuitBreaker.successThreshold",
       ),
     };
+  }
+
+  /**
+   * Reads the fee policy, falling back to defaults per field, and fails fast on
+   * an invalid combination so a bad configuration stops startup rather than the
+   * first submission.
+   */
+  private loadFeePolicy(configService: ConfigService): FeePolicy {
+    const read = (key: keyof FeePolicy) =>
+      configService.get<number>(`contractAnchoring.fee.${key}`) ??
+      DEFAULT_FEE_POLICY[key];
+    const policy: FeePolicy = {
+      baseFeeStroops: read("baseFeeStroops"),
+      maxFeeStroops: read("maxFeeStroops"),
+      surgeThresholdStroops: read("surgeThresholdStroops"),
+      surgeMultiplier: read("surgeMultiplier"),
+      refusalThresholdStroops: read("refusalThresholdStroops"),
+      estimateMaxAgeMs: read("estimateMaxAgeMs"),
+    };
+    assertValidFeePolicy(policy);
+    return policy;
+  }
+
+  /**
+   * Applies the fee policy to one mutation. The decision is logged with a safe
+   * reason code only, so each fee is auditable without exposing keys or amounts.
+   */
+  private async decideSubmissionFee(operation: string) {
+    const estimate = await this.feeEstimator.getEstimate();
+    const decision = decideFee(this.feePolicy, estimate);
+    this.logger.log("Contract fee decision", {
+      operation,
+      action: decision.action,
+      reasonCode: decision.reason,
+      ...(decision.action === "submit" ? { feeStroops: decision.feeStroops } : {}),
+    });
+    return decision;
   }
 
   /**
@@ -161,6 +222,9 @@ export class ContractAnchoringService {
       };
     }
 
+    const fee = await this.decideSubmissionFee("register");
+    if (fee.action === "refuse") return this.feeRefusedResult(fee.reason);
+
     const args = [
       "contract",
       "invoke",
@@ -168,6 +232,8 @@ export class ContractAnchoringService {
       this.source!,
       "--network",
       this.network,
+      "--fee",
+      String(fee.feeStroops),
       "--id",
       this.proofRegistryContractId!,
       "--",
@@ -240,7 +306,10 @@ export class ContractAnchoringService {
       };
     }
 
-    return this.invokeMutation("revoke_proof", [
+    const fee = await this.decideSubmissionFee("revoke");
+    if (fee.action === "refuse") return this.feeRefusedResult(fee.reason);
+
+    return this.invokeMutation(fee.feeStroops, "revoke_proof", [
       "--proof_id_hash",
       sha256(proofId),
     ]);
@@ -288,12 +357,29 @@ export class ContractAnchoringService {
     }
   }
 
-  private async invokeMutation(functionName: string, functionArgs: string[]) {
+  /**
+   * A refused fee never touches the contract and is not a failure of the
+   * intent: the worker holds it and tries again once the network calms.
+   */
+  private feeRefusedResult(
+    reasonCode: string,
+  ): { anchored: false; reason: "fee_refused"; error: string } {
+    const message = `Contract submission refused by fee policy: ${reasonCode}`;
+    if (this.required) throw new Error(message);
+    this.logger.warn(message);
+    return { anchored: false, reason: "fee_refused", error: message };
+  }
+
+  private async invokeMutation(
+    feeStroops: number,
+    functionName: string,
+    functionArgs: string[],
+  ) {
     try {
       const { stdout } = await this.guarded("revoke", () =>
         execFileAsync(
           this.stellarCliPath,
-          this.contractInvokeArgs(functionName, functionArgs, true),
+          this.contractInvokeArgs(functionName, functionArgs, true, feeStroops),
           {
             windowsHide: true,
             timeout: 120_000,
@@ -341,10 +427,14 @@ export class ContractAnchoringService {
     functionName: string,
     functionArgs: string[],
     includeSource: boolean,
+    feeStroops?: number,
   ) {
     const args = ["contract", "invoke"];
     if (includeSource) {
       args.push("--source", this.source!);
+    }
+    if (feeStroops !== undefined) {
+      args.push("--fee", String(feeStroops));
     }
 
     args.push(
