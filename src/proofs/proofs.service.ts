@@ -107,6 +107,7 @@ import { RevokeProofDto } from "./dto/revoke-proof.dto";
 import { RenewProofDto } from "./dto/renew-proof.dto";
 import { SignedCursorService } from "../common/pagination/signed-cursor.service";
 import { computeFilterIdFromDto } from "../common/pagination/filter-id";
+import { throwIfRequestAborted } from "../common/request-context/request-abort";
 import {
   evaluateRenewalEligibility,
   evaluateSupersessionCompatibility,
@@ -1012,6 +1013,8 @@ export class ProofsService {
         issuedFrom || issuedTo ? { gte: issuedFrom, lte: issuedTo } : undefined,
       ...(cursorWhere as Prisma.ProofWhereInput),
     };
+    // Do not start a list query for a client that has already gone away.
+    throwIfRequestAborted();
     const proofs = await this.prisma.proof.findMany({
       where,
       orderBy: cursorOrderBy("createdAt"),

@@ -4410,3 +4410,57 @@ model OfflineBundle {
   @@index([organizationId, createdAt])
   @@index([expiresAt])
 }
+
+enum ContractEventGapStatus {
+  /// Missing range recorded; waiting for a backfill to claim it.
+  DETECTED
+  /// A backfill worker holds the range.
+  BACKFILLING
+  /// Every ledger in the range has been covered.
+  RESOLVED
+  /// The range can no longer be recovered (provider retention or retries exhausted).
+  IRRECOVERABLE
+}
+
+/// How far live ingestion has seen a contract event stream. Gaps below this
+/// ledger are recorded in ContractEventGap rather than implied by the cursor.
+model ContractEventCursor {
+  /// `<network>:<contractId>`
+  streamKey          String   @id
+  highestSeenLedger  Int
+  /// Optimistic concurrency guard: every update must match the version it read.
+  version            Int      @default(0)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+}
+
+/// A durable record of a ledger range of contract events that has not been
+/// projected. Partially backfilled ranges shrink to what remains.
+model ContractEventGap {
+  id            String                 @id @default(cuid())
+  streamKey     String
+  fromLedger    Int
+  toLedger      Int
+  status        ContractEventGapStatus @default(DETECTED)
+  attempts      Int                    @default(0)
+  /// Stable reason code only; never raw provider output.
+  failureReason String?
+  detectedAt    DateTime               @default(now())
+  resolvedAt    DateTime?
+  updatedAt     DateTime               @updatedAt
+
+  @@unique([streamKey, fromLedger, toLedger])
+  @@index([status, streamKey, fromLedger])
+}
+
+/// Events already applied to the projection. The primary key makes applying an
+/// event idempotent across live ingestion and backfill.
+model ContractEventApplied {
+  streamKey String
+  eventId   String
+  ledger    Int
+  appliedAt DateTime @default(now())
+
+  @@id([streamKey, eventId])
+  @@index([streamKey, ledger])
+}

@@ -15,6 +15,10 @@ import {
 } from "../dto/api-error.dto";
 import { REQUEST_ID_HEADER } from "../interceptors/request-id.interceptor";
 import { randomBytes } from "crypto";
+import { RequestAbortedError } from "../request-context/request-abort";
+
+/** Non-standard but widely used status for "client closed request". */
+const CLIENT_CLOSED_REQUEST = 499;
 
 // ─── Prisma error-code buckets ───────────────────────────────────────────────
 // P2002 – unique constraint violation
@@ -73,6 +77,8 @@ export class GlobalExceptionFilter implements ExceptionFilter {
         `[${requestId}] ${statusCode} ${code}: ${this.safeMessage(exception)}`,
         exception instanceof Error ? exception.stack : undefined,
       );
+    } else if (statusCode === CLIENT_CLOSED_REQUEST) {
+      this.logger.debug(`[${requestId}] ${statusCode} ${code}`);
     } else {
       this.logger.warn(`[${requestId}] ${statusCode} ${code}: ${message}`);
     }
@@ -100,6 +106,16 @@ export class GlobalExceptionFilter implements ExceptionFilter {
     violations?: FieldViolationDto[];
     currentRevision?: number;
   } {
+    // A client disconnect is a cancellation, not a fault: never an
+    // INTERNAL_ERROR, and never logged as one.
+    if (exception instanceof RequestAbortedError) {
+      return {
+        statusCode: CLIENT_CLOSED_REQUEST,
+        code: ApiErrorCode.REQUEST_ABORTED,
+        message: "The request was aborted before it completed.",
+      };
+    }
+
     // ── NestJS HTTP exceptions ───────────────────────────────────────────────
     if (exception instanceof HttpException) {
       return this.classifyHttpException(exception);
