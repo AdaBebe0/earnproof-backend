@@ -12,6 +12,7 @@ import {
   CircuitState,
 } from "../common/resilience/circuit-breaker";
 import { classifyContractError } from "./contract-error";
+import { SorobanRpcResponseError } from "../common/validation/soroban-rpc.schemas";
 
 const execFileAsync = promisify(execFile);
 
@@ -382,8 +383,18 @@ export class ContractAnchoringService {
     return lines.at(-1) ?? "";
   }
 
+  /**
+   * Strict boolean read. Anything other than a literal `true`/`false` is a
+   * malformed response and fails closed: silently reading garbage as `false`
+   * would report a revoked proof as not revoked.
+   */
   private parseBoolean(value: string) {
-    return value.trim().toLowerCase() === "true";
+    const normalized = value.trim().toLowerCase();
+    if (normalized === "true") return true;
+    if (normalized === "false") return false;
+    throw new SorobanRpcResponseError("SOROBAN_RPC_RESPONSE_MALFORMED", "simulation", [
+      "result",
+    ]);
   }
 }
 
