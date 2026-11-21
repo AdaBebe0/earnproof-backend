@@ -1,4 +1,4 @@
-import { Injectable, Logger, Optional } from "@nestjs/common";
+import { Inject, Injectable, Logger, Optional } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { execFile } from "child_process";
 import { randomUUID } from "crypto";
@@ -29,6 +29,14 @@ import {
   isPermanentRejection,
   SimulationPolicy,
 } from "./soroban/simulation-policy";
+import {
+  DEFAULT_FEE_POLICY,
+  FeePolicy,
+  assertValidFeePolicy,
+  decideFee,
+} from "../config/fee-policy";
+import { FeeEstimator, HorizonFeeEstimator } from "../stellar/fee-estimator";
+import { SorobanRpcResponseError } from "../common/validation/soroban-rpc.schemas";
 
 const execFileAsync = promisify(execFile);
 
@@ -60,7 +68,12 @@ export type AnchorProofResult =
        * `sequence_busy` means another worker holds this source account, so
        * nothing was built or submitted; it is released the same way.
        */
-      reason: "disabled" | "failed" | "circuit_open" | "sequence_busy";
+      reason:
+        | "disabled"
+        | "failed"
+        | "circuit_open"
+        | "sequence_busy"
+        | "fee_refused";
       error?: string;
       /**
        * Set when `reason` is `failed` and the failure is not a plain transient
@@ -93,8 +106,11 @@ export class ContractAnchoringService {
   private readonly issuerAddress: string | undefined;
   private readonly schemaVersion: number;
   private readonly registry?: CircuitBreakerRegistry;
+  private readonly rpc?: SorobanRpcClient;
   private readonly simulationPolicy: SimulationPolicy;
   private readonly simulationEnabled: boolean;
+  private readonly feePolicy: FeePolicy;
+  private readonly feeEstimator: FeeEstimator;
   private readonly breakerOptions: {
     failureThreshold?: number;
     openDurationMs?: number;
@@ -115,9 +131,12 @@ export class ContractAnchoringService {
      * them the service behaves exactly as before (no preflight, no source
      * serialisation, no audit trail).
      */
-    @Optional() private readonly rpc?: SorobanRpcClient,
+    @Inject(SorobanRpcClient)
+    @Optional()
+    rpcOrFeeEstimator?: SorobanRpcClient | FeeEstimator,
     @Optional() private readonly sequences?: SequenceCoordinatorPort,
     @Optional() private readonly audit?: SimulationAuditPort,
+    @Optional() feeEstimator?: FeeEstimator,
   ) {
     this.enabled = configService.get<boolean>("contractAnchoring.enabled") ?? false;
     this.required = configService.get<boolean>("contractAnchoring.required") ?? false;
@@ -134,6 +153,14 @@ export class ContractAnchoringService {
     this.schemaVersion =
       configService.get<number>("contractAnchoring.schemaVersion") ?? 1;
     this.registry = registry;
+    const thirdArgumentIsFeeEstimator = Boolean(
+      rpcOrFeeEstimator &&
+        "getEstimate" in rpcOrFeeEstimator &&
+        !("simulateTransaction" in rpcOrFeeEstimator),
+    );
+    this.rpc = thirdArgumentIsFeeEstimator
+      ? undefined
+      : (rpcOrFeeEstimator as SorobanRpcClient | undefined);
     this.simulationPolicy = {
       maxMinResourceFee: BigInt(
         configService.get<number>("contractAnchoring.simulation.maxMinResourceFee") ??
@@ -158,6 +185,20 @@ export class ContractAnchoringService {
     this.simulationEnabled =
       (configService.get<boolean>("contractAnchoring.simulation.enabled") ?? true) &&
       Boolean(this.rpc?.configured);
+    this.feePolicy = this.loadFeePolicy(configService);
+    const injectedFeeEstimator = thirdArgumentIsFeeEstimator
+      ? (rpcOrFeeEstimator as FeeEstimator)
+      : feeEstimator;
+    const estimateEnabled =
+      configService.get<boolean>("contractAnchoring.fee.estimateEnabled") ?? false;
+    this.feeEstimator =
+      injectedFeeEstimator ??
+      (estimateEnabled
+        ? new HorizonFeeEstimator(
+            configService.get<string>("stellar.horizonUrl") ??
+              "https://horizon-testnet.stellar.org",
+          )
+        : { getEstimate: async () => null });
     this.breakerOptions = {
       failureThreshold: configService.get<number>(
         "contractAnchoring.circuitBreaker.failureThreshold",
@@ -172,6 +213,34 @@ export class ContractAnchoringService {
         "contractAnchoring.circuitBreaker.successThreshold",
       ),
     };
+  }
+
+  private loadFeePolicy(configService: ConfigService): FeePolicy {
+    const read = (key: keyof FeePolicy) =>
+      configService.get<number>(`contractAnchoring.fee.${key}`) ??
+      DEFAULT_FEE_POLICY[key];
+    const policy: FeePolicy = {
+      baseFeeStroops: read("baseFeeStroops"),
+      maxFeeStroops: read("maxFeeStroops"),
+      surgeThresholdStroops: read("surgeThresholdStroops"),
+      surgeMultiplier: read("surgeMultiplier"),
+      refusalThresholdStroops: read("refusalThresholdStroops"),
+      estimateMaxAgeMs: read("estimateMaxAgeMs"),
+    };
+    assertValidFeePolicy(policy);
+    return policy;
+  }
+
+  private async decideSubmissionFee(operation: string) {
+    const estimate = await this.feeEstimator.getEstimate();
+    const decision = decideFee(this.feePolicy, estimate);
+    this.logger.log("Contract fee decision", {
+      operation,
+      action: decision.action,
+      reasonCode: decision.reason,
+      ...(decision.action === "submit" ? { feeStroops: decision.feeStroops } : {}),
+    });
+    return decision;
   }
 
   /**
@@ -257,6 +326,15 @@ export class ContractAnchoringService {
     return { anchored: false, reason: "circuit_open" };
   }
 
+  private feeRefusedResult(
+    reasonCode: string,
+  ): { anchored: false; reason: "fee_refused"; error: string } {
+    const message = `Contract submission refused by fee policy: ${reasonCode}`;
+    if (this.required) throw new Error(message);
+    this.logger.warn(message);
+    return { anchored: false, reason: "fee_refused", error: message };
+  }
+
   async revokeProof(proofId: string): Promise<AnchorProofResult> {
     if (!this.enabled || !this.hasRequiredConfig()) {
       return {
@@ -327,6 +405,9 @@ export class ContractAnchoringService {
     proofId: string;
     label: string;
   }): Promise<AnchorProofResult> {
+    const fee = await this.decideSubmissionFee(call.operation);
+    if (fee.action === "refuse") return this.feeRefusedResult(fee.reason);
+
     let lease: SequenceLease | null = null;
     try {
       if (this.sequences) {
@@ -346,7 +427,7 @@ export class ContractAnchoringService {
       }
 
       const transactionHash = await this.guarded(call.operation, () =>
-        this.simulateThenSubmit(call, lease),
+        this.simulateThenSubmit(call, lease, fee.feeStroops),
       );
       return { anchored: true, transactionHash };
     } catch (error) {
@@ -380,12 +461,13 @@ export class ContractAnchoringService {
   private async simulateThenSubmit(
     call: { functionName: string; functionArgs: string[]; proofId: string },
     lease: SequenceLease | null,
+    feeStroops: number,
   ): Promise<string> {
     const correlationId = randomUUID();
 
     // Everything up to and including the verdict happens before the signing
     // call below, so a rejected simulation never reaches a secret.
-    await this.preflight(call, correlationId);
+    await this.preflight(call, correlationId, feeStroops);
 
     if (lease && !(await this.sequences!.renew(lease))) {
       throw new ContractSubmissionError(
@@ -401,7 +483,13 @@ export class ContractAnchoringService {
     );
     const { stdout } = await execFileAsync(
       this.stellarCliPath,
-      this.contractInvokeArgs(call.functionName, call.functionArgs, true),
+      this.contractInvokeArgs(
+        call.functionName,
+        call.functionArgs,
+        true,
+        [],
+        feeStroops,
+      ),
       { windowsHide: true, timeout: 120_000 },
     );
     const transactionHash = this.lastOutputLine(stdout);
@@ -421,6 +509,7 @@ export class ContractAnchoringService {
   private async preflight(
     call: { functionName: string; functionArgs: string[]; proofId: string },
     correlationId: string,
+    feeStroops: number,
   ): Promise<void> {
     if (!this.simulationEnabled) return;
 
@@ -428,7 +517,7 @@ export class ContractAnchoringService {
       this.stellarCliPath,
       this.contractInvokeArgs(call.functionName, call.functionArgs, true, [
         "--build-only",
-      ]),
+      ], feeStroops),
       { windowsHide: true, timeout: 60_000 },
     );
     const builtXdr = this.lastOutputLine(stdout);
@@ -503,10 +592,14 @@ export class ContractAnchoringService {
     functionArgs: string[],
     includeSource: boolean,
     extraFlags: string[] = [],
+    feeStroops?: number,
   ) {
     const args = ["contract", "invoke"];
     if (includeSource) {
       args.push("--source", this.source!);
+    }
+    if (feeStroops !== undefined) {
+      args.push("--fee", String(feeStroops));
     }
 
     args.push(
@@ -547,7 +640,12 @@ export class ContractAnchoringService {
   }
 
   private parseBoolean(value: string) {
-    return value.trim().toLowerCase() === "true";
+    const normalized = value.trim().toLowerCase();
+    if (normalized === "true") return true;
+    if (normalized === "false") return false;
+    throw new SorobanRpcResponseError("SOROBAN_RPC_RESPONSE_MALFORMED", "simulation", [
+      "result",
+    ]);
   }
 }
 

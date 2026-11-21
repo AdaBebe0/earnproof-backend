@@ -41,6 +41,7 @@ import { BulkAdminController } from "./bulk-admin/bulk-admin.controller";
 import { MetricsModule } from "../metrics/metrics.module";
 import { MetricsRollupJob } from "./metrics-rollup.job";
 import { ApiKeyExpirationJob } from "./api-key-expiration.job";
+import { ContractEventGapService } from "./contract-event-gap.service";
 
 @Module({
   imports: [
@@ -88,6 +89,7 @@ import { ApiKeyExpirationJob } from "./api-key-expiration.job";
     RevocationPropagationReconcilerService,
     BulkAdminService,
     MetricsRollupJob,
+    ContractEventGapService,
   ],
   exports: [
     AnchoringWorkerService,
@@ -104,6 +106,7 @@ import { ApiKeyExpirationJob } from "./api-key-expiration.job";
     RevocationPropagationReconcilerService,
     BulkAdminService,
     ApiKeyExpirationJob,
+    ContractEventGapService,
   ],
 })
 export class JobsModule {}

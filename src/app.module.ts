@@ -18,6 +18,7 @@ import { DatabaseModule } from "./database/database.module";
 import { DisputesModule } from "./disputes/disputes.module";
 import { HealthModule } from "./health/health.module";
 import { IntegrationsModule } from "./integrations/integrations.module";
+import { RequestAbortInterceptor } from "./common/interceptors/request-abort.interceptor";
 import { HttpMetricsInterceptor } from "./common/interceptors/http-metrics.interceptor";
 import { IdempotentInterceptor } from "./common/interceptors/idempotent.interceptor";
 import { ObservabilityModule } from "./common/observability/observability.module";
@@ -85,6 +86,10 @@ import { SecurityModule } from "./security/security.module";
     SecurityModule,
   ],
   providers: [
+    {
+      provide: APP_INTERCEPTOR,
+      useClass: RequestAbortInterceptor,
+    },
     {
       provide: APP_INTERCEPTOR,
       useClass: HttpMetricsInterceptor,
